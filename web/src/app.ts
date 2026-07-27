@@ -81,16 +81,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return await response.json() as T;
 }
 
-async function postForm<T>(path: string, values: Record<string, string>): Promise<T> {
-  return await request<T>(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams(values),
-  });
-}
-
 function statusMessage(message: string, error = false): HTMLElement {
   const output = element("p", message);
   output.className = error ? "error" : "message";
@@ -187,7 +177,7 @@ async function renderRoot(message?: string): Promise<void> {
     "engineering",
     "Create group",
     async (name) => {
-      await postForm("/api/groups", {path: name});
+      await request(apiGroupURL(name), {method: "POST"});
       await renderRoot("Group created.");
     },
   );
@@ -230,7 +220,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     "backend",
     "Create subgroup",
     async (name) => {
-      await postForm("/api/groups", {path: `${data.path}/${name}`});
+      await request(apiGroupURL(`${data.path}/${name}`), {method: "POST"});
       await renderGroup(data.path, "Subgroup created.");
     },
   ));
@@ -241,7 +231,8 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     "api",
     "Create repository",
     async (name) => {
-      await postForm("/api/repositories", {group: data.path, name});
+      const repositoryPath = encodeURIComponent(`${data.path}/${name}`);
+      await request(`/api/repositories/${repositoryPath}`, {method: "POST"});
       await renderGroup(data.path, "Repository created.");
     },
   ));

@@ -53,15 +53,6 @@ async function request(path, init) {
     }
     return await response.json();
 }
-async function postForm(path, values) {
-    return await request(path, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams(values),
-    });
-}
 function statusMessage(message, error = false) {
     const output = element("p", message);
     output.className = error ? "error" : "message";
@@ -142,7 +133,7 @@ async function renderRoot(message) {
     groups.append(element("h2", "Groups"), groupList(data.groups));
     app.append(groups);
     const form = createForm("Create group", "Group name", "engineering", "Create group", async (name) => {
-        await postForm("/api/groups", { path: name });
+        await request(apiGroupURL(name), { method: "POST" });
         await renderRoot("Group created.");
     });
     const explanation = element("p", "The authenticated Basic Auth user becomes the group owner.");
@@ -176,11 +167,12 @@ async function renderGroup(path, message) {
     }
     app.append(repositories);
     app.append(createForm("Create subgroup", "Subgroup name", "backend", "Create subgroup", async (name) => {
-        await postForm("/api/groups", { path: `${data.path}/${name}` });
+        await request(apiGroupURL(`${data.path}/${name}`), { method: "POST" });
         await renderGroup(data.path, "Subgroup created.");
     }));
     app.append(createForm("Create repository", "Repository name", "api", "Create repository", async (name) => {
-        await postForm("/api/repositories", { group: data.path, name });
+        const repositoryPath = encodeURIComponent(`${data.path}/${name}`);
+        await request(`/api/repositories/${repositoryPath}`, { method: "POST" });
         await renderGroup(data.path, "Repository created.");
     }));
 }

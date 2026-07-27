@@ -2,10 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
-	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -59,15 +56,6 @@ type groupDetailOutput struct {
 	}
 }
 
-type createGroupBody struct {
-	Path string `json:"path" minLength:"1" doc:"Full group path"`
-}
-
-type createGroupInput struct {
-	AuthInput
-	Body createGroupBody `contentType:"application/x-www-form-urlencoded"`
-}
-
 type createGroupOutput struct {
 	Body struct {
 		Path string `json:"path"`
@@ -81,16 +69,6 @@ type renameGroupBody struct {
 type renameGroupInput struct {
 	GroupPathInput
 	Body renameGroupBody
-}
-
-type createRepositoryBody struct {
-	Group string `json:"group" minLength:"1"`
-	Name  string `json:"name" minLength:"1"`
-}
-
-type createRepositoryInput struct {
-	AuthInput
-	Body createRepositoryBody `contentType:"application/x-www-form-urlencoded"`
 }
 
 type createRepositoryOutput struct {
@@ -125,8 +103,6 @@ func Register(mux *http.ServeMux, service API) huma.API {
 			Description: "GitOne HTTP Basic authentication",
 		},
 	}
-	config.Formats = cloneFormats(config.Formats)
-	config.Formats["application/x-www-form-urlencoded"] = formFormat()
 	api := humago.New(mux, config)
 
 	huma.Register(api, huma.Operation{
@@ -156,7 +132,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 	huma.Register(api, protected(huma.Operation{
 		OperationID:   "create-group",
 		Method:        http.MethodPost,
-		Path:          "/api/groups",
+		Path:          "/api/groups/{path}",
 		Summary:       "Create a group",
 		Tags:          []string{"Groups"},
 		DefaultStatus: http.StatusCreated,
@@ -183,7 +159,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 	huma.Register(api, protected(huma.Operation{
 		OperationID:   "create-repository",
 		Method:        http.MethodPost,
-		Path:          "/api/repositories",
+		Path:          "/api/repositories/{path}",
 		Summary:       "Create a repository",
 		Tags:          []string{"Repositories"},
 		DefaultStatus: http.StatusCreated,
@@ -299,8 +275,8 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	return output, nil
 }
 
-func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createGroupOutput, error) {
-	path, err := canonicalGroup(input.Body.Path)
+func (a API) createGroup(ctx context.Context, input *GroupPathInput) (*createGroupOutput, error) {
+	path, err := canonicalGroup(input.Path)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
@@ -348,8 +324,8 @@ func (a API) deleteGroup(ctx context.Context, input *GroupPathInput) (*emptyOutp
 	return &emptyOutput{}, nil
 }
 
-func (a API) createRepository(ctx context.Context, input *createRepositoryInput) (*createRepositoryOutput, error) {
-	repository, err := repositoryFrom(input.Body.Group, input.Body.Name)
+func (a API) createRepository(ctx context.Context, input *RepositoryPathInput) (*createRepositoryOutput, error) {
+	repository, err := parseRepositoryPath(input.Path)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
@@ -425,11 +401,6 @@ func canonicalGroup(value string) (string, error) {
 	return strings.Join(parts, "/"), nil
 }
 
-func repositoryFrom(group, name string) (repopath.Repository, error) {
-	name = strings.TrimSuffix(name, ".git")
-	return parseRepositoryPath(group + "/" + name)
-}
-
 func parseRepositoryPath(value string) (repopath.Repository, error) {
 	repository, _, err := repopath.ParseGitRequestPath("/" + strings.TrimSuffix(value, ".git") + ".git/info/refs")
 	return repository, err
@@ -444,44 +415,4 @@ func protected(operation huma.Operation) huma.Operation {
 		next(ctx)
 	})
 	return operation
-}
-
-func cloneFormats(source map[string]huma.Format) map[string]huma.Format {
-	formats := make(map[string]huma.Format, len(source)+1)
-	for name, format := range source {
-		formats[name] = format
-	}
-	return formats
-}
-
-func formFormat() huma.Format {
-	return huma.Format{
-		Marshal: func(writer io.Writer, value any) error {
-			return json.NewEncoder(writer).Encode(value)
-		},
-		Unmarshal: func(data []byte, value any) error {
-			values, err := url.ParseQuery(string(data))
-			if err != nil {
-				return err
-			}
-			document := make(map[string]any, len(values))
-			for name, entries := range values {
-				switch len(entries) {
-				case 0:
-					document[name] = ""
-				case 1:
-					document[name] = entries[0]
-				default:
-					document[name] = entries
-				}
-			}
-			encoded, err := json.Marshal(document)
-			if err != nil {
-				return err
-			}
-			decoder := json.NewDecoder(strings.NewReader(string(encoded)))
-			decoder.DisallowUnknownFields()
-			return decoder.Decode(value)
-		},
-	}
 }

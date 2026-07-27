@@ -22,8 +22,7 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 		BootstrapUser:  "alice",
 		BootstrapToken: "secret",
 	})
-	request := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering"))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request := httptest.NewRequest(http.MethodPost, "/api/groups/engineering", nil)
 	request.SetBasicAuth("alice", "secret")
 	response := httptest.NewRecorder()
 
@@ -42,27 +41,42 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 	if len(document.Tokens) != 0 {
 		t.Fatalf("expected no generated tokens, got %#v", document.Tokens)
 	}
+
+	subgroupRequest := httptest.NewRequest(http.MethodPost, "/api/groups/engineering%2Fbackend", nil)
+	subgroupRequest.SetBasicAuth("alice", "secret")
+	subgroupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(subgroupResponse, subgroupRequest)
+	if subgroupResponse.Code != http.StatusCreated {
+		t.Fatalf("create subgroup: status %d: %s", subgroupResponse.Code, subgroupResponse.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "engineering", "backend")); err != nil {
+		t.Fatalf("subgroup was not created: %v", err)
+	}
 }
 
-func TestCreateGroupRejectsUnknownFormFields(t *testing.T) {
+func TestLegacyCreateGroupEndpointIsRemoved(t *testing.T) {
+	root := t.TempDir()
 	handler := New(Config{
-		Root:           t.TempDir(),
+		Root:           root,
 		BootstrapUser:  "alice",
 		BootstrapToken: "secret",
 	})
-	request := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering&owner=mallory"))
+	request := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.SetBasicAuth("alice", "secret")
 	response := httptest.NewRecorder()
 
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusUnprocessableEntity, response.Code, response.Body.String())
+	if response.Code >= http.StatusOK && response.Code < http.StatusMultipleChoices {
+		t.Fatalf("legacy endpoint unexpectedly succeeded with status %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "engineering")); !os.IsNotExist(err) {
+		t.Fatalf("legacy endpoint unexpectedly created a group: %v", err)
 	}
 }
 
-func TestCreateRepositoryFromURLEncodedForm(t *testing.T) {
+func TestCreateRepositoryFromPath(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
 		Root:           root,
@@ -70,8 +84,7 @@ func TestCreateRepositoryFromURLEncodedForm(t *testing.T) {
 		BootstrapToken: "secret",
 	})
 
-	createGroup := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering"))
-	createGroup.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createGroup := httptest.NewRequest(http.MethodPost, "/api/groups/engineering", nil)
 	createGroup.SetBasicAuth("alice", "secret")
 	groupResponse := httptest.NewRecorder()
 	handler.ServeHTTP(groupResponse, createGroup)
@@ -79,8 +92,7 @@ func TestCreateRepositoryFromURLEncodedForm(t *testing.T) {
 		t.Fatalf("create group: status %d: %s", groupResponse.Code, groupResponse.Body.String())
 	}
 
-	createRepository := httptest.NewRequest(http.MethodPost, "/api/repositories", strings.NewReader("group=engineering&name=api"))
-	createRepository.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createRepository := httptest.NewRequest(http.MethodPost, "/api/repositories/engineering%2Fapi", nil)
 	createRepository.SetBasicAuth("alice", "secret")
 	repositoryResponse := httptest.NewRecorder()
 	handler.ServeHTTP(repositoryResponse, createRepository)
@@ -239,7 +251,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		}
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=2">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 	}
@@ -250,6 +262,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	handler.ServeHTTP(assetResponse, assetRequest)
 	if assetResponse.Code != http.StatusOK || !strings.Contains(assetResponse.Body.String(), "renderGroup") {
 		t.Fatalf("TypeScript asset was not served: %d", assetResponse.Code)
+	}
+	if assetResponse.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("unexpected asset cache policy: %q", assetResponse.Header().Get("Cache-Control"))
+	}
+	if !strings.Contains(assetResponse.Body.String(), "request(apiGroupURL(name), { method: \"POST\" })") {
+		t.Fatal("served UI does not use the path-based group creation endpoint")
 	}
 
 	for _, path := range []string{"/docs", "/openapi.json"} {

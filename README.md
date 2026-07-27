@@ -66,10 +66,10 @@ make ui
 | --- | --- | --- |
 | `GET` | `/api/groups` | List accessible top-level groups. |
 | `GET` | `/api/groups/{path}` | Get a group’s immediate subgroups and repositories. |
-| `POST` | `/api/groups` | Create a group. URL-encoded field: `path`. |
+| `POST` | `/api/groups/{path}` | Create a group. `path` is the URL-encoded full group path. |
 | `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
-| `POST` | `/api/repositories` | Create a repository. URL-encoded fields: `group`, `name`. |
+| `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |
 
@@ -97,23 +97,22 @@ make ui
 Create the first group with the bootstrap credentials:
 
 ```bash
-curl -u bootstrap:replace-me -X POST http://localhost:8080/api/groups \
-  --data-urlencode 'path=engineering'
+curl -u bootstrap:replace-me -X POST \
+  http://localhost:8080/api/groups/engineering
 ```
 
 Create a subgroup using an owner/admin token inherited from its parent:
 
 ```bash
-curl -u bootstrap:replace-me -X POST http://localhost:8080/api/groups \
-  --data-urlencode 'path=engineering/backend'
+curl -u bootstrap:replace-me -X POST \
+  http://localhost:8080/api/groups/engineering%2Fbackend
 ```
 
 Create a repository:
 
 ```bash
-curl -u bootstrap:replace-me -X POST http://localhost:8080/api/repositories \
-  --data-urlencode 'group=engineering/backend' \
-  --data-urlencode 'name=api'
+curl -u bootstrap:replace-me -X POST \
+  http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi
 ```
 
 List top-level groups:
