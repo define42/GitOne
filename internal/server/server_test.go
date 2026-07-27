@@ -3,16 +3,21 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	gittransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
 func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
@@ -92,7 +97,7 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 		t.Fatalf("create group: status %d: %s", groupResponse.Code, groupResponse.Body.String())
 	}
 
-	createRepository := httptest.NewRequest(http.MethodPost, "/api/repositories/engineering%2Fapi", nil)
+	createRepository := httptest.NewRequest(http.MethodPost, "/api/repositories/engineering%2Fapi?initializeReadme=true", nil)
 	createRepository.SetBasicAuth("alice", "secret")
 	repositoryResponse := httptest.NewRecorder()
 	handler.ServeHTTP(repositoryResponse, createRepository)
@@ -102,6 +107,29 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(root, "engineering", "api.git")); err != nil {
 		t.Fatalf("repository was not created: %v", err)
+	}
+	storedRepository, err := git.PlainOpen(filepath.Join(root, "engineering", "api.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := storedRepository.Head()
+	if err != nil {
+		t.Fatalf("repository was not initialized: %v", err)
+	}
+	initialCommit, err := storedRepository.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme, err := initialCommit.File("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readmeContents, err := readme.Contents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readmeContents != "api\n" {
+		t.Fatalf("unexpected README.md contents: %q", readmeContents)
 	}
 
 	unauthenticatedGit := httptest.NewRequest(http.MethodGet, "/engineering/api.git/info/refs?service=git-upload-pack", nil)
@@ -158,6 +186,126 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 	}
 }
 
+func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
+	handler := New(Config{
+		Root:           t.TempDir(),
+		BootstrapUser:  "alice",
+		BootstrapToken: "secret",
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	create := func(path string) {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodPost, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.SetBasicAuth("alice", "secret")
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		if response.StatusCode != http.StatusCreated {
+			t.Fatalf("%s: expected status %d, got %d: %s", path, http.StatusCreated, response.StatusCode, body)
+		}
+	}
+
+	create("/api/groups/doh")
+	create("/api/groups/doh%2Fwhaat")
+	create("/api/repositories/doh%2Fwhaat%2Fhello?initializeReadme=true")
+
+	checkout := filepath.Join(t.TempDir(), "hello")
+	credentials := &gittransport.BasicAuth{
+		Username: "alice",
+		Password: "secret",
+	}
+	clonedRepository, err := git.PlainClone(checkout, false, &git.CloneOptions{
+		URL:  server.URL + "/doh/whaat/hello.git",
+		Auth: credentials,
+	})
+	if err != nil {
+		t.Fatalf("clone repository: %v", err)
+	}
+	head, err := clonedRepository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Name().Short() != "main" {
+		t.Fatalf("expected checked-out branch main, got %q", head.Name().Short())
+	}
+	gitDirectory, err := os.Stat(filepath.Join(checkout, ".git"))
+	if err != nil {
+		t.Fatalf("cloned Git repository does not exist: %v", err)
+	}
+	if !gitDirectory.IsDir() {
+		t.Fatal("cloned .git path is not a directory")
+	}
+	readme, err := os.ReadFile(filepath.Join(checkout, "README.md"))
+	if err != nil {
+		t.Fatalf("cloned README.md does not exist: %v", err)
+	}
+	if string(readme) != "hello\n" {
+		t.Fatalf("unexpected cloned README.md contents: %q", readme)
+	}
+
+	updatedReadme := append(readme, []byte("Updated through Git Smart HTTP.\n")...)
+	if err = os.WriteFile(filepath.Join(checkout, "README.md"), updatedReadme, 0644); err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := clonedRepository.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Add("README.md"); err != nil {
+		t.Fatal(err)
+	}
+	pushedCommit, err := worktree.Commit("Update README", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "alice",
+			Email: "alice@localhost",
+			When:  time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = clonedRepository.Push(&git.PushOptions{Auth: credentials}); err != nil {
+		t.Fatalf("push repository: %v", err)
+	}
+
+	verificationCheckout := filepath.Join(t.TempDir(), "hello")
+	verifiedRepository, err := git.PlainClone(verificationCheckout, false, &git.CloneOptions{
+		URL:  server.URL + "/doh/whaat/hello.git",
+		Auth: credentials,
+	})
+	if err != nil {
+		t.Fatalf("clone pushed repository: %v", err)
+	}
+	verifiedHead, err := verifiedRepository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verifiedHead.Hash() != pushedCommit {
+		t.Fatalf("expected pushed commit %s, got %s", pushedCommit, verifiedHead.Hash())
+	}
+	verifiedReadme, err := os.ReadFile(filepath.Join(verificationCheckout, "README.md"))
+	if err != nil {
+		t.Fatalf("pushed README.md does not exist: %v", err)
+	}
+	if string(verifiedReadme) != string(updatedReadme) {
+		t.Fatalf("unexpected pushed README.md contents: %q", verifiedReadme)
+	}
+}
+
 func TestHumaGroupNavigationAPI(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}
@@ -167,10 +315,10 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	if err := store.CreateGroup("engineering/backend", "alice"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateRepository(repopath.Repository{Groups: []string{"engineering"}, Name: "web"}); err != nil {
+	if err := store.CreateRepository(repopath.Repository{Groups: []string{"engineering"}, Name: "web"}, storage.CreateRepositoryOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateRepository(repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "api"}); err != nil {
+	if err := store.CreateRepository(repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "api"}, storage.CreateRepositoryOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	handler := New(Config{
@@ -270,7 +418,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		}
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=3">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=4">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 	}
@@ -291,6 +439,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if !strings.Contains(assetResponse.Body.String(), "navigator.clipboard") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryURL(data.path, repository)") {
 		t.Fatal("served UI does not provide copyable full repository URLs")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "initializeReadme.checked = true") {
+		t.Fatal("served UI does not default the README initialization option to checked")
 	}
 
 	for _, path := range []string{"/docs", "/openapi.json"} {

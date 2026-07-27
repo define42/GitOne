@@ -69,7 +69,7 @@ make ui
 | `POST` | `/api/groups/{path}` | Create a group. `path` is the URL-encoded full group path. |
 | `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
-| `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. |
+| `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameter `initializeReadme=true` creates `README.md` on `main`. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |
 
@@ -112,7 +112,7 @@ Create a repository:
 
 ```bash
 curl -u bootstrap:replace-me -X POST \
-  http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi
+  'http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi?initializeReadme=true'
 ```
 
 Clone the repository and enter the bootstrap token when Git prompts for a password:

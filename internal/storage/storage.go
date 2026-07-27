@@ -17,6 +17,11 @@ import (
 
 type Store struct{ Root string }
 
+type CreateRepositoryOptions struct {
+	InitializeReadme bool
+	Author           string
+}
+
 type GroupInfo struct {
 	Path         string
 	Repositories []string
@@ -97,7 +102,7 @@ func (s Store) ListGroups() ([]GroupInfo, error) {
 	return groups, nil
 }
 
-func (s Store) CreateRepository(r repopath.Repository) error {
+func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryOptions) error {
 	if r.Name == "control" {
 		return errors.New("reserved repository name")
 	}
@@ -116,8 +121,14 @@ func (s Store) CreateRepository(r repopath.Repository) error {
 	if e = os.MkdirAll(gp, 0750); e != nil {
 		return e
 	}
-	if _, e = git.PlainInit(gitp, true); e != nil {
-		return e
+	if options.InitializeReadme {
+		if e = s.createInitializedRepository(gitp, r.Name, options.Author); e != nil {
+			return e
+		}
+	} else {
+		if _, e = git.PlainInit(gitp, true); e != nil {
+			return e
+		}
 	}
 	if e = os.MkdirAll(filepath.Join(lfsp, "objects"), 0750); e != nil {
 		_ = os.RemoveAll(gitp)
@@ -125,6 +136,66 @@ func (s Store) CreateRepository(r repopath.Repository) error {
 	}
 	return nil
 }
+
+func (s Store) createInitializedRepository(destination, name, author string) error {
+	root, err := repopath.SafeJoin(s.Root)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.MkdirTemp(root, ".gitone-repository-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(temporary)
+
+	repository, err := git.PlainInit(temporary, false)
+	if err != nil {
+		return err
+	}
+	worktree, err := repository.Worktree()
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(filepath.Join(temporary, "README.md"), []byte(name+"\n"), 0640); err != nil {
+		return err
+	}
+	if _, err = worktree.Add("README.md"); err != nil {
+		return err
+	}
+	if author == "" {
+		author = "GitOne"
+	}
+	commit, err := worktree.Commit("Initialize repository", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  author,
+			Email: author + "@localhost",
+			When:  time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), commit)); err != nil {
+		return err
+	}
+	if err = repository.Storer.SetReference(plumbingSymbolicMain()); err != nil {
+		return err
+	}
+	repositoryConfig, err := repository.Config()
+	if err != nil {
+		return err
+	}
+	repositoryConfig.Core.IsBare = true
+	repositoryConfig.Core.Worktree = ""
+	if err = repository.SetConfig(repositoryConfig); err != nil {
+		return err
+	}
+	if err = os.Rename(filepath.Join(temporary, ".git"), destination); err != nil {
+		return fmt.Errorf("create initialized repository: %w", err)
+	}
+	return nil
+}
+
 func plumbingSymbolicMain() *plumbing.Reference {
 	return plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main"))
 }

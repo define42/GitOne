@@ -83,6 +83,11 @@ type RepositoryPathInput struct {
 	Path string `path:"path" doc:"URL-encoded group and repository path"`
 }
 
+type createRepositoryInput struct {
+	RepositoryPathInput
+	InitializeReadme bool `query:"initializeReadme" default:"false" doc:"Create an initial main commit containing README.md"`
+}
+
 type renameRepositoryBody struct {
 	NewName string `json:"newName" minLength:"1"`
 }
@@ -324,15 +329,19 @@ func (a API) deleteGroup(ctx context.Context, input *GroupPathInput) (*emptyOutp
 	return &emptyOutput{}, nil
 }
 
-func (a API) createRepository(ctx context.Context, input *RepositoryPathInput) (*createRepositoryOutput, error) {
+func (a API) createRepository(ctx context.Context, input *createRepositoryInput) (*createRepositoryOutput, error) {
 	repository, err := parseRepositoryPath(input.Path)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, input.Authorization, repository.Group(), control.RoleAdmin); err != nil {
+	author, err := a.authorize(ctx, input.Authorization, repository.Group(), control.RoleAdmin)
+	if err != nil {
 		return nil, err
 	}
-	if err = a.Storage.CreateRepository(repository); err != nil {
+	if err = a.Storage.CreateRepository(repository, storage.CreateRepositoryOptions{
+		InitializeReadme: input.InitializeReadme,
+		Author:           author,
+	}); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
 	output := &createRepositoryOutput{}

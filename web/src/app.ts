@@ -186,6 +186,7 @@ function createForm(
   placeholder: string,
   submitText: string,
   onSubmit: (name: string) => Promise<void>,
+  additionalFields: HTMLElement[] = [],
 ): HTMLElement {
   const section = element("section");
   section.append(element("h3", heading));
@@ -198,7 +199,7 @@ function createForm(
   label.append(input);
   const button = element("button", submitText);
   button.type = "submit";
-  form.append(label, button);
+  form.append(label, ...additionalFields, button);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     button.disabled = true;
@@ -307,6 +308,14 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     },
   ));
 
+  const initializeReadme = element("input");
+  initializeReadme.type = "checkbox";
+  initializeReadme.name = "initializeReadme";
+  initializeReadme.checked = true;
+  const initializeReadmeLabel = element("label");
+  initializeReadmeLabel.className = "checkbox-label";
+  initializeReadmeLabel.append(initializeReadme, document.createTextNode("Initialize with README.md"));
+
   app.append(createForm(
     "Create repository",
     "Repository name",
@@ -314,9 +323,13 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     "Create repository",
     async (name) => {
       const repositoryPath = encodeURIComponent(`${data.path}/${name}`);
-      await request(`/api/repositories/${repositoryPath}`, {method: "POST"});
+      await request(
+        `/api/repositories/${repositoryPath}?initializeReadme=${initializeReadme.checked}`,
+        {method: "POST"},
+      );
       await renderGroup(data.path, "Repository created.");
     },
+    [initializeReadmeLabel],
   ));
 }
 

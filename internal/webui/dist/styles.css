@@ -51,6 +51,18 @@ label {
   gap: 0.25rem;
 }
 
+.checkbox-label {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.checkbox-label input {
+  margin: 0;
+  padding: 0;
+  width: auto;
+}
+
 input,
 button {
   box-sizing: border-box;
