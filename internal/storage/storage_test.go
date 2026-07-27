@@ -1,12 +1,37 @@
 package storage
 
 import (
+	"errors"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func assertMainDefaultWithoutMaster(t *testing.T, repository *git.Repository, mainExists bool) {
+	t.Helper()
+	head, err := repository.Reference(plumbing.HEAD, false)
+	if err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	if head.Type() != plumbing.SymbolicReference ||
+		head.Target() != plumbing.NewBranchReferenceName("main") {
+		t.Fatalf("HEAD does not point to main: %s", head)
+	}
+	_, err = repository.Reference(plumbing.NewBranchReferenceName("master"), false)
+	if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		t.Fatalf("master branch unexpectedly exists: %v", err)
+	}
+	_, err = repository.Reference(plumbing.NewBranchReferenceName("main"), false)
+	if mainExists && err != nil {
+		t.Fatalf("main branch does not exist: %v", err)
+	}
+	if !mainExists && !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		t.Fatalf("empty repository unexpectedly has a main branch: %v", err)
+	}
+}
 
 func TestCreateGroupAndRepository(t *testing.T) {
 	root := t.TempDir()
@@ -18,6 +43,16 @@ func TestCreateGroupAndRepository(t *testing.T) {
 	if e := s.CreateRepository(r, CreateRepositoryOptions{}); e != nil {
 		t.Fatal(e)
 	}
+	controlRepository, err := git.PlainOpen(filepath.Join(root, "engineering", "control.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMainDefaultWithoutMaster(t, controlRepository, true)
+	emptyRepository, err := git.PlainOpen(filepath.Join(root, "engineering", "api.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMainDefaultWithoutMaster(t, emptyRepository, false)
 	description, err := s.RepositoryDescription(r)
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +85,7 @@ func TestCreateRepositoryWithReadme(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertMainDefaultWithoutMaster(t, repository, true)
 	head, err := repository.Head()
 	if err != nil {
 		t.Fatal(err)

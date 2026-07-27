@@ -427,11 +427,10 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 	if branches.Repository != "engineering/api" ||
 		branches.DefaultBranch != "main" ||
-		len(branches.Branches) != 3 ||
+		len(branches.Branches) != 2 ||
 		branches.Branches[0].Name != "feature/docs" ||
 		branches.Branches[0].Commit != head.Hash().String() ||
-		branches.Branches[1].Name != "main" ||
-		branches.Branches[2].Name != "master" {
+		branches.Branches[1].Name != "main" {
 		t.Fatalf("unexpected repository branches: %#v", branches)
 	}
 

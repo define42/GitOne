@@ -131,7 +131,12 @@ func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryO
 			return e
 		}
 	} else {
-		if _, e = git.PlainInit(gitp, true); e != nil {
+		repository, initErr := git.PlainInit(gitp, true)
+		if initErr != nil {
+			return initErr
+		}
+		if e = repository.Storer.SetReference(plumbingSymbolicMain()); e != nil {
+			_ = os.RemoveAll(gitp)
 			return e
 		}
 	}
@@ -193,6 +198,9 @@ func (s Store) createInitializedRepository(destination, name string, options Cre
 
 	repository, err := git.PlainInit(temporary, false)
 	if err != nil {
+		return err
+	}
+	if err = repository.Storer.SetReference(plumbingSymbolicMain()); err != nil {
 		return err
 	}
 	worktree, err := repository.Worktree()
@@ -284,6 +292,9 @@ func (s Store) CreateGroup(group, owner, description string) error {
 	defer os.RemoveAll(tmp)
 	r, e := git.PlainInit(tmp, false)
 	if e != nil {
+		return e
+	}
+	if e = r.Storer.SetReference(plumbingSymbolicMain()); e != nil {
 		return e
 	}
 	wt, e := r.Worktree()
