@@ -1553,7 +1553,18 @@ async function markdownPreview(content) {
     preview.innerHTML = DOMPurify.sanitize(parsed);
     return preview;
 }
-function sourcePreview(content) {
+function sourcePreview(content, highlightedHtml) {
+    if (highlightedHtml) {
+        const highlighted = element("div");
+        highlighted.className = "file-content highlighted-source";
+        highlighted.innerHTML = DOMPurify.sanitize(highlightedHtml, {
+            ALLOWED_TAGS: ["pre", "code", "span"],
+            ALLOWED_ATTR: ["class", "style"],
+        });
+        if (highlighted.querySelector("pre")) {
+            return highlighted;
+        }
+    }
     const pre = element("pre");
     pre.className = "file-content";
     pre.append(element("code", content));
@@ -1563,7 +1574,12 @@ async function repositoryBlobSection(content) {
     const section = element("section");
     section.className = "content-section file-view";
     const heading = sectionHeading(content.path);
-    const metadata = element("p", `${formatFileSize(content.size)} · ${content.encoding} · ${content.hash.slice(0, 12)}`);
+    const metadata = element("p", [
+        formatFileSize(content.size),
+        content.language,
+        content.encoding,
+        content.hash.slice(0, 12),
+    ].filter(Boolean).join(" · "));
     metadata.className = "file-metadata";
     section.append(heading, metadata);
     if (content.encoding !== "utf-8") {
@@ -1572,7 +1588,7 @@ async function repositoryBlobSection(content) {
     }
     const isMarkdown = /\.md$/i.test(content.path);
     if (!isMarkdown) {
-        section.append(sourcePreview(content.content));
+        section.append(sourcePreview(content.content, content.highlightedHtml));
         return section;
     }
     const tabs = element("div");
@@ -1588,7 +1604,7 @@ async function repositoryBlobSection(content) {
     previewButton.setAttribute("aria-selected", "true");
     sourceButton.setAttribute("aria-selected", "false");
     const preview = await markdownPreview(content.content);
-    const source = sourcePreview(content.content);
+    const source = sourcePreview(content.content, content.highlightedHtml);
     source.hidden = true;
     const select = (showPreview) => {
         preview.hidden = !showPreview;

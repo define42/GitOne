@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -13,6 +14,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/alecthomas/chroma/v2"
+	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
@@ -22,7 +27,10 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
-const maxBrowsableBlobSize = 10 * 1024 * 1024
+const (
+	maxBrowsableBlobSize   = 10 * 1024 * 1024
+	maxHighlightedBlobSize = 1024 * 1024
+)
 
 type repositoryBranchesInput struct {
 	AuthInput
@@ -118,14 +126,16 @@ type repositoryTreeOutput struct {
 
 type repositoryBlobOutput struct {
 	Body struct {
-		Repository string `json:"repository"`
-		Ref        string `json:"ref"`
-		Commit     string `json:"commit"`
-		Path       string `json:"path"`
-		Hash       string `json:"hash"`
-		Size       int64  `json:"size"`
-		Encoding   string `json:"encoding" enum:"utf-8,base64"`
-		Content    string `json:"content"`
+		Repository      string `json:"repository"`
+		Ref             string `json:"ref"`
+		Commit          string `json:"commit"`
+		Path            string `json:"path"`
+		Hash            string `json:"hash"`
+		Size            int64  `json:"size"`
+		Encoding        string `json:"encoding" enum:"utf-8,base64"`
+		Content         string `json:"content"`
+		Language        string `json:"language,omitempty"`
+		HighlightedHTML string `json:"highlightedHtml,omitempty"`
 	}
 }
 
@@ -435,7 +445,40 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 	output.Body.Size = file.Blob.Size
 	output.Body.Encoding = encoding
 	output.Body.Content = encodedContent
+	if encoding == "utf-8" {
+		output.Body.HighlightedHTML, output.Body.Language = highlightRepositoryBlob(
+			cleanPath,
+			encodedContent,
+		)
+	}
 	return output, nil
+}
+
+func highlightRepositoryBlob(path, content string) (string, string) {
+	if len(content) > maxHighlightedBlobSize {
+		return "", ""
+	}
+	lexer := lexers.Match(path)
+	if lexer == nil || strings.EqualFold(lexer.Config().Name, "plaintext") {
+		return "", ""
+	}
+	language := lexer.Config().Name
+	iterator, err := chroma.Coalesce(lexer).Tokenise(nil, content)
+	if err != nil {
+		return "", ""
+	}
+	style := styles.Get("github-dark")
+	if style == nil {
+		style = styles.Fallback
+	}
+	formatter := chroma.RecoveringFormatter(chromahtml.New(
+		chromahtml.TabWidth(4),
+	))
+	var highlighted bytes.Buffer
+	if err = formatter.Format(&highlighted, style, iterator); err != nil {
+		return "", ""
+	}
+	return highlighted.String(), language
 }
 
 func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommitsInput) (*repositoryCommitsOutput, error) {

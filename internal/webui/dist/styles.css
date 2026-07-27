@@ -1354,6 +1354,24 @@ table {
   font-size: 0.83rem;
 }
 
+.highlighted-source {
+  padding: 0;
+}
+
+.highlighted-source > pre {
+  font-size: 0.83rem;
+  line-height: inherit;
+  margin: 0;
+  min-height: 100%;
+  min-width: max-content;
+  padding: 1rem;
+}
+
+.highlighted-source > pre code {
+  display: block;
+  min-width: max-content;
+}
+
 .readme-section {
   background: var(--surface);
   border: 1px solid var(--border);

@@ -459,11 +459,18 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(checkout, "docs", "guide.txt"), []byte("Browse me\n"), 0640); err != nil {
 		t.Fatal(err)
 	}
+	nodeSource := "const http = require(\"node:http\");\n\nhttp.createServer((_request, response) => response.end(\"ok\"));\n"
+	if err = os.WriteFile(filepath.Join(checkout, "server.js"), []byte(nodeSource), 0640); err != nil {
+		t.Fatal(err)
+	}
 	worktree, err := repository.Worktree()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = worktree.Add("docs/guide.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Add("server.js"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = worktree.Commit("Add guide", &git.CommitOptions{
@@ -593,7 +600,7 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	if rootTree.Repository != "engineering/api" ||
 		rootTree.Ref != "main" ||
 		rootTree.Commit == "" ||
-		len(rootTree.Entries) != 3 {
+		len(rootTree.Entries) != 4 {
 		t.Fatalf("unexpected repository root: %#v", rootTree)
 	}
 	var featureTree struct {
@@ -636,6 +643,24 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 	if blob.Path != "docs/guide.txt" || blob.Encoding != "utf-8" || blob.Content != "Browse me\n" {
 		t.Fatalf("unexpected repository blob: %#v", blob)
+	}
+	var highlightedBlob struct {
+		Path            string `json:"path"`
+		Encoding        string `json:"encoding"`
+		Content         string `json:"content"`
+		Language        string `json:"language"`
+		HighlightedHTML string `json:"highlightedHtml"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/HEAD/server.js").Body.Bytes(), &highlightedBlob); err != nil {
+		t.Fatal(err)
+	}
+	if highlightedBlob.Path != "server.js" ||
+		highlightedBlob.Encoding != "utf-8" ||
+		highlightedBlob.Content != nodeSource ||
+		highlightedBlob.Language != "JavaScript" ||
+		!strings.Contains(highlightedBlob.HighlightedHTML, "<span") ||
+		!strings.Contains(highlightedBlob.HighlightedHTML, "node:http") {
+		t.Fatalf("unexpected highlighted repository blob: %#v", highlightedBlob)
 	}
 
 	var commits struct {
@@ -1097,6 +1122,11 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if !strings.Contains(assetResponse.Body.String(), "DOMPurify.sanitize") ||
 		!strings.Contains(assetResponse.Body.String(), "marked.parse") {
 		t.Fatal("served UI does not safely render Markdown files")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "content.highlightedHtml") ||
+		!strings.Contains(assetResponse.Body.String(), `ALLOWED_TAGS: ["pre", "code", "span"]`) ||
+		!strings.Contains(assetResponse.Body.String(), "highlighted-source") {
+		t.Fatal("served UI does not safely render Chroma-highlighted source files")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "initializeReadme.checked = true") {
 		t.Fatal("served UI does not default the README initialization option to checked")
