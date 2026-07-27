@@ -23,7 +23,7 @@ make run RUN_ARGS="-root ./data -listen :8080 -public-url http://localhost:8080"
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable clone URL containing the authenticated username, such as `http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files with server-side Chroma syntax highlighting, show the latest 100 commits in the selected branch’s history, create a branch from any existing branch, and compare two branches with commit and file statistics plus a unified diff. Users with write access can merge a clean comparison after confirmation. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
+Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable clone URL containing the authenticated username, such as `http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files with server-side Chroma syntax highlighting, show the latest 100 commits in the selected branch’s history, create a branch from any existing branch, and compare two branches with commit and file statistics plus a unified diff. Users with write access can edit UTF-8 files up to 1 MiB directly on a named branch and review their uncommitted changes as a unified diff; each save creates a commit and rejects the update if the branch changed after the editor was opened. They can also merge a clean comparison after confirmation. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
 Build the UI separately with:
 
@@ -78,7 +78,7 @@ make ui
 
 ### Repository browser API
 
-The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encoded as individual path segments. Blob responses use UTF-8 text when possible and base64 for binary content. Recognized UTF-8 source files up to 1 MiB also include Chroma-generated `language` and escaped `highlightedHtml` fields. Browsable files are limited to 10 MiB.
+The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encoded as individual path segments. Blob responses use UTF-8 text when possible and base64 for binary content. Recognized UTF-8 source files up to 1 MiB also include Chroma-generated `language` and escaped `highlightedHtml` fields. The `canEdit` field is true for editable files on named branches when the caller has write access. Browsable files are limited to 10 MiB.
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -89,6 +89,7 @@ The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encod
 | `GET` | `/api/repositories/{repository}/tree/{ref}` | List the repository root at a branch, tag, hash, or `HEAD`. |
 | `GET` | `/api/repositories/{repository}/tree/{ref}/{path}` | List a directory at a Git reference. |
 | `GET` | `/api/repositories/{repository}/blob/{ref}/{path}` | Read a file as UTF-8 or base64. |
+| `PUT` | `/api/repositories/{repository}/files/{ref}/{path}` | Replace an existing UTF-8 file on a named branch and commit it. JSON fields: `content`, optional `message`, and required optimistic-lock `expectedCommit`. |
 | `GET` | `/api/repositories/{repository}/commits/{ref}` | List commits. Optional `limit` is 1–100 and defaults to 20. |
 
 ### Git Smart HTTP

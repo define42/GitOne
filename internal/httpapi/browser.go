@@ -30,6 +30,7 @@ import (
 const (
 	maxBrowsableBlobSize   = 10 * 1024 * 1024
 	maxHighlightedBlobSize = 1024 * 1024
+	maxEditableBlobSize    = 1024 * 1024
 )
 
 type repositoryBranchesInput struct {
@@ -74,6 +75,20 @@ type repositoryBrowserPathInput struct {
 	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
 	Ref        string `path:"ref" doc:"Git branch, tag, hash, or HEAD"`
 	Path       string `path:"path" doc:"URL-encoded path inside the repository"`
+}
+
+type updateRepositoryFileBody struct {
+	Content        string `json:"content" maxLength:"1048576" doc:"Complete UTF-8 file contents"`
+	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
+	ExpectedCommit string `json:"expectedCommit" minLength:"40" maxLength:"40" doc:"Branch tip commit shown when editing began"`
+}
+
+type updateRepositoryFileInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Ref        string `path:"ref" doc:"Git branch receiving the commit"`
+	Path       string `path:"path" doc:"URL-encoded path inside the repository"`
+	Body       updateRepositoryFileBody
 }
 
 type repositoryCommitsInput struct {
@@ -136,6 +151,18 @@ type repositoryBlobOutput struct {
 		Content         string `json:"content"`
 		Language        string `json:"language,omitempty"`
 		HighlightedHTML string `json:"highlightedHtml,omitempty"`
+		CanEdit         bool   `json:"canEdit" doc:"Whether this file and reference can be edited by the authenticated user"`
+	}
+}
+
+type updateRepositoryFileOutput struct {
+	Body struct {
+		Repository     string `json:"repository"`
+		Branch         string `json:"branch"`
+		Path           string `json:"path"`
+		Commit         string `json:"commit"`
+		PreviousCommit string `json:"previousCommit"`
+		Message        string `json:"message"`
 	}
 }
 
@@ -252,6 +279,14 @@ func registerRepositoryBrowser(api huma.API, service API) {
 		Summary:     "Read a file from a repository",
 		Tags:        []string{"Repository browser"},
 	}), service.readRepositoryBlob)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "update-repository-file",
+		Method:      http.MethodPut,
+		Path:        "/api/repositories/{repository}/files/{ref}/{path}",
+		Summary:     "Update a file and commit it to a branch",
+		Tags:        []string{"Repository browser"},
+	}), service.updateRepositoryFile)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-repository-commits",
@@ -450,6 +485,14 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 			cleanPath,
 			encodedContent,
 		)
+		branchName, branchRef, _, branchErr := resolveBranch(repository, input.Ref)
+		_, writeErr := a.authorize(ctx, input.Authorization, parsed.Group(), control.RoleWrite)
+		output.Body.CanEdit = branchErr == nil &&
+			branchName == input.Ref &&
+			branchRef.Hash() == commit.Hash &&
+			writeErr == nil &&
+			file.Blob.Size <= maxEditableBlobSize &&
+			mergeableTextMode(file.Mode)
 	}
 	return output, nil
 }

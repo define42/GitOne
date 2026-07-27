@@ -1312,6 +1312,86 @@ table {
   margin: -0.45rem 0 1rem;
 }
 
+.file-editor {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  margin: 0;
+  overflow: hidden;
+}
+
+.file-editor-toolbar {
+  align-items: center;
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  min-height: 3rem;
+  padding: 0.35rem 0.8rem;
+}
+
+.file-editor-tabs {
+  margin: 0;
+}
+
+.file-editor-change-count {
+  padding-right: 0.25rem;
+}
+
+.file-editor-content {
+  gap: 0;
+}
+
+.file-editor-content > textarea {
+  background: #0d0f0d;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  color: #eef4f6;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.83rem;
+  line-height: 1.55;
+  min-height: 30rem;
+  padding: 1rem;
+  resize: vertical;
+  tab-size: 4;
+  white-space: pre;
+}
+
+.file-editor-diff {
+  background: #101210;
+  min-height: 30rem;
+}
+
+.file-editor-diff > .comparison-patch {
+  max-height: 40rem;
+  min-height: 30rem;
+}
+
+.file-editor-diff > .empty-state {
+  border: 0;
+  min-height: 30rem;
+}
+
+.file-editor-content > textarea:focus {
+  border-color: var(--focus);
+  outline-offset: -3px;
+}
+
+.file-editor-footer {
+  align-items: end;
+  background: var(--surface-subtle);
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(12rem, 1fr) auto;
+  padding: 0.8rem;
+}
+
+.file-editor-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .segmented-control {
   background: #292e29;
   border-radius: 6px;
@@ -1727,6 +1807,30 @@ table {
   }
 
   .history-heading code {
+    width: 100%;
+  }
+
+  .file-editor-content > textarea {
+    min-height: 24rem;
+  }
+
+  .file-editor-diff,
+  .file-editor-diff > .comparison-patch,
+  .file-editor-diff > .empty-state {
+    min-height: 24rem;
+  }
+
+  .file-editor-footer {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .file-editor-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .file-editor-actions > button {
     width: 100%;
   }
 

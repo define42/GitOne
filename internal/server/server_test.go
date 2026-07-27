@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -18,6 +19,7 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gittransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
@@ -650,6 +652,7 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 		Content         string `json:"content"`
 		Language        string `json:"language"`
 		HighlightedHTML string `json:"highlightedHtml"`
+		CanEdit         bool   `json:"canEdit"`
 	}
 	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/HEAD/server.js").Body.Bytes(), &highlightedBlob); err != nil {
 		t.Fatal(err)
@@ -659,8 +662,150 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 		highlightedBlob.Content != nodeSource ||
 		highlightedBlob.Language != "JavaScript" ||
 		!strings.Contains(highlightedBlob.HighlightedHTML, "<span") ||
-		!strings.Contains(highlightedBlob.HighlightedHTML, "node:http") {
+		!strings.Contains(highlightedBlob.HighlightedHTML, "node:http") ||
+		highlightedBlob.CanEdit {
 		t.Fatalf("unexpected highlighted repository blob: %#v", highlightedBlob)
+	}
+
+	var editableBlob struct {
+		Commit  string `json:"commit"`
+		CanEdit bool   `json:"canEdit"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/main/server.js").Body.Bytes(), &editableBlob); err != nil {
+		t.Fatal(err)
+	}
+	if editableBlob.Commit != head.Hash().String() || !editableBlob.CanEdit {
+		t.Fatalf("expected main branch blob to be editable: %#v", editableBlob)
+	}
+
+	updatedGuide := "Edited through the repository browser\n"
+	updateBody, err := json.Marshal(map[string]string{
+		"content":        updatedGuide,
+		"message":        "Update browsing guide",
+		"expectedCommit": head.Hash().String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateRequest := httptest.NewRequest(
+		http.MethodPut,
+		"/api/repositories/engineering%2Fapi/files/main/docs%2Fguide.txt",
+		bytes.NewReader(updateBody),
+	)
+	updateRequest.Header.Set("Content-Type", "application/json")
+	updateRequest.SetBasicAuth("alice", "secret")
+	updateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(updateResponse, updateRequest)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("edit file: expected status %d, got %d: %s", http.StatusOK, updateResponse.Code, updateResponse.Body.String())
+	}
+	var updatedFile struct {
+		Repository     string `json:"repository"`
+		Branch         string `json:"branch"`
+		Path           string `json:"path"`
+		Commit         string `json:"commit"`
+		PreviousCommit string `json:"previousCommit"`
+		Message        string `json:"message"`
+	}
+	if err = json.Unmarshal(updateResponse.Body.Bytes(), &updatedFile); err != nil {
+		t.Fatal(err)
+	}
+	if updatedFile.Repository != "engineering/api" ||
+		updatedFile.Branch != "main" ||
+		updatedFile.Path != "docs/guide.txt" ||
+		updatedFile.Commit == "" ||
+		updatedFile.Commit == head.Hash().String() ||
+		updatedFile.PreviousCommit != head.Hash().String() ||
+		updatedFile.Message != "Update browsing guide" {
+		t.Fatalf("unexpected edited file response: %#v", updatedFile)
+	}
+
+	barePath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bareRepository, err := git.PlainOpen(barePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainReference, err := bareRepository.Reference(plumbing.NewBranchReferenceName("main"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mainReference.Hash().String() != updatedFile.Commit {
+		t.Fatalf("expected main at %s, got %s", updatedFile.Commit, mainReference.Hash())
+	}
+	editedCommit, err := bareRepository.CommitObject(mainReference.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(editedCommit.ParentHashes) != 1 ||
+		editedCommit.ParentHashes[0] != head.Hash() ||
+		editedCommit.Message != "Update browsing guide\n" {
+		t.Fatalf("unexpected edited commit: %#v", editedCommit)
+	}
+	editedGuide, err := editedCommit.File("docs/guide.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	editedContents, err := editedGuide.Contents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if editedContents != updatedGuide || editedGuide.Mode != filemode.Regular {
+		t.Fatalf("unexpected edited guide: mode %s, contents %q", editedGuide.Mode, editedContents)
+	}
+	unchangedServer, err := editedCommit.File("server.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedServerContents, err := unchangedServer.Contents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchangedServerContents != nodeSource {
+		t.Fatalf("editing docs/guide.txt changed server.js: %q", unchangedServerContents)
+	}
+	featureReference, err := bareRepository.Reference(plumbing.NewBranchReferenceName("feature/docs"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if featureReference.Hash() != head.Hash() {
+		t.Fatalf("editing main moved feature/docs to %s", featureReference.Hash())
+	}
+
+	staleRequest := httptest.NewRequest(
+		http.MethodPut,
+		"/api/repositories/engineering%2Fapi/files/main/docs%2Fguide.txt",
+		bytes.NewReader(updateBody),
+	)
+	staleRequest.Header.Set("Content-Type", "application/json")
+	staleRequest.SetBasicAuth("alice", "secret")
+	staleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(staleResponse, staleRequest)
+	if staleResponse.Code != http.StatusConflict {
+		t.Fatalf("stale edit: expected status %d, got %d: %s", http.StatusConflict, staleResponse.Code, staleResponse.Body.String())
+	}
+	currentMain, err := bareRepository.Reference(plumbing.NewBranchReferenceName("main"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentMain.Hash().String() != updatedFile.Commit {
+		t.Fatalf("stale edit moved main to %s", currentMain.Hash())
+	}
+
+	var savedBlob struct {
+		Commit  string `json:"commit"`
+		Content string `json:"content"`
+		CanEdit bool   `json:"canEdit"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/main/docs%2Fguide.txt").Body.Bytes(), &savedBlob); err != nil {
+		t.Fatal(err)
+	}
+	if savedBlob.Commit != updatedFile.Commit ||
+		savedBlob.Content != updatedGuide ||
+		!savedBlob.CanEdit {
+		t.Fatalf("unexpected saved repository blob: %#v", savedBlob)
 	}
 
 	var commits struct {
@@ -1077,6 +1222,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
+			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
 			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=17">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `<div id="notifications"`) {
@@ -1112,6 +1258,14 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if assetResponse.Header().Get("Cache-Control") != "no-cache" {
 		t.Fatalf("unexpected asset cache policy: %q", assetResponse.Header().Get("Cache-Control"))
 	}
+	diffAssetRequest := httptest.NewRequest(http.MethodGet, "/assets/diff.min.js", nil)
+	diffAssetRequest.SetBasicAuth("alice", "secret")
+	diffAssetResponse := httptest.NewRecorder()
+	handler.ServeHTTP(diffAssetResponse, diffAssetRequest)
+	if diffAssetResponse.Code != http.StatusOK ||
+		!strings.Contains(diffAssetResponse.Body.String(), "structuredPatch") {
+		t.Fatalf("browser diff asset was not served: %d", diffAssetResponse.Code)
+	}
 	if !strings.Contains(assetResponse.Body.String(), "`${apiGroupURL(name)}?description=${encodeURIComponent(description.input.value)}`") {
 		t.Fatal("served UI does not use the path-based group creation endpoint")
 	}
@@ -1127,6 +1281,14 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), `ALLOWED_TAGS: ["pre", "code", "span"]`) ||
 		!strings.Contains(assetResponse.Body.String(), "highlighted-source") {
 		t.Fatal("served UI does not safely render Chroma-highlighted source files")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "repositoryFileAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), "content.canEdit") ||
+		!strings.Contains(assetResponse.Body.String(), "expectedCommit: content.commit") ||
+		!strings.Contains(assetResponse.Body.String(), "window.Diff.structuredPatch") ||
+		!strings.Contains(assetResponse.Body.String(), "No changes to commit.") ||
+		!strings.Contains(assetResponse.Body.String(), "Commit changes") {
+		t.Fatal("served UI does not support reviewing, editing, and committing repository files")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "initializeReadme.checked = true") {
 		t.Fatal("served UI does not default the README initialization option to checked")
@@ -1202,6 +1364,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 				`"/api/repositories/{repository}/tree/{ref}"`,
 				`"/api/repositories/{repository}/tree/{ref}/{path}"`,
 				`"/api/repositories/{repository}/blob/{ref}/{path}"`,
+				`"/api/repositories/{repository}/files/{ref}/{path}"`,
 				`"/api/repositories/{repository}/commits/{ref}"`,
 			} {
 				if !strings.Contains(document, expected) {

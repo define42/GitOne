@@ -1,5 +1,28 @@
 import DOMPurify from "dompurify";
 import {marked} from "marked";
+import type {StructuredPatch} from "diff";
+
+interface BrowserDiff {
+  structuredPatch(
+    oldFileName: string,
+    newFileName: string,
+    oldContent: string,
+    newContent: string,
+    oldHeader: string,
+    newHeader: string,
+    options: {
+      context: number;
+      timeout: number;
+      callback: (patch: StructuredPatch | undefined) => void;
+    },
+  ): void;
+}
+
+declare global {
+  interface Window {
+    Diff: BrowserDiff;
+  }
+}
 
 interface GroupSummary {
   name: string;
@@ -63,6 +86,16 @@ interface RepositoryBlob {
   content: string;
   language?: string;
   highlightedHtml?: string;
+  canEdit: boolean;
+}
+
+interface RepositoryFileUpdate {
+  repository: string;
+  branch: string;
+  path: string;
+  commit: string;
+  previousCommit: string;
+  message: string;
 }
 
 interface RepositoryCommit {
@@ -195,6 +228,7 @@ type IconName =
   | "git-branch"
   | "git-compare"
   | "git-merge"
+  | "pencil"
   | "plus"
   | "repository"
   | "settings"
@@ -232,6 +266,10 @@ const iconPaths: Record<IconName, string[]> = {
     "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
     "M6 9v9",
     "M18 15v-1a5 5 0 0 0-5-5h-2a5 5 0 0 1-5-5",
+  ],
+  pencil: [
+    "M21.2 6.8a1 1 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8L2 21.4a.5.5 0 0 0 .6.6L7 20.7a2 2 0 0 0 .8-.5Z",
+    "m15 5 4 4",
   ],
   plus: ["M5 12h14", "M12 5v14"],
   repository: [
@@ -342,6 +380,14 @@ function repositoryComparisonAPIURL(
 
 function repositoryMergesAPIURL(repository: string): string {
   return `/api/repositories/${encodeURIComponent(repository)}/merges`;
+}
+
+function repositoryFileAPIURL(
+  repository: string,
+  ref: string,
+  path: string,
+): string {
+  return `/api/repositories/${encodeURIComponent(repository)}/files/${encodeURIComponent(ref)}/${encodeURIComponent(path)}`;
 }
 
 function repositoryAPIURL(
@@ -1650,15 +1696,27 @@ function comparisonDiff(file: RepositoryComparisonFile): HTMLElement {
   if (!file.patch) {
     return section;
   }
+  section.append(diffPatch(file.patch.split("\n")));
+  if (file.truncated) {
+    const notice = element("p", "Diff truncated at 1 MiB.");
+    notice.className = "diff-truncated";
+    section.append(notice);
+  }
+  return section;
+}
+
+function diffPatch(lines: string[]): HTMLPreElement {
   const code = element("code");
-  for (const line of file.patch.split("\n")) {
+  let inHunk = false;
+  for (const line of lines) {
     const row = element("span", line || " ");
     row.className = "diff-line";
     if (line.startsWith("@@")) {
+      inHunk = true;
       row.classList.add("diff-hunk");
-    } else if (line.startsWith("+") && !line.startsWith("+++")) {
+    } else if (inHunk && line.startsWith("+")) {
       row.classList.add("diff-added");
-    } else if (line.startsWith("-") && !line.startsWith("---")) {
+    } else if (inHunk && line.startsWith("-")) {
       row.classList.add("diff-deleted");
     } else if (
       line.startsWith("diff ") ||
@@ -1673,13 +1731,7 @@ function comparisonDiff(file: RepositoryComparisonFile): HTMLElement {
   const pre = element("pre");
   pre.className = "comparison-patch";
   pre.append(code);
-  section.append(pre);
-  if (file.truncated) {
-    const notice = element("p", "Diff truncated at 1 MiB.");
-    notice.className = "diff-truncated";
-    section.append(notice);
-  }
-  return section;
+  return pre;
 }
 
 function branchComparisonResult(
@@ -1995,10 +2047,20 @@ function sourcePreview(content: string, highlightedHtml?: string): HTMLElement {
   return pre;
 }
 
-async function repositoryBlobSection(content: RepositoryBlob): Promise<HTMLElement> {
+async function repositoryBlobSection(
+  route: RepositoryBrowserRoute,
+  content: RepositoryBlob,
+): Promise<HTMLElement> {
   const section = element("section");
   section.className = "content-section file-view";
-  const heading = sectionHeading(content.path);
+  const editButton = content.canEdit
+    ? actionButton("Edit", "pencil", "secondary")
+    : null;
+  const heading = sectionHeading(
+    content.path,
+    undefined,
+    editButton ? [editButton] : [],
+  );
   const metadata = element(
     "p",
     [
@@ -2009,46 +2071,225 @@ async function repositoryBlobSection(content: RepositoryBlob): Promise<HTMLEleme
     ].filter(Boolean).join(" · "),
   );
   metadata.className = "file-metadata";
-  section.append(heading, metadata);
-
-  if (content.encoding !== "utf-8") {
-    section.append(emptyState("Binary file. Content is available through the API."));
-    return section;
-  }
+  const body = element("div");
+  body.className = "file-view-body";
+  section.append(heading, metadata, body);
 
   const isMarkdown = /\.md$/i.test(content.path);
-  if (!isMarkdown) {
-    section.append(sourcePreview(content.content, content.highlightedHtml));
-    return section;
-  }
+  const renderViewer = async (): Promise<void> => {
+    if (content.encoding !== "utf-8") {
+      body.replaceChildren(emptyState("Binary file. Content is available through the API."));
+      return;
+    }
+    if (!isMarkdown) {
+      body.replaceChildren(sourcePreview(content.content, content.highlightedHtml));
+      return;
+    }
 
-  const tabs = element("div");
-  tabs.className = "segmented-control";
-  tabs.setAttribute("role", "tablist");
-  tabs.setAttribute("aria-label", "File view");
-  const previewButton = actionButton("Preview");
-  const sourceButton = actionButton("Source");
-  previewButton.className = "segment active";
-  sourceButton.className = "segment";
-  previewButton.setAttribute("role", "tab");
-  sourceButton.setAttribute("role", "tab");
-  previewButton.setAttribute("aria-selected", "true");
-  sourceButton.setAttribute("aria-selected", "false");
-  const preview = await markdownPreview(content.content);
-  const source = sourcePreview(content.content, content.highlightedHtml);
-  source.hidden = true;
-  const select = (showPreview: boolean): void => {
-    preview.hidden = !showPreview;
-    source.hidden = showPreview;
-    previewButton.classList.toggle("active", showPreview);
-    sourceButton.classList.toggle("active", !showPreview);
-    previewButton.setAttribute("aria-selected", String(showPreview));
-    sourceButton.setAttribute("aria-selected", String(!showPreview));
+    const tabs = element("div");
+    tabs.className = "segmented-control";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "File view");
+    const previewButton = actionButton("Preview");
+    const sourceButton = actionButton("Source");
+    previewButton.className = "segment active";
+    sourceButton.className = "segment";
+    previewButton.setAttribute("role", "tab");
+    sourceButton.setAttribute("role", "tab");
+    previewButton.setAttribute("aria-selected", "true");
+    sourceButton.setAttribute("aria-selected", "false");
+    const preview = await markdownPreview(content.content);
+    const source = sourcePreview(content.content, content.highlightedHtml);
+    source.hidden = true;
+    const select = (showPreview: boolean): void => {
+      preview.hidden = !showPreview;
+      source.hidden = showPreview;
+      previewButton.classList.toggle("active", showPreview);
+      sourceButton.classList.toggle("active", !showPreview);
+      previewButton.setAttribute("aria-selected", String(showPreview));
+      sourceButton.setAttribute("aria-selected", String(!showPreview));
+    };
+    previewButton.addEventListener("click", () => select(true));
+    sourceButton.addEventListener("click", () => select(false));
+    tabs.append(previewButton, sourceButton);
+    body.replaceChildren(tabs, preview, source);
   };
-  previewButton.addEventListener("click", () => select(true));
-  sourceButton.addEventListener("click", () => select(false));
-  tabs.append(previewButton, sourceButton);
-  section.append(tabs, preview, source);
+
+  editButton?.addEventListener("click", () => {
+    const form = element("form");
+    form.className = "file-editor";
+    const toolbar = element("div");
+    toolbar.className = "file-editor-toolbar";
+    const tabs = element("div");
+    tabs.className = "segmented-control file-editor-tabs";
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Editor view");
+    const editTab = actionButton("Edit");
+    const diffTab = actionButton("Diff");
+    editTab.className = "segment active";
+    diffTab.className = "segment";
+    editTab.setAttribute("role", "tab");
+    diffTab.setAttribute("role", "tab");
+    editTab.setAttribute("aria-selected", "true");
+    diffTab.setAttribute("aria-selected", "false");
+    const diffStats = element("span");
+    diffStats.className = "change-count file-editor-change-count";
+    diffStats.hidden = true;
+    tabs.append(editTab, diffTab);
+    toolbar.append(tabs, diffStats);
+
+    const textarea = element("textarea");
+    textarea.name = "content";
+    textarea.value = content.content;
+    textarea.spellcheck = false;
+    textarea.setAttribute("aria-label", `Contents of ${content.path}`);
+    const contentLabel = fieldLabel("File contents", textarea);
+    contentLabel.className = "file-editor-content";
+    const diffView = element("div");
+    diffView.className = "file-editor-diff";
+    diffView.hidden = true;
+
+    const message = element("input");
+    message.name = "message";
+    message.maxLength = 500;
+    message.value = `Update ${content.path}`;
+    const actions = element("div");
+    actions.className = "file-editor-footer";
+    const messageLabel = fieldLabel("Commit message", message);
+    const buttons = element("div");
+    buttons.className = "file-editor-actions";
+    const cancel = actionButton("Cancel", undefined, "secondary");
+    const save = actionButton("Commit changes", "check", "primary");
+    save.type = "submit";
+    save.disabled = true;
+    buttons.append(cancel, save);
+    actions.append(messageLabel, buttons);
+    form.append(toolbar, contentLabel, diffView, actions);
+    body.replaceChildren(form);
+    editButton.hidden = true;
+    textarea.focus();
+
+    const updateSaveState = (): void => {
+      save.disabled = textarea.value === content.content;
+    };
+    let diffGeneration = 0;
+    const renderDraftDiff = (): void => {
+      const generation = ++diffGeneration;
+      diffStats.hidden = true;
+      diffView.replaceChildren(emptyState("Calculating diff…"));
+      window.Diff.structuredPatch(
+        content.path,
+        content.path,
+        content.content,
+        textarea.value,
+        "Original",
+        "Working copy",
+        {
+          context: 3,
+          timeout: 2_000,
+          callback: (patch) => {
+            if (generation !== diffGeneration) {
+              return;
+            }
+            if (!patch) {
+              diffView.replaceChildren(emptyState("Diff is too large to display."));
+              return;
+            }
+            if (patch.hunks.length === 0) {
+              diffView.replaceChildren(emptyState("No changes to commit."));
+              return;
+            }
+            const lines = [
+              `--- a/${content.path}`,
+              `+++ b/${content.path}`,
+            ];
+            let additions = 0;
+            let deletions = 0;
+            for (const hunk of patch.hunks) {
+              lines.push(
+                `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+                ...hunk.lines,
+              );
+              additions += hunk.lines.filter((line) => line.startsWith("+")).length;
+              deletions += hunk.lines.filter((line) => line.startsWith("-")).length;
+            }
+            diffStats.replaceChildren(
+              element("span", `+${additions}`),
+              element("span", `−${deletions}`),
+            );
+            diffStats.setAttribute(
+              "aria-label",
+              `${additions} additions and ${deletions} deletions`,
+            );
+            diffStats.hidden = false;
+            diffView.replaceChildren(diffPatch(lines));
+          },
+        },
+      );
+    };
+    const selectEditorView = (showEditor: boolean): void => {
+      contentLabel.hidden = !showEditor;
+      diffView.hidden = showEditor;
+      editTab.classList.toggle("active", showEditor);
+      diffTab.classList.toggle("active", !showEditor);
+      editTab.setAttribute("aria-selected", String(showEditor));
+      diffTab.setAttribute("aria-selected", String(!showEditor));
+      if (showEditor) {
+        diffStats.hidden = true;
+        textarea.focus();
+      } else {
+        renderDraftDiff();
+      }
+    };
+    editTab.addEventListener("click", () => selectEditorView(true));
+    diffTab.addEventListener("click", () => selectEditorView(false));
+    textarea.addEventListener("input", updateSaveState);
+    textarea.addEventListener("keydown", (event) => {
+      if (event.key !== "Tab") {
+        return;
+      }
+      event.preventDefault();
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      textarea.setRangeText("\t", start, end, "end");
+      updateSaveState();
+    });
+    cancel.addEventListener("click", async () => {
+      diffGeneration++;
+      editButton.hidden = false;
+      await renderViewer();
+      editButton.focus();
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      save.disabled = true;
+      cancel.disabled = true;
+      form.setAttribute("aria-busy", "true");
+      try {
+        const updated = await request<RepositoryFileUpdate>(
+          repositoryFileAPIURL(route.repository, route.ref, content.path),
+          {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              content: textarea.value,
+              message: message.value,
+              expectedCommit: content.commit,
+            }),
+          },
+        );
+        await renderRepositoryBrowser(route);
+        showStatus(`${updated.path} committed to ${updated.branch} at ${updated.commit.slice(0, 8)}.`);
+      } catch (reason) {
+        showStatus(reason instanceof Error ? reason.message : "Could not commit file changes.", true);
+        updateSaveState();
+        cancel.disabled = false;
+        form.removeAttribute("aria-busy");
+      }
+    });
+  });
+
+  await renderViewer();
   return section;
 }
 
@@ -2229,7 +2470,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
       app.append(readme);
     }
   } else {
-    app.append(await repositoryBlobSection(content));
+    app.append(await repositoryBlobSection(route, content));
   }
 
   app.append(repositoryCommitList(commits));

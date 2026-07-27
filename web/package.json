@@ -2,13 +2,14 @@
   "name": "gitone-ui",
   "private": true,
   "scripts": {
-    "build": "tsc --project tsconfig.json && cp node_modules/marked/lib/marked.esm.js ../internal/webui/dist/marked.esm.js && cp node_modules/dompurify/dist/purify.es.mjs ../internal/webui/dist/purify.es.mjs",
+    "build": "tsc --project tsconfig.json && cp node_modules/marked/lib/marked.esm.js ../internal/webui/dist/marked.esm.js && cp node_modules/dompurify/dist/purify.es.mjs ../internal/webui/dist/purify.es.mjs && cp node_modules/diff/dist/diff.min.js ../internal/webui/dist/diff.min.js && cp node_modules/diff/LICENSE ../internal/webui/dist/diff.LICENSE.txt",
     "check": "tsc --project tsconfig.json --noEmit"
   },
   "devDependencies": {
     "typescript": "7.0.2"
   },
   "dependencies": {
+    "diff": "^9.0.0",
     "dompurify": "^3.4.12",
     "marked": "^18.0.7"
   }
