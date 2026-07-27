@@ -472,9 +472,28 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		}
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
+			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=12">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
+		if strings.Contains(body, `<h1><a href="/">GitOne</a></h1>`) ||
+			strings.Contains(body, `A small Git and Git LFS server.`) {
+			t.Fatalf("%s served removed header text", path)
+		}
+	}
+
+	iconRequest := httptest.NewRequest(http.MethodGet, "/assets/gitone.png", nil)
+	iconRequest.SetBasicAuth("alice", "secret")
+	iconResponse := httptest.NewRecorder()
+	handler.ServeHTTP(iconResponse, iconRequest)
+	if iconResponse.Code != http.StatusOK {
+		t.Fatalf("GitOne icon was not served: %d", iconResponse.Code)
+	}
+	if iconResponse.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("unexpected GitOne icon content type: %q", iconResponse.Header().Get("Content-Type"))
+	}
+	if !strings.HasPrefix(iconResponse.Body.String(), "\x89PNG\r\n\x1a\n") {
+		t.Fatal("served GitOne icon is not a PNG")
 	}
 
 	assetRequest := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
