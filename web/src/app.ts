@@ -155,6 +155,10 @@ function repositoryBranchesAPIURL(repository: string): string {
   return `/api/repositories/${encodeURIComponent(repository)}/branches`;
 }
 
+function repositoryBranchAPIURL(repository: string, branch: string): string {
+  return `${repositoryBranchesAPIURL(repository)}/${encodeURIComponent(branch)}`;
+}
+
 function repositoryAPIURL(
   repository: string,
   operation: "tree" | "blob" | "commits",
@@ -664,6 +668,71 @@ function repositoryNavigation(route: RepositoryBrowserRoute): HTMLElement {
   return nav;
 }
 
+function repositoryBranchCreator(
+  route: RepositoryBrowserRoute,
+  data: RepositoryBranches,
+): HTMLElement {
+  const details = element("details");
+  details.className = "branch-create-control";
+  details.append(element("summary", "Create branch"));
+  if (data.branches.length === 0) {
+    details.append(element("p", "Create a commit before creating another branch."));
+    return details;
+  }
+
+  const form = element("form");
+  const nameLabel = element("label", "New branch name");
+  const name = element("input");
+  name.name = "branch";
+  name.placeholder = "feature/my-change";
+  name.required = true;
+  nameLabel.append(name);
+
+  const sourceLabel = element("label", "Create from");
+  const source = element("select");
+  source.name = "from";
+  source.required = true;
+  for (const branch of data.branches) {
+    const option = element("option", branch.name);
+    option.value = branch.name;
+    source.append(option);
+  }
+  const selectedSource = data.branches.some((branch) => branch.name === route.ref)
+    ? route.ref
+    : data.defaultBranch;
+  if (data.branches.some((branch) => branch.name === selectedSource)) {
+    source.value = selectedSource;
+  }
+  sourceLabel.append(source);
+
+  const button = element("button", "Create branch");
+  button.type = "submit";
+  form.append(nameLabel, sourceLabel, button);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    try {
+      await request(
+        `${repositoryBranchAPIURL(route.repository, name.value)}?from=${encodeURIComponent(source.value)}`,
+        {method: "POST"},
+      );
+      window.location.href = repositoryBrowserURL(route.repository, {
+        ref: name.value,
+      });
+    } catch (reason) {
+      const previousError = details.querySelector(".error");
+      previousError?.remove();
+      details.append(statusMessage(
+        reason instanceof Error ? reason.message : "Could not create the branch.",
+        true,
+      ));
+      button.disabled = false;
+    }
+  });
+  details.append(form);
+  return details;
+}
+
 async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<void> {
   const branchesRequest = request<RepositoryBranches>(
     repositoryBranchesAPIURL(route.repository),
@@ -715,7 +784,12 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     commit.append("Commit: ", element("code", content.commit.slice(0, 12)));
     ref.append(commit);
   }
-  app.append(heading, ref, repositoryNavigation(route));
+  app.append(
+    heading,
+    ref,
+    repositoryNavigation(route),
+    repositoryBranchCreator(route, branches),
+  );
 
   if (route.view === "history") {
     app.append(repositoryHistory(commits));

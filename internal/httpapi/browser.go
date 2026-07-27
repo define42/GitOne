@@ -29,6 +29,13 @@ type repositoryBranchesInput struct {
 	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
 }
 
+type createRepositoryBranchInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Branch     string `path:"branch" doc:"URL-encoded name for the new branch"`
+	From       string `query:"from" doc:"Existing branch from which the new branch is created"`
+}
+
 type repositoryBrowserRefInput struct {
 	AuthInput
 	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
@@ -68,6 +75,15 @@ type repositoryBranchesOutput struct {
 		Repository    string             `json:"repository"`
 		DefaultBranch string             `json:"defaultBranch"`
 		Branches      []repositoryBranch `json:"branches"`
+	}
+}
+
+type createRepositoryBranchOutput struct {
+	Body struct {
+		Repository string `json:"repository"`
+		Name       string `json:"name"`
+		From       string `json:"from"`
+		Commit     string `json:"commit"`
 	}
 }
 
@@ -120,6 +136,15 @@ func registerRepositoryBrowser(api huma.API, service API) {
 		Summary:     "List repository branches",
 		Tags:        []string{"Repository browser"},
 	}), service.listRepositoryBranches)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "create-repository-branch",
+		Method:        http.MethodPost,
+		Path:          "/api/repositories/{repository}/branches/{branch}",
+		Summary:       "Create a repository branch",
+		Tags:          []string{"Repository browser"},
+		DefaultStatus: http.StatusCreated,
+	}), service.createRepositoryBranch)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-repository-root",
@@ -184,6 +209,46 @@ func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranch
 	output.Body.Repository = parsed.Full()
 	output.Body.DefaultBranch = "main"
 	output.Body.Branches = branches
+	return output, nil
+}
+
+func (a API) createRepositoryBranch(ctx context.Context, input *createRepositoryBranchInput) (*createRepositoryBranchOutput, error) {
+	repository, parsed, err := a.openRepository(ctx, input.Authorization, input.Repository, control.RoleWrite)
+	if err != nil {
+		return nil, err
+	}
+	branchName, err := validatedBranchReference(input.Branch)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid new branch name", err)
+	}
+	sourceName, err := validatedBranchReference(input.From)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid source branch name", err)
+	}
+	if _, err = repository.Reference(branchName, false); err == nil {
+		return nil, huma.Error409Conflict("branch already exists")
+	} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil, huma.Error500InternalServerError("could not check branch", err)
+	}
+	source, err := repository.Reference(sourceName, true)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil, huma.Error404NotFound("source branch not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not read source branch", err)
+	}
+	if _, err = repository.CommitObject(source.Hash()); err != nil {
+		return nil, huma.Error409Conflict("source branch does not point to a commit", err)
+	}
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(branchName, source.Hash())); err != nil {
+		return nil, huma.Error409Conflict("could not create branch", err)
+	}
+
+	output := &createRepositoryBranchOutput{}
+	output.Body.Repository = parsed.Full()
+	output.Body.Name = input.Branch
+	output.Body.From = input.From
+	output.Body.Commit = source.Hash().String()
 	return output, nil
 }
 
@@ -348,11 +413,15 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 }
 
 func (a API) openBrowsableRepository(ctx context.Context, authorization, value string) (*git.Repository, repopath.Repository, error) {
+	return a.openRepository(ctx, authorization, value, control.RoleRead)
+}
+
+func (a API) openRepository(ctx context.Context, authorization, value string, role control.Role) (*git.Repository, repopath.Repository, error) {
 	parsed, err := parseRepositoryPath(value)
 	if err != nil {
 		return nil, repopath.Repository{}, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, authorization, parsed.Group(), control.RoleRead); err != nil {
+	if _, err = a.authorize(ctx, authorization, parsed.Group(), role); err != nil {
 		return nil, repopath.Repository{}, err
 	}
 	repositoryPath, err := a.Storage.GitPath(parsed)
@@ -364,6 +433,17 @@ func (a API) openBrowsableRepository(ctx context.Context, authorization, value s
 		return nil, repopath.Repository{}, huma.Error404NotFound("repository not found", err)
 	}
 	return repository, parsed, nil
+}
+
+func validatedBranchReference(value string) (plumbing.ReferenceName, error) {
+	if value == "" || value != strings.TrimSpace(value) {
+		return "", plumbing.ErrInvalidReferenceName
+	}
+	reference := plumbing.NewBranchReferenceName(value)
+	if err := reference.Validate(); err != nil {
+		return "", err
+	}
+	return reference, nil
 }
 
 func resolveBrowserCommit(repository *git.Repository, ref string) (*object.Commit, error) {

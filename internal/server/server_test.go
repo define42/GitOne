@@ -16,7 +16,6 @@ import (
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gittransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
@@ -379,16 +378,6 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bareRepository, err := git.PlainOpen(filepath.Join(root, "engineering", "api.git"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = bareRepository.Storer.SetReference(plumbing.NewHashReference(
-		plumbing.NewBranchReferenceName("feature/docs"),
-		head.Hash(),
-	)); err != nil {
-		t.Fatal(err)
-	}
 
 	handler := New(Config{
 		Root:           root,
@@ -412,6 +401,57 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	handler.ServeHTTP(unauthenticatedResponse, unauthenticated)
 	if unauthenticatedResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("repository browser authentication: expected status %d, got %d", http.StatusUnauthorized, unauthenticatedResponse.Code)
+	}
+
+	createBranch := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/branches/feature%2Fdocs?from=main",
+		nil,
+	)
+	createBranch.SetBasicAuth("alice", "secret")
+	createBranchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createBranchResponse, createBranch)
+	if createBranchResponse.Code != http.StatusCreated {
+		t.Fatalf("create branch: expected status %d, got %d: %s", http.StatusCreated, createBranchResponse.Code, createBranchResponse.Body.String())
+	}
+	var createdBranch struct {
+		Repository string `json:"repository"`
+		Name       string `json:"name"`
+		From       string `json:"from"`
+		Commit     string `json:"commit"`
+	}
+	if err = json.Unmarshal(createBranchResponse.Body.Bytes(), &createdBranch); err != nil {
+		t.Fatal(err)
+	}
+	if createdBranch.Repository != "engineering/api" ||
+		createdBranch.Name != "feature/docs" ||
+		createdBranch.From != "main" ||
+		createdBranch.Commit != head.Hash().String() {
+		t.Fatalf("unexpected created branch: %#v", createdBranch)
+	}
+
+	duplicateBranch := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/branches/feature%2Fdocs?from=main",
+		nil,
+	)
+	duplicateBranch.SetBasicAuth("alice", "secret")
+	duplicateBranchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateBranchResponse, duplicateBranch)
+	if duplicateBranchResponse.Code != http.StatusConflict {
+		t.Fatalf("duplicate branch: expected status %d, got %d: %s", http.StatusConflict, duplicateBranchResponse.Code, duplicateBranchResponse.Body.String())
+	}
+
+	missingSource := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/branches/other?from=missing",
+		nil,
+	)
+	missingSource.SetBasicAuth("alice", "secret")
+	missingSourceResponse := httptest.NewRecorder()
+	handler.ServeHTTP(missingSourceResponse, missingSource)
+	if missingSourceResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing source branch: expected status %d, got %d: %s", http.StatusNotFound, missingSourceResponse.Code, missingSourceResponse.Body.String())
 	}
 
 	var branches struct {
@@ -656,7 +696,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=15">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=16">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 		if strings.Contains(body, `<h1><a href="/">GitOne</a></h1>`) ||
@@ -710,12 +750,15 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "repositoryBranchesAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), `parameters.get("ref") || "main"`) ||
 		!strings.Contains(assetResponse.Body.String(), `branchSelect.addEventListener("change"`) ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryBranchCreator") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryBranchAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), `?from=${encodeURIComponent(source.value)}`) ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryHistory") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryNavigation") ||
 		!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 20`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "tree"`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "blob"`) {
-		t.Fatal("served UI does not support repository files and branch history")
+		t.Fatal("served UI does not support repository files, branch creation, and branch history")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") ||
 		!strings.Contains(assetResponse.Body.String(), `input.value !== repositoryName`) ||
@@ -750,6 +793,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			for _, expected := range []string{
 				`"Repository browser"`,
 				`"/api/repositories/{repository}/branches"`,
+				`"/api/repositories/{repository}/branches/{branch}"`,
 				`"/api/repositories/{repository}/tree/{ref}"`,
 				`"/api/repositories/{repository}/tree/{ref}/{path}"`,
 				`"/api/repositories/{repository}/blob/{ref}/{path}"`,

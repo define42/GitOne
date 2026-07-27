@@ -157,6 +157,20 @@ td {
   font-weight: 700;
 }
 
+.branch-create-control {
+  margin-top: 1rem;
+}
+
+.branch-create-control summary {
+  cursor: pointer;
+  font-weight: 700;
+  width: fit-content;
+}
+
+.branch-create-control form {
+  margin-top: 1rem;
+}
+
 .file-content {
   border: 1px solid;
   max-height: 40rem;
