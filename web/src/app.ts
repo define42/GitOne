@@ -1542,34 +1542,6 @@ function relativeTime(value: string): string {
   return formatter.format(seconds, "second");
 }
 
-function repositoryCommitList(data: RepositoryCommits): HTMLElement {
-  const section = element("section");
-  section.className = "content-section";
-  section.append(sectionHeading("Recent commits", data.commits.length));
-  if (data.commits.length === 0) {
-    section.append(emptyState("No commits yet."));
-    return section;
-  }
-  const list = element("ol");
-  list.className = "commit-list";
-  for (const commit of data.commits) {
-    const item = element("li");
-    const heading = element("div");
-    const hash = element("code", commit.hash.slice(0, 8));
-    const message = element("strong", commit.message.split("\n")[0] || "(no message)");
-    heading.append(hash, message);
-    const metadata = element(
-      "span",
-      `${commit.author} committed ${relativeTime(commit.committed)}`,
-    );
-    metadata.title = new Date(commit.committed).toLocaleString();
-    item.append(heading, metadata);
-    list.append(item);
-  }
-  section.append(list);
-  return section;
-}
-
 function repositoryHistory(
   route: RepositoryBrowserRoute,
   data: RepositoryCommits,
@@ -2489,7 +2461,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     repositoryBranchesAPIURL(route.repository),
   );
   const commitsRequest = request<RepositoryCommits>(
-    `${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=${route.view === "history" ? 100 : 20}`,
+    `${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=${route.view === "history" ? 100 : 1}`,
   );
   const contentRequest: Promise<RepositoryTree | RepositoryBlob | null> =
     route.view === "history"
@@ -2632,7 +2604,6 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     app.append(await repositoryBlobSection(route, content));
   }
 
-  app.append(repositoryCommitList(commits));
 }
 
 async function renderRoot(message?: string): Promise<void> {

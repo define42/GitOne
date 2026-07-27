@@ -1157,30 +1157,6 @@ function relativeTime(value) {
     }
     return formatter.format(seconds, "second");
 }
-function repositoryCommitList(data) {
-    const section = element("section");
-    section.className = "content-section";
-    section.append(sectionHeading("Recent commits", data.commits.length));
-    if (data.commits.length === 0) {
-        section.append(emptyState("No commits yet."));
-        return section;
-    }
-    const list = element("ol");
-    list.className = "commit-list";
-    for (const commit of data.commits) {
-        const item = element("li");
-        const heading = element("div");
-        const hash = element("code", commit.hash.slice(0, 8));
-        const message = element("strong", commit.message.split("\n")[0] || "(no message)");
-        heading.append(hash, message);
-        const metadata = element("span", `${commit.author} committed ${relativeTime(commit.committed)}`);
-        metadata.title = new Date(commit.committed).toLocaleString();
-        item.append(heading, metadata);
-        list.append(item);
-    }
-    section.append(list);
-    return section;
-}
 function repositoryHistory(route, data) {
     const section = element("section");
     section.className = "repository-history content-section";
@@ -1948,7 +1924,7 @@ async function renderRepositoryBrowser(route) {
     const repositoryName = repositoryParts.at(-1) ?? route.repository;
     const groupPath = repositoryParts.slice(0, -1).join("/");
     const branchesRequest = request(repositoryBranchesAPIURL(route.repository));
-    const commitsRequest = request(`${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=${route.view === "history" ? 100 : 20}`);
+    const commitsRequest = request(`${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=${route.view === "history" ? 100 : 1}`);
     const contentRequest = route.view === "history"
         ? Promise.resolve(null)
         : route.file === null
@@ -2079,7 +2055,6 @@ async function renderRepositoryBrowser(route) {
     else {
         app.append(await repositoryBlobSection(route, content));
     }
-    app.append(repositoryCommitList(commits));
 }
 async function renderRoot(message) {
     const data = await request("/api/groups");

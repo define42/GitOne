@@ -1937,7 +1937,6 @@ table {
   padding-left: 1rem;
 }
 
-.commit-list,
 .history-list {
   display: grid;
   gap: 0.55rem;
@@ -1946,37 +1945,9 @@ table {
   padding: 0;
 }
 
-.commit-list li {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  display: grid;
-  gap: 0.35rem;
-  padding: 0.75rem 0.9rem;
-}
-
-.commit-list li > div {
-  align-items: baseline;
-  display: grid;
-  gap: 0.65rem;
-  grid-template-columns: auto minmax(0, 1fr);
-}
-
-.commit-list li strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.commit-list li > span,
 .history-list > li > span {
   color: var(--muted);
   font-size: 0.8rem;
-}
-
-.commit-list code {
-  color: var(--accent);
-  font-size: 0.78rem;
 }
 
 .repository-history {

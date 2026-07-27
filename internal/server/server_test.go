@@ -1336,6 +1336,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "document.documentElement.dataset.theme = theme") {
 		t.Fatal("served UI does not persist and apply color themes")
 	}
+	if strings.Contains(assetResponse.Body.String(), `"Recent commits"`) {
+		t.Fatal("served UI should reserve commit lists for history")
+	}
 	stylesRequest := httptest.NewRequest(http.MethodGet, "/assets/styles.css", nil)
 	stylesRequest.SetBasicAuth("alice", "secret")
 	stylesResponse := httptest.NewRecorder()
@@ -1414,7 +1417,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "repositoryCommitDiffAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), "Loading commit diff") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryNavigation") ||
-		!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 20`) ||
+			!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 1`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "tree"`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "blob"`) {
 		t.Fatal("served UI does not support repository files, branches, and commit history diffs")
