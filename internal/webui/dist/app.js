@@ -32,6 +32,21 @@ const iconPaths = {
         "M21 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
         "M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
     ],
+    "git-compare": [
+        "M18 3v12",
+        "m15 12 3 3 3-3",
+        "M6 21V9",
+        "m3 12-3-3-3 3",
+        "m15 6 3-3 3 3",
+        "m3 18 3 3 3-3",
+    ],
+    "git-merge": [
+        "M18 18a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+        "M6 6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+        "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+        "M6 9v9",
+        "M18 15v-1a5 5 0 0 0-5-5h-2a5 5 0 0 1-5-5",
+    ],
     plus: ["M5 12h14", "M12 5v14"],
     repository: [
         "M15 4h3a2 2 0 0 1 2 2v13a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8v18",
@@ -107,6 +122,13 @@ function repositoryBranchesAPIURL(repository) {
 }
 function repositoryBranchAPIURL(repository, branch) {
     return `${repositoryBranchesAPIURL(repository)}/${encodeURIComponent(branch)}`;
+}
+function repositoryComparisonAPIURL(repository, base, head) {
+    const parameters = new URLSearchParams({ base, head });
+    return `/api/repositories/${encodeURIComponent(repository)}/compare?${parameters}`;
+}
+function repositoryMergesAPIURL(repository) {
+    return `/api/repositories/${encodeURIComponent(repository)}/merges`;
 }
 function repositoryAPIURL(repository, operation, ref, path) {
     const base = `/api/repositories/${encodeURIComponent(repository)}/${operation}/${encodeURIComponent(ref)}`;
@@ -1230,6 +1252,266 @@ function repositoryBranchCreator(route, data) {
     });
     return { trigger, dialog };
 }
+function comparisonStat(label, value) {
+    const stat = element("span");
+    stat.append(element("strong", value), document.createTextNode(label));
+    return stat;
+}
+function comparisonDiff(file) {
+    const section = element("section");
+    section.className = "comparison-file";
+    const header = element("header");
+    const identity = element("div");
+    const status = element("span", file.status.slice(0, 1).toUpperCase());
+    status.className = `change-status change-${file.status}`;
+    const path = element("div");
+    path.append(element("strong", file.path));
+    if (file.oldPath) {
+        path.append(element("span", `from ${file.oldPath}`));
+    }
+    identity.append(status, path);
+    const changes = element("span");
+    changes.className = "change-count";
+    changes.append(element("span", `+${file.additions}`), element("span", `−${file.deletions}`));
+    header.append(identity, changes);
+    section.append(header);
+    if (file.binary) {
+        const binary = element("p", "Binary files differ.");
+        binary.className = "binary-diff";
+        section.append(binary);
+        return section;
+    }
+    if (!file.patch) {
+        return section;
+    }
+    const code = element("code");
+    for (const line of file.patch.split("\n")) {
+        const row = element("span", line || " ");
+        row.className = "diff-line";
+        if (line.startsWith("@@")) {
+            row.classList.add("diff-hunk");
+        }
+        else if (line.startsWith("+") && !line.startsWith("+++")) {
+            row.classList.add("diff-added");
+        }
+        else if (line.startsWith("-") && !line.startsWith("---")) {
+            row.classList.add("diff-deleted");
+        }
+        else if (line.startsWith("diff ") ||
+            line.startsWith("index ") ||
+            line.startsWith("---") ||
+            line.startsWith("+++")) {
+            row.classList.add("diff-metadata");
+        }
+        code.append(row);
+    }
+    const pre = element("pre");
+    pre.className = "comparison-patch";
+    pre.append(code);
+    section.append(pre);
+    if (file.truncated) {
+        const notice = element("p", "Diff truncated at 1 MiB.");
+        notice.className = "diff-truncated";
+        section.append(notice);
+    }
+    return section;
+}
+function branchComparisonResult(route, comparison, dialog) {
+    const result = element("div");
+    result.className = "comparison-result";
+    const summary = element("section");
+    summary.className = "comparison-summary";
+    const direction = element("div");
+    direction.className = "comparison-direction";
+    direction.append(element("code", comparison.base), icon("chevron-right"), element("code", comparison.head));
+    const stats = element("div");
+    stats.className = "comparison-stats";
+    const additions = comparison.files.reduce((total, file) => total + file.additions, 0);
+    const deletions = comparison.files.reduce((total, file) => total + file.deletions, 0);
+    stats.append(comparisonStat("commits ahead", String(comparison.ahead)), comparisonStat("behind", String(comparison.behind)), comparisonStat("files changed", String(comparison.files.length)), comparisonStat("additions", `+${additions}`), comparisonStat("deletions", `−${deletions}`));
+    summary.append(direction, stats);
+    result.append(summary);
+    const mergeStatus = element("section");
+    mergeStatus.className = comparison.mergeable
+        ? "merge-status merge-ready"
+        : "merge-status merge-conflicted";
+    const statusCopy = element("div");
+    const statusTitle = element("strong", comparison.mergeable ? "Branches can be merged" : "Merge conflicts detected");
+    const statusDetail = element("span", comparison.mergeable
+        ? comparison.ahead === 0
+            ? `${comparison.head} has no commits to merge into ${comparison.base}.`
+            : `${comparison.head} can be merged into ${comparison.base} without conflicts.`
+        : "Resolve the conflicting files in a local checkout before merging.");
+    statusCopy.append(statusTitle, statusDetail);
+    mergeStatus.append(statusCopy);
+    if (!comparison.mergeable && comparison.conflicts.length > 0) {
+        const conflicts = element("ul");
+        conflicts.className = "conflict-list";
+        for (const path of comparison.conflicts) {
+            conflicts.append(element("li", path));
+        }
+        mergeStatus.append(conflicts);
+    }
+    else if (comparison.canMerge && comparison.ahead > 0) {
+        const mergeAction = actionButton(`Merge into ${comparison.base}`, "git-merge", "primary");
+        const confirmation = element("div");
+        confirmation.className = "merge-confirmation";
+        mergeAction.addEventListener("click", () => {
+            mergeAction.hidden = true;
+            const copy = element("span", `Merge ${comparison.head} into ${comparison.base}?`);
+            const cancel = actionButton("Cancel", undefined, "secondary");
+            const confirm = actionButton("Merge branches", "git-merge", "primary");
+            cancel.addEventListener("click", () => {
+                confirmation.replaceChildren();
+                mergeAction.hidden = false;
+            });
+            confirm.addEventListener("click", async () => {
+                confirm.disabled = true;
+                cancel.disabled = true;
+                confirmation.setAttribute("aria-busy", "true");
+                try {
+                    const merged = await request(repositoryMergesAPIURL(route.repository), {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            target: comparison.base,
+                            source: comparison.head,
+                        }),
+                    });
+                    dialog.close();
+                    const nextRoute = {
+                        repository: route.repository,
+                        ref: comparison.base,
+                        path: "",
+                        file: null,
+                        view: "files",
+                    };
+                    window.history.pushState(null, "", repositoryBrowserURL(route.repository, { ref: comparison.base }));
+                    await renderRepositoryBrowser(nextRoute);
+                    const action = merged.strategy === "fast-forward"
+                        ? "fast-forwarded"
+                        : merged.strategy === "already-up-to-date"
+                            ? "was already up to date"
+                            : "merged";
+                    showStatus(`${comparison.head} ${action} into ${comparison.base} at ${merged.commit.slice(0, 8)}.`);
+                }
+                catch (reason) {
+                    showStatus(reason instanceof Error ? reason.message : "Could not merge the branches.", true);
+                    confirm.disabled = false;
+                    cancel.disabled = false;
+                    confirmation.removeAttribute("aria-busy");
+                }
+            });
+            confirmation.append(copy, cancel, confirm);
+        });
+        mergeStatus.append(mergeAction, confirmation);
+    }
+    result.append(mergeStatus);
+    const files = element("div");
+    files.className = "comparison-files";
+    if (comparison.files.length === 0) {
+        files.append(emptyState("No file changes between these branches."));
+    }
+    else {
+        for (const file of comparison.files) {
+            files.append(comparisonDiff(file));
+        }
+    }
+    result.append(files);
+    return result;
+}
+function repositoryBranchComparison(route, data) {
+    const trigger = actionButton("Compare", "git-compare", "secondary");
+    const dialog = element("dialog");
+    dialog.className = "action-dialog comparison-dialog";
+    if (data.branches.length < 2) {
+        trigger.disabled = true;
+        trigger.title = "Create another branch to compare changes";
+        return { trigger, dialog };
+    }
+    const shell = element("div");
+    shell.className = "comparison-shell";
+    const header = element("div");
+    header.className = "dialog-header";
+    const title = element("h2", "Compare branches");
+    const close = actionButton("Close", "close", "icon-button");
+    close.setAttribute("aria-label", "Close");
+    close.title = "Close";
+    header.append(title, close);
+    const form = element("form");
+    form.className = "comparison-controls";
+    const targetLabel = element("label", "Target");
+    const target = element("select");
+    target.name = "base";
+    const sourceLabel = element("label", "Source");
+    const source = element("select");
+    source.name = "head";
+    for (const branch of data.branches) {
+        const targetOption = element("option", branch.name);
+        targetOption.value = branch.name;
+        target.append(targetOption);
+        const sourceOption = element("option", branch.name);
+        sourceOption.value = branch.name;
+        source.append(sourceOption);
+    }
+    const selectedTarget = data.branches.some((branch) => branch.name === route.ref)
+        ? route.ref
+        : data.defaultBranch;
+    target.value = selectedTarget;
+    const syncSource = () => {
+        for (const option of source.options) {
+            option.disabled = option.value === target.value;
+        }
+        if (source.value === target.value || !source.value) {
+            source.value = data.branches.find((branch) => branch.name !== target.value)?.name ?? "";
+        }
+    };
+    source.value = data.branches.find((branch) => branch.name !== selectedTarget)?.name ?? "";
+    syncSource();
+    target.addEventListener("change", syncSource);
+    targetLabel.append(target);
+    sourceLabel.append(source);
+    const compare = actionButton("Compare branches", "git-compare", "primary");
+    compare.type = "submit";
+    form.append(targetLabel, sourceLabel, compare);
+    const body = element("div");
+    body.className = "comparison-body";
+    body.append(emptyState("Choose a target and source branch."));
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        compare.disabled = true;
+        form.setAttribute("aria-busy", "true");
+        const loading = element("p", "Comparing branches…");
+        loading.className = "comparison-loading";
+        body.replaceChildren(loading);
+        try {
+            const comparison = await request(repositoryComparisonAPIURL(route.repository, target.value, source.value));
+            body.replaceChildren(branchComparisonResult(route, comparison, dialog));
+        }
+        catch (reason) {
+            const error = element("div", reason instanceof Error ? reason.message : "Could not compare the branches.");
+            error.className = "comparison-error";
+            body.replaceChildren(error);
+        }
+        finally {
+            compare.disabled = false;
+            form.removeAttribute("aria-busy");
+        }
+    });
+    shell.append(header, form, body);
+    dialog.append(shell);
+    trigger.addEventListener("click", () => {
+        dialog.showModal();
+        void form.requestSubmit();
+    });
+    close.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) {
+            dialog.close();
+        }
+    });
+    return { trigger, dialog };
+}
 function cloneControl(value) {
     const control = element("div");
     control.className = "clone-control";
@@ -1370,6 +1652,7 @@ async function renderRepositoryBrowser(route) {
     overview.className = "repository-overview";
     overview.append(cloneControl(repositoryURL(groupPath, repositoryName, group.username)));
     const branchCreator = repositoryBranchCreator(route, branches);
+    const branchComparison = repositoryBranchComparison(route, branches);
     const toolbar = element("div");
     toolbar.className = "repository-toolbar";
     const branchControl = element("div");
@@ -1408,9 +1691,12 @@ async function renderRepositoryBrowser(route) {
         commit.append(element("span", "Commit"), element("code", commitHash.slice(0, 12)));
         branchControl.append(commit);
     }
-    toolbar.append(branchControl, branchCreator.trigger);
+    const repositoryActions = element("div");
+    repositoryActions.className = "repository-actions";
+    repositoryActions.append(branchComparison.trigger, branchCreator.trigger);
+    toolbar.append(branchControl, repositoryActions);
     overview.append(toolbar);
-    app.append(overview, repositoryNavigation(route), branchCreator.dialog);
+    app.append(overview, repositoryNavigation(route), branchCreator.dialog, branchComparison.dialog);
     if (route.view === "history") {
         app.append(repositoryHistory(commits));
         return;

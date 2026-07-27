@@ -16,6 +16,8 @@ import (
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gittransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
@@ -652,6 +654,258 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 }
 
+func TestCompareAndMergeRepositoryBranches(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", "Engineering projects"); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+		Description:      "Backend API",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	barePath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	featureCommit := commitBranchFile(
+		t,
+		barePath,
+		"feature",
+		"feature.txt",
+		"Feature branch\n",
+		"Add feature",
+	)
+	mainCommit := commitBranchFile(
+		t,
+		barePath,
+		"main",
+		"main.txt",
+		"Main branch\n",
+		"Update main",
+	)
+
+	handler := New(Config{
+		Root:           root,
+		BootstrapUser:  "alice",
+		BootstrapToken: "secret",
+	})
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.SetBasicAuth("alice", "secret")
+		if body != "" {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	comparisonResponse := do(
+		http.MethodGet,
+		"/api/repositories/engineering%2Fapi/compare?base=main&head=feature",
+		"",
+	)
+	if comparisonResponse.Code != http.StatusOK {
+		t.Fatalf("compare branches: expected status %d, got %d: %s", http.StatusOK, comparisonResponse.Code, comparisonResponse.Body.String())
+	}
+	var comparison struct {
+		Base       string `json:"base"`
+		Head       string `json:"head"`
+		BaseCommit string `json:"baseCommit"`
+		HeadCommit string `json:"headCommit"`
+		Ahead      int    `json:"ahead"`
+		Behind     int    `json:"behind"`
+		Mergeable  bool   `json:"mergeable"`
+		CanMerge   bool   `json:"canMerge"`
+		Conflicts  []string
+		Files      []struct {
+			Path      string `json:"path"`
+			Status    string `json:"status"`
+			Additions int    `json:"additions"`
+			Patch     string `json:"patch"`
+		} `json:"files"`
+	}
+	if err = json.Unmarshal(comparisonResponse.Body.Bytes(), &comparison); err != nil {
+		t.Fatal(err)
+	}
+	if comparison.Base != "main" ||
+		comparison.Head != "feature" ||
+		comparison.BaseCommit != mainCommit.String() ||
+		comparison.HeadCommit != featureCommit.String() ||
+		comparison.Ahead != 1 ||
+		comparison.Behind != 1 ||
+		!comparison.Mergeable ||
+		!comparison.CanMerge ||
+		len(comparison.Conflicts) != 0 ||
+		len(comparison.Files) != 1 ||
+		comparison.Files[0].Path != "feature.txt" ||
+		comparison.Files[0].Status != "added" ||
+		comparison.Files[0].Additions != 1 ||
+		!strings.Contains(comparison.Files[0].Patch, "+Feature branch") {
+		t.Fatalf("unexpected branch comparison: %#v", comparison)
+	}
+
+	mergeResponse := do(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/merges",
+		`{"target":"main","source":"feature"}`,
+	)
+	if mergeResponse.Code != http.StatusOK {
+		t.Fatalf("merge branches: expected status %d, got %d: %s", http.StatusOK, mergeResponse.Code, mergeResponse.Body.String())
+	}
+	var merged struct {
+		Commit   string `json:"commit"`
+		Strategy string `json:"strategy"`
+	}
+	if err = json.Unmarshal(mergeResponse.Body.Bytes(), &merged); err != nil {
+		t.Fatal(err)
+	}
+	if merged.Commit == "" || merged.Strategy != "merge-commit" {
+		t.Fatalf("unexpected merge result: %#v", merged)
+	}
+	bareRepository, err := git.PlainOpen(barePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainReference, err := bareRepository.Reference(plumbing.NewBranchReferenceName("main"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mainReference.Hash().String() != merged.Commit {
+		t.Fatalf("main points to %s instead of merge commit %s", mainReference.Hash(), merged.Commit)
+	}
+	mergeCommit, err := bareRepository.CommitObject(mainReference.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mergeCommit.ParentHashes) != 2 ||
+		mergeCommit.ParentHashes[0] != mainCommit ||
+		mergeCommit.ParentHashes[1] != featureCommit {
+		t.Fatalf("unexpected merge parents: %#v", mergeCommit.ParentHashes)
+	}
+	if _, err = mergeCommit.File("main.txt"); err != nil {
+		t.Fatalf("merged tree is missing main.txt: %v", err)
+	}
+	if _, err = mergeCommit.File("feature.txt"); err != nil {
+		t.Fatalf("merged tree is missing feature.txt: %v", err)
+	}
+
+	conflictTarget := commitBranchFile(
+		t,
+		barePath,
+		"conflict-target",
+		"README.md",
+		"Target version\n",
+		"Edit README on target",
+	)
+	_ = commitBranchFile(
+		t,
+		barePath,
+		"conflict-source",
+		"README.md",
+		"Source version\n",
+		"Edit README on source",
+	)
+	conflictComparisonResponse := do(
+		http.MethodGet,
+		"/api/repositories/engineering%2Fapi/compare?base=conflict-target&head=conflict-source",
+		"",
+	)
+	if conflictComparisonResponse.Code != http.StatusOK {
+		t.Fatalf("compare conflicting branches: expected status %d, got %d: %s", http.StatusOK, conflictComparisonResponse.Code, conflictComparisonResponse.Body.String())
+	}
+	var conflictComparison struct {
+		Mergeable bool     `json:"mergeable"`
+		Conflicts []string `json:"conflicts"`
+	}
+	if err = json.Unmarshal(conflictComparisonResponse.Body.Bytes(), &conflictComparison); err != nil {
+		t.Fatal(err)
+	}
+	if conflictComparison.Mergeable ||
+		len(conflictComparison.Conflicts) != 1 ||
+		conflictComparison.Conflicts[0] != "README.md" {
+		t.Fatalf("unexpected conflict assessment: %#v", conflictComparison)
+	}
+
+	conflictMergeResponse := do(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/merges",
+		`{"target":"conflict-target","source":"conflict-source"}`,
+	)
+	if conflictMergeResponse.Code != http.StatusConflict {
+		t.Fatalf("conflicting merge: expected status %d, got %d: %s", http.StatusConflict, conflictMergeResponse.Code, conflictMergeResponse.Body.String())
+	}
+	conflictTargetReference, err := bareRepository.Reference(
+		plumbing.NewBranchReferenceName("conflict-target"),
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conflictTargetReference.Hash() != conflictTarget {
+		t.Fatalf("conflicting merge moved target from %s to %s", conflictTarget, conflictTargetReference.Hash())
+	}
+}
+
+func commitBranchFile(
+	t *testing.T,
+	remotePath string,
+	branch string,
+	fileName string,
+	content string,
+	message string,
+) plumbing.Hash {
+	t.Helper()
+	checkout := filepath.Join(t.TempDir(), branch)
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: remotePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repository.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchReference := plumbing.NewBranchReferenceName(branch)
+	if branch != "main" {
+		if err = worktree.Checkout(&git.CheckoutOptions{
+			Branch: branchReference,
+			Create: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = os.WriteFile(filepath.Join(checkout, fileName), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Add(fileName); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := worktree.Commit(message, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "alice",
+			Email: "alice@localhost",
+			When:  time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refSpec := config.RefSpec(
+		branchReference.String() + ":" + branchReference.String(),
+	)
+	if err = repository.Push(&git.PushOptions{RefSpecs: []config.RefSpec{refSpec}}); err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
 func TestHumaGroupNavigationAPI(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}
@@ -861,6 +1115,10 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "repositoryBranchCreator") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryBranchAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), `?from=${encodeURIComponent(source.value)}`) ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryBranchComparison") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryComparisonAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryMergesAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), "branchComparisonResult") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryHistory") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryNavigation") ||
 		!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 20`) ||
@@ -909,6 +1167,8 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 				`"/api/repositories/{repository}/branches"`,
 				`"/api/groups/{path}/settings"`,
 				`"/api/repositories/{repository}/branches/{branch}"`,
+				`"/api/repositories/{repository}/compare"`,
+				`"/api/repositories/{repository}/merges"`,
 				`"/api/repositories/{repository}/tree/{ref}"`,
 				`"/api/repositories/{repository}/tree/{ref}/{path}"`,
 				`"/api/repositories/{repository}/blob/{ref}/{path}"`,

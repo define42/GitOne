@@ -36,6 +36,25 @@ type createRepositoryBranchInput struct {
 	From       string `query:"from" doc:"Existing branch from which the new branch is created"`
 }
 
+type compareRepositoryBranchesInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Base       string `query:"base" required:"true" doc:"Target branch receiving the merge"`
+	Head       string `query:"head" required:"true" doc:"Source branch being compared"`
+}
+
+type mergeRepositoryBranchesBody struct {
+	Target  string `json:"target" minLength:"1" doc:"Branch receiving the merge"`
+	Source  string `json:"source" minLength:"1" doc:"Branch merged into the target"`
+	Message string `json:"message,omitempty" doc:"Optional merge commit message"`
+}
+
+type mergeRepositoryBranchesInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Body       mergeRepositoryBranchesBody
+}
+
 type repositoryBrowserRefInput struct {
 	AuthInput
 	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
@@ -128,6 +147,44 @@ type repositoryCommitsOutput struct {
 	}
 }
 
+type repositoryComparisonFile struct {
+	Path      string `json:"path"`
+	OldPath   string `json:"oldPath,omitempty"`
+	Status    string `json:"status" enum:"added,deleted,modified,renamed"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Binary    bool   `json:"binary"`
+	Patch     string `json:"patch,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type compareRepositoryBranchesOutput struct {
+	Body struct {
+		Repository string                     `json:"repository"`
+		Base       string                     `json:"base"`
+		Head       string                     `json:"head"`
+		BaseCommit string                     `json:"baseCommit"`
+		HeadCommit string                     `json:"headCommit"`
+		MergeBase  string                     `json:"mergeBase,omitempty"`
+		Ahead      int                        `json:"ahead"`
+		Behind     int                        `json:"behind"`
+		Mergeable  bool                       `json:"mergeable"`
+		CanMerge   bool                       `json:"canMerge"`
+		Conflicts  []string                   `json:"conflicts"`
+		Files      []repositoryComparisonFile `json:"files"`
+	}
+}
+
+type mergeRepositoryBranchesOutput struct {
+	Body struct {
+		Repository string `json:"repository"`
+		Target     string `json:"target"`
+		Source     string `json:"source"`
+		Commit     string `json:"commit"`
+		Strategy   string `json:"strategy" enum:"already-up-to-date,fast-forward,merge-commit"`
+	}
+}
+
 func registerRepositoryBrowser(api huma.API, service API) {
 	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-repository-branches",
@@ -145,6 +202,22 @@ func registerRepositoryBrowser(api huma.API, service API) {
 		Tags:          []string{"Repository browser"},
 		DefaultStatus: http.StatusCreated,
 	}), service.createRepositoryBranch)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "compare-repository-branches",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/compare",
+		Summary:     "Compare two repository branches",
+		Tags:        []string{"Repository browser"},
+	}), service.compareRepositoryBranches)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "merge-repository-branches",
+		Method:      http.MethodPost,
+		Path:        "/api/repositories/{repository}/merges",
+		Summary:     "Merge a source branch into a target branch",
+		Tags:        []string{"Repository browser"},
+	}), service.mergeRepositoryBranches)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-repository-root",
