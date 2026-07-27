@@ -1,10 +1,10 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/define42/GitOne/internal/control"
@@ -17,8 +17,7 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 		BootstrapUser:  "alice",
 		BootstrapToken: "secret",
 	})
-	request := httptest.NewRequest(http.MethodPost, "/api/groups", bytes.NewBufferString(`{"path":"engineering"}`))
-	request.Header.Set("Content-Type", "application/json")
+	request := httptest.NewRequest(http.MethodPost, "/api/groups/engineering", nil)
 	request.SetBasicAuth("alice", "secret")
 	response := httptest.NewRecorder()
 
@@ -45,7 +44,7 @@ func TestCreateGroupRejectsOwnerFields(t *testing.T) {
 		BootstrapUser:  "alice",
 		BootstrapToken: "secret",
 	})
-	request := httptest.NewRequest(http.MethodPost, "/api/groups", bytes.NewBufferString(`{"path":"engineering","owner":"mallory"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/groups/engineering", strings.NewReader(`{"owner":"mallory"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.SetBasicAuth("alice", "secret")
 	response := httptest.NewRecorder()

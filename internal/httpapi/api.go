@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 
@@ -12,9 +13,6 @@ import (
 type API struct {
 	Storage   storage.Store
 	Authorize func(*http.Request, string, bool) (string, bool)
-}
-type createGroup struct {
-	Path string `json:"path"`
 }
 type createRepo struct {
 	Group string `json:"group"`
@@ -33,7 +31,7 @@ func (a API) Routes() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	m.HandleFunc("POST /api/groups", a.createGroup)
+	m.HandleFunc("POST /api/groups/{path...}", a.createGroup)
 	m.HandleFunc("DELETE /api/groups/{path...}", a.deleteGroup)
 	m.HandleFunc("PATCH /api/groups/{path...}", a.renameGroup)
 	m.HandleFunc("POST /api/repositories", a.createRepo)
@@ -49,27 +47,26 @@ func (a API) allowed(r *http.Request, g string) bool {
 	return ok
 }
 func (a API) createGroup(w http.ResponseWriter, r *http.Request) {
-	var q createGroup
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&q) != nil {
-		http.Error(w, "invalid JSON", 400)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1))
+	if err != nil || len(body) != 0 {
+		http.Error(w, "request body not allowed", 400)
 		return
 	}
+	group := r.PathValue("path")
 	if a.Authorize == nil {
 		http.Error(w, "forbidden", 403)
 		return
 	}
-	owner, ok := a.Authorize(r, q.Path, true)
+	owner, ok := a.Authorize(r, group, true)
 	if !ok || owner == "" {
 		http.Error(w, "forbidden", 403)
 		return
 	}
-	if _, e := repopath.ParseGroup(q.Path); e != nil {
+	if _, e := repopath.ParseGroup(group); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	if e := a.Storage.CreateGroup(q.Path, owner); e != nil {
+	if e := a.Storage.CreateGroup(group, owner); e != nil {
 		http.Error(w, e.Error(), 409)
 		return
 	}
