@@ -77,7 +77,7 @@ func (s Store) CreateGroup(group, owner, tokenName, tokenHash string) error {
 	if e = os.MkdirAll(gp, 0750); e != nil {
 		return e
 	}
-	tmp, e := os.MkdirTemp("", "puregit-control-")
+	tmp, e := os.MkdirTemp("", "gitone-control-")
 	if e != nil {
 		return e
 	}

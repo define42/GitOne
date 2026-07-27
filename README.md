@@ -1,4 +1,4 @@
-# PureGit Server
+# GitOne Server
 
 Initial pure-Go Git Smart HTTP and Git LFS server. There is no SSH, database, native `git` binary, CGO, or UI.
 
@@ -16,9 +16,9 @@ Every repository belongs to at least one group. Every group must contain `contro
 ## Run
 
 ```bash
-export PUREGIT_BOOTSTRAP_USER=bootstrap
-export PUREGIT_BOOTSTRAP_TOKEN='replace-me'
-go run ./cmd/puregit -root ./data -listen :8080 -public-url http://localhost:8080
+export GITONE_BOOTSTRAP_USER=bootstrap
+export GITONE_BOOTSTRAP_TOKEN='replace-me'
+go run ./cmd/gitone -root ./data -listen :8080 -public-url http://localhost:8080
 ```
 
 ## Administration endpoints
