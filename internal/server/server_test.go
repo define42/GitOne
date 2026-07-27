@@ -696,7 +696,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=16">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=17">`) ||
+			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
+			!strings.Contains(body, `<div id="notifications"`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 		if strings.Contains(body, `<h1><a href="/">GitOne</a></h1>`) ||
@@ -733,8 +735,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		t.Fatal("served UI does not use the path-based group creation endpoint")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "navigator.clipboard") ||
-		!strings.Contains(assetResponse.Body.String(), "repositoryURL(data.path, repository.name, data.username)") {
+		!strings.Contains(assetResponse.Body.String(), "repositoryURL(groupPath, repositoryName, group.username)") {
 		t.Fatal("served UI does not provide copyable full repository URLs")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "DOMPurify.sanitize") ||
+		!strings.Contains(assetResponse.Body.String(), "marked.parse") {
+		t.Fatal("served UI does not safely render Markdown files")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "initializeReadme.checked = true") {
 		t.Fatal("served UI does not default the README initialization option to checked")
