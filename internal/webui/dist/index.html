@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GitOne</title>
+  <script>
+    try {
+      const theme = localStorage.getItem("gitone-color-theme");
+      if (["light", "dark", "steampunk", "windows", "macosx", "ubuntu", "solaris", "github", "gitlab"].includes(theme)) {
+        document.documentElement.dataset.theme = theme;
+      }
+    } catch {
+      // Dark remains the default when browser storage is unavailable.
+    }
+  </script>
   <link rel="icon" href="/assets/gitone.png">
   <link rel="stylesheet" href="/assets/styles.css">
   <script type="importmap">
@@ -27,6 +37,20 @@
         <a href="/">Groups</a>
         <a href="/docs">API</a>
       </nav>
+      <label class="theme-control" for="color-theme">
+        <span>Theme</span>
+        <select id="color-theme" aria-label="Color theme">
+          <option value="dark" selected>Dark</option>
+          <option value="light">Light</option>
+          <option value="steampunk">Steampunk</option>
+          <option value="windows">Windows</option>
+          <option value="macosx">Mac OS X</option>
+          <option value="ubuntu">Ubuntu</option>
+          <option value="solaris">Solaris</option>
+          <option value="github">GitHub</option>
+          <option value="gitlab">GitLab</option>
+        </select>
+      </label>
     </div>
   </header>
   <div id="notifications" class="notifications" aria-live="polite" aria-atomic="true"></div>

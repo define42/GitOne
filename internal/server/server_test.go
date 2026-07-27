@@ -1293,6 +1293,11 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
 			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=17">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
+			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
+			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
+			!strings.Contains(body, `<option value="dark" selected>Dark</option>`) ||
+			!strings.Contains(body, `<option value="github">GitHub</option>`) ||
+			!strings.Contains(body, `<option value="gitlab">GitLab</option>`) ||
 			!strings.Contains(body, `<div id="notifications"`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
@@ -1325,6 +1330,32 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	}
 	if assetResponse.Header().Get("Cache-Control") != "no-cache" {
 		t.Fatalf("unexpected asset cache policy: %q", assetResponse.Header().Get("Cache-Control"))
+	}
+	if !strings.Contains(assetResponse.Body.String(), "initializeColorTheme") ||
+		!strings.Contains(assetResponse.Body.String(), "localStorage.setItem(colorThemeStorageKey, theme)") ||
+		!strings.Contains(assetResponse.Body.String(), "document.documentElement.dataset.theme = theme") {
+		t.Fatal("served UI does not persist and apply color themes")
+	}
+	stylesRequest := httptest.NewRequest(http.MethodGet, "/assets/styles.css", nil)
+	stylesRequest.SetBasicAuth("alice", "secret")
+	stylesResponse := httptest.NewRecorder()
+	handler.ServeHTTP(stylesResponse, stylesRequest)
+	if stylesResponse.Code != http.StatusOK {
+		t.Fatalf("theme styles were not served: %d", stylesResponse.Code)
+	}
+	for _, theme := range []string{
+		"light",
+		"steampunk",
+		"windows",
+		"macosx",
+		"ubuntu",
+		"solaris",
+		"github",
+		"gitlab",
+	} {
+		if !strings.Contains(stylesResponse.Body.String(), `:root[data-theme="`+theme+`"]`) {
+			t.Fatalf("theme styles do not contain %q", theme)
+		}
 	}
 	diffAssetRequest := httptest.NewRequest(http.MethodGet, "/assets/diff.min.js", nil)
 	diffAssetRequest.SetBasicAuth("alice", "secret")

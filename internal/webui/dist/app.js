@@ -2,11 +2,58 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 const appRoot = document.querySelector("#app");
 const notificationRoot = document.querySelector("#notifications");
-if (!appRoot || !notificationRoot) {
+const colorThemeSelect = document.querySelector("#color-theme");
+if (!appRoot || !notificationRoot || !colorThemeSelect) {
     throw new Error("missing application shell");
 }
 const app = appRoot;
 const notifications = notificationRoot;
+const themeSelect = colorThemeSelect;
+const colorThemes = [
+    "light",
+    "dark",
+    "steampunk",
+    "windows",
+    "macosx",
+    "ubuntu",
+    "solaris",
+    "github",
+    "gitlab",
+];
+const colorThemeStorageKey = "gitone-color-theme";
+function isColorTheme(value) {
+    return colorThemes.includes(value);
+}
+function applyColorTheme(theme, persist = true) {
+    document.documentElement.dataset.theme = theme;
+    themeSelect.value = theme;
+    if (!persist) {
+        return;
+    }
+    try {
+        localStorage.setItem(colorThemeStorageKey, theme);
+    }
+    catch {
+        // The selected theme still applies when browser storage is unavailable.
+    }
+}
+function initializeColorTheme() {
+    const initial = isColorTheme(document.documentElement.dataset.theme)
+        ? document.documentElement.dataset.theme
+        : "dark";
+    applyColorTheme(initial, false);
+    themeSelect.addEventListener("change", () => {
+        if (isColorTheme(themeSelect.value)) {
+            applyColorTheme(themeSelect.value);
+        }
+    });
+    window.addEventListener("storage", (event) => {
+        const theme = event.newValue ?? undefined;
+        if (event.key === colorThemeStorageKey && isColorTheme(theme)) {
+            applyColorTheme(theme, false);
+        }
+    });
+}
 function element(tag, text) {
     const node = document.createElement(tag);
     if (text !== undefined) {
@@ -2170,4 +2217,5 @@ async function render() {
         showStatus(message, true);
     }
 }
+initializeColorTheme();
 void render();

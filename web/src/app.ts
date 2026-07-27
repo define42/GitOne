@@ -206,12 +206,63 @@ interface GroupSettingsUpdate {
 
 const appRoot = document.querySelector<HTMLElement>("#app");
 const notificationRoot = document.querySelector<HTMLElement>("#notifications");
+const colorThemeSelect = document.querySelector<HTMLSelectElement>("#color-theme");
 
-if (!appRoot || !notificationRoot) {
+if (!appRoot || !notificationRoot || !colorThemeSelect) {
   throw new Error("missing application shell");
 }
 const app: HTMLElement = appRoot;
 const notifications: HTMLElement = notificationRoot;
+const themeSelect: HTMLSelectElement = colorThemeSelect;
+
+const colorThemes = [
+  "light",
+  "dark",
+  "steampunk",
+  "windows",
+  "macosx",
+  "ubuntu",
+  "solaris",
+  "github",
+  "gitlab",
+] as const;
+type ColorTheme = typeof colorThemes[number];
+const colorThemeStorageKey = "gitone-color-theme";
+
+function isColorTheme(value?: string): value is ColorTheme {
+  return colorThemes.includes(value as ColorTheme);
+}
+
+function applyColorTheme(theme: ColorTheme, persist = true): void {
+  document.documentElement.dataset.theme = theme;
+  themeSelect.value = theme;
+  if (!persist) {
+    return;
+  }
+  try {
+    localStorage.setItem(colorThemeStorageKey, theme);
+  } catch {
+    // The selected theme still applies when browser storage is unavailable.
+  }
+}
+
+function initializeColorTheme(): void {
+  const initial = isColorTheme(document.documentElement.dataset.theme)
+    ? document.documentElement.dataset.theme
+    : "dark";
+  applyColorTheme(initial, false);
+  themeSelect.addEventListener("change", () => {
+    if (isColorTheme(themeSelect.value)) {
+      applyColorTheme(themeSelect.value);
+    }
+  });
+  window.addEventListener("storage", (event) => {
+    const theme = event.newValue ?? undefined;
+    if (event.key === colorThemeStorageKey && isColorTheme(theme)) {
+      applyColorTheme(theme, false);
+    }
+  });
+}
 
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -2798,4 +2849,5 @@ async function render(): Promise<void> {
   }
 }
 
+initializeColorTheme();
 void render();
