@@ -1,168 +1,487 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/define42/GitOne/internal/auth"
+	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 )
 
 type API struct {
-	Storage   storage.Store
-	Authorize func(*http.Request, string, bool) (string, bool)
-}
-type renameGroup struct {
-	NewPath string `json:"newPath"`
-}
-type renameRepo struct {
-	NewName string `json:"newName"`
+	Storage  storage.Store
+	Resolver *auth.Resolver
 }
 
-func (a API) Routes() http.Handler {
-	m := http.NewServeMux()
-	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+type AuthInput struct {
+	Authorization string `header:"Authorization" hidden:"true"`
+}
+
+type healthOutput struct {
+	Body struct {
+		Status string `json:"status" example:"ok"`
+	}
+}
+
+type groupSummary struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+type listGroupsInput struct {
+	AuthInput
+}
+
+type listGroupsOutput struct {
+	Body struct {
+		Groups []groupSummary `json:"groups"`
+	}
+}
+
+type GroupPathInput struct {
+	AuthInput
+	Path string `path:"path" doc:"URL-encoded full group path"`
+}
+
+type groupDetailOutput struct {
+	Body struct {
+		Path         string         `json:"path"`
+		Subgroups    []groupSummary `json:"subgroups"`
+		Repositories []string       `json:"repositories"`
+	}
+}
+
+type createGroupBody struct {
+	Path string `json:"path" minLength:"1" doc:"Full group path"`
+}
+
+type createGroupInput struct {
+	AuthInput
+	Body createGroupBody `contentType:"application/x-www-form-urlencoded"`
+}
+
+type createGroupOutput struct {
+	Body struct {
+		Path string `json:"path"`
+	}
+}
+
+type renameGroupBody struct {
+	NewPath string `json:"newPath" minLength:"1"`
+}
+
+type renameGroupInput struct {
+	GroupPathInput
+	Body renameGroupBody
+}
+
+type createRepositoryBody struct {
+	Group string `json:"group" minLength:"1"`
+	Name  string `json:"name" minLength:"1"`
+}
+
+type createRepositoryInput struct {
+	AuthInput
+	Body createRepositoryBody `contentType:"application/x-www-form-urlencoded"`
+}
+
+type createRepositoryOutput struct {
+	Body struct {
+		Group string `json:"group"`
+		Name  string `json:"name"`
+	}
+}
+
+type RepositoryPathInput struct {
+	AuthInput
+	Path string `path:"path" doc:"URL-encoded group and repository path"`
+}
+
+type renameRepositoryBody struct {
+	NewName string `json:"newName" minLength:"1"`
+}
+
+type renameRepositoryInput struct {
+	RepositoryPathInput
+	Body renameRepositoryBody
+}
+
+type emptyOutput struct{}
+
+func Register(mux *http.ServeMux, service API) huma.API {
+	config := huma.DefaultConfig("GitOne API", "1.0.0")
+	config.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
+		"basicAuth": {
+			Type:        "http",
+			Scheme:      "basic",
+			Description: "GitOne HTTP Basic authentication",
+		},
+	}
+	config.Formats = cloneFormats(config.Formats)
+	config.Formats["application/x-www-form-urlencoded"] = formFormat()
+	api := humago.New(mux, config)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "health",
+		Method:      http.MethodGet,
+		Path:        "/healthz",
+		Summary:     "Check server health",
+		Tags:        []string{"Health"},
+	}, service.health)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "list-groups",
+		Method:      http.MethodGet,
+		Path:        "/api/groups",
+		Summary:     "List accessible top-level groups",
+		Tags:        []string{"Groups"},
+	}), service.listGroups)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "get-group",
+		Method:      http.MethodGet,
+		Path:        "/api/groups/{path}",
+		Summary:     "Get a group with its immediate children",
+		Tags:        []string{"Groups"},
+	}), service.getGroup)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "create-group",
+		Method:        http.MethodPost,
+		Path:          "/api/groups",
+		Summary:       "Create a group",
+		Tags:          []string{"Groups"},
+		DefaultStatus: http.StatusCreated,
+	}), service.createGroup)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "rename-group",
+		Method:        http.MethodPatch,
+		Path:          "/api/groups/{path}",
+		Summary:       "Rename a group",
+		Tags:          []string{"Groups"},
+		DefaultStatus: http.StatusNoContent,
+	}), service.renameGroup)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "delete-group",
+		Method:        http.MethodDelete,
+		Path:          "/api/groups/{path}",
+		Summary:       "Delete an empty group",
+		Tags:          []string{"Groups"},
+		DefaultStatus: http.StatusNoContent,
+	}), service.deleteGroup)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "create-repository",
+		Method:        http.MethodPost,
+		Path:          "/api/repositories",
+		Summary:       "Create a repository",
+		Tags:          []string{"Repositories"},
+		DefaultStatus: http.StatusCreated,
+	}), service.createRepository)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "rename-repository",
+		Method:        http.MethodPatch,
+		Path:          "/api/repositories/{path}",
+		Summary:       "Rename a repository",
+		Tags:          []string{"Repositories"},
+		DefaultStatus: http.StatusNoContent,
+	}), service.renameRepository)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "delete-repository",
+		Method:        http.MethodDelete,
+		Path:          "/api/repositories/{path}",
+		Summary:       "Delete a repository",
+		Tags:          []string{"Repositories"},
+		DefaultStatus: http.StatusNoContent,
+	}), service.deleteRepository)
+
+	return api
+}
+
+func (a API) health(context.Context, *struct{}) (*healthOutput, error) {
+	output := &healthOutput{}
+	output.Body.Status = "ok"
+	return output, nil
+}
+
+func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroupsOutput, error) {
+	user, secret, err := basicCredentials(input.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	groups, listErr := a.Storage.ListGroups()
+	if listErr != nil {
+		return nil, huma.Error500InternalServerError("could not list groups", listErr)
+	}
+
+	output := &listGroupsOutput{}
+	output.Body.Groups = []groupSummary{}
+	authenticated := false
+	if _, resolveErr := a.Resolver.Authenticate(ctx, "", user, secret); resolveErr == nil {
+		authenticated = true
+	}
+	for _, group := range groups {
+		principal, resolveErr := a.Resolver.Authenticate(ctx, group.Path, user, secret)
+		if resolveErr != nil {
+			continue
+		}
+		authenticated = true
+		if strings.Contains(group.Path, "/") || !principal.Role.Allows(control.RoleRead) {
+			continue
+		}
+		output.Body.Groups = append(output.Body.Groups, groupSummary{
+			Name: group.Path,
+			Path: group.Path,
+		})
+	}
+	if !authenticated {
+		return nil, huma.Error401Unauthorized("invalid credentials")
+	}
+	return output, nil
+}
+
+func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailOutput, error) {
+	path, err := canonicalGroup(input.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorize(ctx, input.Authorization, path, control.RoleRead); err != nil {
+		return nil, err
+	}
+	groups, listErr := a.Storage.ListGroups()
+	if listErr != nil {
+		return nil, huma.Error500InternalServerError("could not list groups", listErr)
+	}
+
+	var current *storage.GroupInfo
+	output := &groupDetailOutput{}
+	output.Body.Path = path
+	output.Body.Subgroups = []groupSummary{}
+	output.Body.Repositories = []string{}
+	prefix := path + "/"
+	for i := range groups {
+		group := &groups[i]
+		if group.Path == path {
+			current = group
+			continue
+		}
+		if !strings.HasPrefix(group.Path, prefix) {
+			continue
+		}
+		name := strings.TrimPrefix(group.Path, prefix)
+		if strings.Contains(name, "/") {
+			continue
+		}
+		if _, authErr := a.authorize(ctx, input.Authorization, group.Path, control.RoleRead); authErr != nil {
+			continue
+		}
+		output.Body.Subgroups = append(output.Body.Subgroups, groupSummary{
+			Name: name,
+			Path: group.Path,
+		})
+	}
+	if current == nil {
+		return nil, huma.Error404NotFound("group not found")
+	}
+	output.Body.Repositories = current.Repositories
+	return output, nil
+}
+
+func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createGroupOutput, error) {
+	path, err := canonicalGroup(input.Body.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	owner, err := a.authorize(ctx, input.Authorization, path, control.RoleAdmin)
+	if err != nil {
+		return nil, err
+	}
+	if err = a.Storage.CreateGroup(path, owner); err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	output := &createGroupOutput{}
+	output.Body.Path = path
+	return output, nil
+}
+
+func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOutput, error) {
+	path, err := canonicalGroup(input.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	newPath, err := canonicalGroup(input.Body.NewPath)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorize(ctx, input.Authorization, path, control.RoleAdmin); err != nil {
+		return nil, err
+	}
+	if err = a.Storage.RenameGroup(path, newPath); err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	return &emptyOutput{}, nil
+}
+
+func (a API) deleteGroup(ctx context.Context, input *GroupPathInput) (*emptyOutput, error) {
+	path, err := canonicalGroup(input.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorize(ctx, input.Authorization, path, control.RoleAdmin); err != nil {
+		return nil, err
+	}
+	if err = a.Storage.DeleteGroup(path); err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	return &emptyOutput{}, nil
+}
+
+func (a API) createRepository(ctx context.Context, input *createRepositoryInput) (*createRepositoryOutput, error) {
+	repository, err := repositoryFrom(input.Body.Group, input.Body.Name)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorize(ctx, input.Authorization, repository.Group(), control.RoleAdmin); err != nil {
+		return nil, err
+	}
+	if err = a.Storage.CreateRepository(repository); err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	output := &createRepositoryOutput{}
+	output.Body.Group = repository.Group()
+	output.Body.Name = repository.Name
+	return output, nil
+}
+
+func (a API) renameRepository(ctx context.Context, input *renameRepositoryInput) (*emptyOutput, error) {
+	repository, err := parseRepositoryPath(input.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorize(ctx, input.Authorization, repository.Group(), control.RoleAdmin); err != nil {
+		return nil, err
+	}
+	if err = a.Storage.RenameRepository(repository, strings.TrimSuffix(input.Body.NewName, ".git")); err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	return &emptyOutput{}, nil
+}
+
+func (a API) deleteRepository(ctx context.Context, input *RepositoryPathInput) (*emptyOutput, error) {
+	repository, err := parseRepositoryPath(input.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorize(ctx, input.Authorization, repository.Group(), control.RoleAdmin); err != nil {
+		return nil, err
+	}
+	if err = a.Storage.DeleteRepository(repository); err != nil {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	return &emptyOutput{}, nil
+}
+
+func (a API) authorize(ctx context.Context, header, group string, need control.Role) (string, error) {
+	user, secret, err := basicCredentials(header)
+	if err != nil {
+		return "", err
+	}
+	principal, authErr := a.Resolver.Authenticate(ctx, group, user, secret)
+	if authErr != nil {
+		return "", huma.Error401Unauthorized("invalid credentials")
+	}
+	if !principal.Role.Allows(need) {
+		return "", huma.Error403Forbidden("forbidden")
+	}
+	return principal.Name, nil
+}
+
+func basicCredentials(header string) (string, string, error) {
+	request := &http.Request{Header: http.Header{"Authorization": []string{header}}}
+	user, secret, ok := request.BasicAuth()
+	if !ok {
+		return "", "", huma.Error401Unauthorized("authentication required")
+	}
+	return user, secret, nil
+}
+
+func canonicalGroup(value string) (string, error) {
+	parts, err := repopath.ParseGroup(value)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+func repositoryFrom(group, name string) (repopath.Repository, error) {
+	name = strings.TrimSuffix(name, ".git")
+	return parseRepositoryPath(group + "/" + name)
+}
+
+func parseRepositoryPath(value string) (repopath.Repository, error) {
+	repository, _, err := repopath.ParseGitRequestPath("/" + strings.TrimSuffix(value, ".git") + ".git/info/refs")
+	return repository, err
+}
+
+func protected(operation huma.Operation) huma.Operation {
+	operation.Security = []map[string][]string{
+		{"basicAuth": []string{}},
+	}
+	operation.Middlewares = append(operation.Middlewares, func(ctx huma.Context, next func(huma.Context)) {
+		ctx.SetHeader("WWW-Authenticate", `Basic realm="GitOne"`)
+		next(ctx)
 	})
-	m.HandleFunc("POST /api/groups", a.createGroup)
-	m.HandleFunc("DELETE /api/groups/{path...}", a.deleteGroup)
-	m.HandleFunc("PATCH /api/groups/{path...}", a.renameGroup)
-	m.HandleFunc("POST /api/repositories", a.createRepo)
-	m.HandleFunc("DELETE /api/repositories/{path...}", a.deleteRepo)
-	m.HandleFunc("PATCH /api/repositories/{path...}", a.renameRepo)
-	return m
+	return operation
 }
-func (a API) allowed(r *http.Request, g string) bool {
-	if a.Authorize == nil {
-		return true
+
+func cloneFormats(source map[string]huma.Format) map[string]huma.Format {
+	formats := make(map[string]huma.Format, len(source)+1)
+	for name, format := range source {
+		formats[name] = format
 	}
-	_, ok := a.Authorize(r, g, true)
-	return ok
+	return formats
 }
-func (a API) createGroup(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := r.ParseForm(); err != nil || len(r.PostForm) != 1 || len(r.PostForm["path"]) != 1 {
-		http.Error(w, "invalid form", 400)
-		return
+
+func formFormat() huma.Format {
+	return huma.Format{
+		Marshal: func(writer io.Writer, value any) error {
+			return json.NewEncoder(writer).Encode(value)
+		},
+		Unmarshal: func(data []byte, value any) error {
+			values, err := url.ParseQuery(string(data))
+			if err != nil {
+				return err
+			}
+			document := make(map[string]any, len(values))
+			for name, entries := range values {
+				switch len(entries) {
+				case 0:
+					document[name] = ""
+				case 1:
+					document[name] = entries[0]
+				default:
+					document[name] = entries
+				}
+			}
+			encoded, err := json.Marshal(document)
+			if err != nil {
+				return err
+			}
+			decoder := json.NewDecoder(strings.NewReader(string(encoded)))
+			decoder.DisallowUnknownFields()
+			return decoder.Decode(value)
+		},
 	}
-	group := r.PostForm.Get("path")
-	if a.Authorize == nil {
-		http.Error(w, "forbidden", 403)
-		return
-	}
-	owner, ok := a.Authorize(r, group, true)
-	if !ok || owner == "" {
-		http.Error(w, "forbidden", 403)
-		return
-	}
-	if _, e := repopath.ParseGroup(group); e != nil {
-		http.Error(w, e.Error(), 400)
-		return
-	}
-	if e := a.Storage.CreateGroup(group, owner); e != nil {
-		http.Error(w, e.Error(), 409)
-		return
-	}
-	w.WriteHeader(http.StatusCreated)
-}
-func (a API) deleteGroup(w http.ResponseWriter, r *http.Request) {
-	g := r.PathValue("path")
-	if !a.allowed(r, g) {
-		http.Error(w, "forbidden", 403)
-		return
-	}
-	if e := a.Storage.DeleteGroup(g); e != nil {
-		http.Error(w, e.Error(), 409)
-		return
-	}
-	w.WriteHeader(204)
-}
-func (a API) renameGroup(w http.ResponseWriter, r *http.Request) {
-	g := r.PathValue("path")
-	if !a.allowed(r, g) {
-		http.Error(w, "forbidden", 403)
-		return
-	}
-	var q renameGroup
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&q) != nil {
-		http.Error(w, "invalid JSON", 400)
-		return
-	}
-	if e := a.Storage.RenameGroup(g, q.NewPath); e != nil {
-		http.Error(w, e.Error(), 409)
-		return
-	}
-	w.WriteHeader(204)
-}
-func (a API) createRepo(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := r.ParseForm(); err != nil ||
-		len(r.PostForm) != 2 ||
-		len(r.PostForm["group"]) != 1 ||
-		len(r.PostForm["name"]) != 1 {
-		http.Error(w, "invalid form", 400)
-		return
-	}
-	group := r.PostForm.Get("group")
-	name := r.PostForm.Get("name")
-	if !a.allowed(r, group) {
-		http.Error(w, "forbidden", 403)
-		return
-	}
-	groups, e := repopath.ParseGroup(group)
-	if e != nil {
-		http.Error(w, e.Error(), 400)
-		return
-	}
-	repo := repopath.Repository{Groups: groups, Name: strings.TrimSuffix(name, ".git")}
-	if e = a.Storage.CreateRepository(repo); e != nil {
-		http.Error(w, e.Error(), 409)
-		return
-	}
-	w.WriteHeader(http.StatusCreated)
-}
-func parseRepoPath(v string) (repopath.Repository, error) {
-	return func() (repopath.Repository, error) {
-		r, _, e := repopath.ParseGitRequestPath("/" + strings.TrimSuffix(v, ".git") + ".git/info/refs")
-		return r, e
-	}()
-}
-func (a API) deleteRepo(w http.ResponseWriter, r *http.Request) {
-	repo, e := parseRepoPath(r.PathValue("path"))
-	if e != nil {
-		http.Error(w, e.Error(), 400)
-		return
-	}
-	if !a.allowed(r, repo.Group()) {
-		http.Error(w, "forbidden", 403)
-		return
-	}
-	if e = a.Storage.DeleteRepository(repo); e != nil {
-		http.Error(w, e.Error(), 409)
-		return
-	}
-	w.WriteHeader(204)
-}
-func (a API) renameRepo(w http.ResponseWriter, r *http.Request) {
-	repo, e := parseRepoPath(r.PathValue("path"))
-	if e != nil {
-		http.Error(w, e.Error(), 400)
-		return
-	}
-	if !a.allowed(r, repo.Group()) {
-		http.Error(w, "forbidden", 403)
-		return
-	}
-	var q renameRepo
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&q) != nil {
-		http.Error(w, "invalid JSON", 400)
-		return
-	}
-	if e = a.Storage.RenameRepository(repo, q.NewName); e != nil {
-		http.Error(w, e.Error(), 409)
-		return
-	}
-	w.WriteHeader(204)
 }

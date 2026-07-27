@@ -12,9 +12,11 @@ Implemented:
 - LFS Batch API and basic PUT/GET/HEAD/verify endpoints
 - Group create/delete/rename endpoints
 - Repository create/delete/rename endpoints
+- Huma administration API with generated OpenAPI and interactive documentation
+- Embedded TypeScript UI for browsing and creating groups and repositories
 - Git-backed token and role loading with inheritance
 - Bootstrap credentials through environment variables
-- Unit tests and Dockerfile
+- Go and TypeScript build validation plus a multi-stage Dockerfile
 
 Not production-complete yet:
 
@@ -29,4 +31,4 @@ Not production-complete yet:
 - Complete Git compatibility matrix and protocol-v2 testing
 - TLS termination, rate limits, audit logs, and observability
 
-The path parser unit tests were executed successfully in the build environment. The complete test suite could not be executed there because outbound access to the Go module proxy was unavailable, so dependencies could not be downloaded. Run `go test ./...` in an environment with Go module access.
+Run `make test` to compile the TypeScript UI and execute the complete Go test suite.

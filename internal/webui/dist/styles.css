@@ -1,0 +1,68 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 48rem;
+  padding: 2rem 1rem;
+}
+
+header {
+  border-bottom: 1px solid;
+  margin-bottom: 2rem;
+}
+
+nav ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  padding: 0;
+}
+
+nav li:not(:last-child)::after {
+  content: " /";
+}
+
+.message,
+.error {
+  border: 1px solid;
+  padding: 0.75rem;
+}
+
+.error {
+  color: #c33;
+}
+
+section {
+  margin: 2rem 0;
+}
+
+form {
+  display: grid;
+  gap: 1rem;
+  max-width: 28rem;
+}
+
+label {
+  display: grid;
+  gap: 0.25rem;
+}
+
+input,
+button {
+  box-sizing: border-box;
+  font: inherit;
+  padding: 0.6rem;
+}
+
+button {
+  cursor: pointer;
+  width: fit-content;
+}
+
+code {
+  font-size: 0.9em;
+}

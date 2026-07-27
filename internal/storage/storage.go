@@ -148,7 +148,7 @@ func (s Store) CreateGroup(group, owner string) error {
 	if e = os.MkdirAll(gp, 0750); e != nil {
 		return e
 	}
-	tmp, e := os.MkdirTemp("", "gitone-control-")
+	tmp, e := os.MkdirTemp(root, ".gitone-control-")
 	if e != nil {
 		return e
 	}
@@ -180,9 +180,17 @@ func (s Store) CreateGroup(group, owner string) error {
 	if e = r.Storer.SetReference(plumbingSymbolicMain()); e != nil {
 		return e
 	}
-	dest := filepath.Join(gp, "control.git")
-	_, e = git.PlainClone(dest, true, &git.CloneOptions{URL: tmp, ReferenceName: plumbing.NewBranchReferenceName("main"), SingleBranch: true})
+	repositoryConfig, e := r.Config()
 	if e != nil {
+		return e
+	}
+	repositoryConfig.Core.IsBare = true
+	repositoryConfig.Core.Worktree = ""
+	if e = r.SetConfig(repositoryConfig); e != nil {
+		return e
+	}
+	dest := filepath.Join(gp, "control.git")
+	if e = os.Rename(filepath.Join(tmp, ".git"), dest); e != nil {
 		_ = os.RemoveAll(gp)
 		return fmt.Errorf("create control repository: %w", e)
 	}

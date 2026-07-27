@@ -1,6 +1,6 @@
 # GitOne Server
 
-Initial pure-Go Git Smart HTTP and Git LFS server. There is no SSH, database, native `git` binary, or CGO.
+Initial pure-Go Git Smart HTTP and Git LFS server with a Huma administration API and a small TypeScript UI. There is no SSH, database, native `git` binary, or CGO.
 
 ## Storage
 
@@ -18,16 +18,22 @@ Every repository belongs to at least one group. Every group must contain `contro
 ```bash
 export GITONE_BOOTSTRAP_USER=bootstrap
 export GITONE_BOOTSTRAP_TOKEN='replace-me'
-go run ./cmd/gitone -root ./data -listen :8080 -public-url http://localhost:8080
+make run RUN_ARGS="-root ./data -listen :8080 -public-url http://localhost:8080"
 ```
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The main page lists only top-level groups. Select a group to browse its immediate subgroups and repositories; subgroup names link to the next level. Top-level groups are created from the main page, while subgroups and repositories are created from the current group page. The UI uses standard HTML forms and does not require JavaScript.
+Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups. Select a group to browse its immediate subgroups and repositories.
+
+Build the UI separately with:
+
+```bash
+make ui
+```
 
 ## Endpoint reference
 
-`{path...}` and `{group...}` may contain multiple slash-separated group levels. All UI, administration, Git, and LFS endpoints use HTTP Basic authentication. The health endpoint is public.
+`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. UI, administration, Git, and LFS requests use HTTP Basic authentication. Health and Huma documentation endpoints are public.
 
 ### Health
 
@@ -39,22 +45,33 @@ Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic au
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/` | List accessible top-level groups and show the top-level group form. |
-| `GET` | `/groups/{path...}` | Show one group, its immediate subgroups, repositories, and creation forms. |
-| `POST` | `/ui/groups` | Create a top-level group. URL-encoded field: `name`. |
-| `POST` | `/ui/subgroups` | Create a subgroup. URL-encoded fields: `parent`, `name`. |
-| `POST` | `/ui/repositories` | Create a repository. URL-encoded fields: `group`, `name`. |
+| `GET` | `/` | Load the TypeScript UI at the top-level group view. |
+| `GET` | `/groups/{path...}` | Load the TypeScript UI at a group or subgroup. |
+| `GET` | `/assets/{path...}` | Serve embedded compiled JavaScript and CSS assets. |
+
+### Huma documentation
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/docs` | Interactive API documentation. |
+| `GET` | `/openapi.json` | OpenAPI 3.1 document as JSON. |
+| `GET` | `/openapi.yaml` | OpenAPI 3.1 document as YAML. |
+| `GET` | `/openapi-3.0.json` | OpenAPI 3.0 document as JSON. |
+| `GET` | `/openapi-3.0.yaml` | OpenAPI 3.0 document as YAML. |
+| `GET` | `/schemas/{schema}` | JSON Schema generated for an API model. |
 
 ### Administration API
 
 | Method | Path | Description |
 | --- | --- | --- |
+| `GET` | `/api/groups` | List accessible top-level groups. |
+| `GET` | `/api/groups/{path}` | Get a group’s immediate subgroups and repositories. |
 | `POST` | `/api/groups` | Create a group. URL-encoded field: `path`. |
-| `PATCH` | `/api/groups/{group...}` | Rename a group. JSON field: `newPath`. |
-| `DELETE` | `/api/groups/{group...}` | Delete an empty group. |
+| `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
+| `DELETE` | `/api/groups/{path}` | Delete an empty group. |
 | `POST` | `/api/repositories` | Create a repository. URL-encoded fields: `group`, `name`. |
-| `PATCH` | `/api/repositories/{group...}/{repo}` | Rename a repository. JSON field: `newName`. |
-| `DELETE` | `/api/repositories/{group...}/{repo}` | Delete a repository. |
+| `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
+| `DELETE` | `/api/repositories/{path}` | Delete a repository. |
 
 ### Git Smart HTTP
 
@@ -99,6 +116,19 @@ curl -u bootstrap:replace-me -X POST http://localhost:8080/api/repositories \
   --data-urlencode 'name=api'
 ```
 
+List top-level groups:
+
+```bash
+curl -u bootstrap:replace-me http://localhost:8080/api/groups
+```
+
+Read a nested group:
+
+```bash
+curl -u bootstrap:replace-me \
+  http://localhost:8080/api/groups/engineering%2Fbackend
+```
+
 ## control.json
 
 ```json
@@ -135,7 +165,7 @@ The initial implementation uses `sha256:` token hashes to keep bootstrap interop
 ## Tests
 
 ```bash
-go test ./...
+make test
 ```
 
 ## Current implementation boundaries

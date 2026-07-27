@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,8 +57,8 @@ func TestCreateGroupRejectsUnknownFormFields(t *testing.T) {
 
 	handler.ServeHTTP(response, request)
 
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, response.Code, response.Body.String())
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusUnprocessableEntity, response.Code, response.Body.String())
 	}
 }
 
@@ -90,9 +91,43 @@ func TestCreateRepositoryFromURLEncodedForm(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "engineering", "api.git")); err != nil {
 		t.Fatalf("repository was not created: %v", err)
 	}
+
+	renameRepository := httptest.NewRequest(http.MethodPatch, "/api/repositories/engineering%2Fapi", strings.NewReader(`{"newName":"service"}`))
+	renameRepository.Header.Set("Content-Type", "application/json")
+	renameRepository.SetBasicAuth("alice", "secret")
+	renameRepositoryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(renameRepositoryResponse, renameRepository)
+	if renameRepositoryResponse.Code != http.StatusNoContent {
+		t.Fatalf("rename repository: status %d: %s", renameRepositoryResponse.Code, renameRepositoryResponse.Body.String())
+	}
+
+	deleteRepository := httptest.NewRequest(http.MethodDelete, "/api/repositories/engineering%2Fservice", nil)
+	deleteRepository.SetBasicAuth("alice", "secret")
+	deleteRepositoryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRepositoryResponse, deleteRepository)
+	if deleteRepositoryResponse.Code != http.StatusNoContent {
+		t.Fatalf("delete repository: status %d: %s", deleteRepositoryResponse.Code, deleteRepositoryResponse.Body.String())
+	}
+
+	renameGroup := httptest.NewRequest(http.MethodPatch, "/api/groups/engineering", strings.NewReader(`{"newPath":"platform"}`))
+	renameGroup.Header.Set("Content-Type", "application/json")
+	renameGroup.SetBasicAuth("alice", "secret")
+	renameGroupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(renameGroupResponse, renameGroup)
+	if renameGroupResponse.Code != http.StatusNoContent {
+		t.Fatalf("rename group: status %d: %s", renameGroupResponse.Code, renameGroupResponse.Body.String())
+	}
+
+	deleteGroup := httptest.NewRequest(http.MethodDelete, "/api/groups/platform", nil)
+	deleteGroup.SetBasicAuth("alice", "secret")
+	deleteGroupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(deleteGroupResponse, deleteGroup)
+	if deleteGroupResponse.Code != http.StatusNoContent {
+		t.Fatalf("delete group: status %d: %s", deleteGroupResponse.Code, deleteGroupResponse.Body.String())
+	}
 }
 
-func TestWebUIUsesBasicAuthAndHTMLForms(t *testing.T) {
+func TestHumaGroupNavigationAPI(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}
 	if err := store.CreateGroup("engineering", "alice"); err != nil {
@@ -113,6 +148,77 @@ func TestWebUIUsesBasicAuthAndHTMLForms(t *testing.T) {
 		BootstrapToken: "secret",
 	})
 
+	listRequest := httptest.NewRequest(http.MethodGet, "/api/groups", nil)
+	listRequest.SetBasicAuth("alice", "secret")
+	listResponse := httptest.NewRecorder()
+	handler.ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("list groups: expected status %d, got %d: %s", http.StatusOK, listResponse.Code, listResponse.Body.String())
+	}
+	var list struct {
+		Groups []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(listResponse.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Groups) != 1 || list.Groups[0].Path != "engineering" {
+		t.Fatalf("unexpected top-level groups: %#v", list.Groups)
+	}
+
+	parentRequest := httptest.NewRequest(http.MethodGet, "/api/groups/engineering", nil)
+	parentRequest.SetBasicAuth("alice", "secret")
+	parentResponse := httptest.NewRecorder()
+	handler.ServeHTTP(parentResponse, parentRequest)
+	if parentResponse.Code != http.StatusOK {
+		t.Fatalf("get parent group: expected status %d, got %d: %s", http.StatusOK, parentResponse.Code, parentResponse.Body.String())
+	}
+	var parent struct {
+		Subgroups []struct {
+			Path string `json:"path"`
+		} `json:"subgroups"`
+		Repositories []string `json:"repositories"`
+	}
+	if err := json.Unmarshal(parentResponse.Body.Bytes(), &parent); err != nil {
+		t.Fatal(err)
+	}
+	if len(parent.Subgroups) != 1 ||
+		parent.Subgroups[0].Path != "engineering/backend" ||
+		len(parent.Repositories) != 1 ||
+		parent.Repositories[0] != "web" {
+		t.Fatalf("unexpected parent group detail: %#v", parent)
+	}
+
+	detailRequest := httptest.NewRequest(http.MethodGet, "/api/groups/engineering%2Fbackend", nil)
+	detailRequest.SetBasicAuth("alice", "secret")
+	detailResponse := httptest.NewRecorder()
+	handler.ServeHTTP(detailResponse, detailRequest)
+	if detailResponse.Code != http.StatusOK {
+		t.Fatalf("get group: expected status %d, got %d: %s", http.StatusOK, detailResponse.Code, detailResponse.Body.String())
+	}
+	var detail struct {
+		Path         string   `json:"path"`
+		Repositories []string `json:"repositories"`
+	}
+	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Path != "engineering/backend" ||
+		len(detail.Repositories) != 1 ||
+		detail.Repositories[0] != "api" {
+		t.Fatalf("unexpected group detail: %#v", detail)
+	}
+}
+
+func TestTypeScriptUIAndHumaDocs(t *testing.T) {
+	handler := New(Config{
+		Root:           t.TempDir(),
+		BootstrapUser:  "alice",
+		BootstrapToken: "secret",
+	})
+
 	unauthenticated := httptest.NewRequest(http.MethodGet, "/", nil)
 	unauthenticatedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(unauthenticatedResponse, unauthenticated)
@@ -123,117 +229,35 @@ func TestWebUIUsesBasicAuthAndHTMLForms(t *testing.T) {
 		t.Fatal("missing Basic Auth challenge")
 	}
 
-	authenticated := httptest.NewRequest(http.MethodGet, "/", nil)
-	authenticated.SetBasicAuth("alice", "secret")
-	authenticatedResponse := httptest.NewRecorder()
-	handler.ServeHTTP(authenticatedResponse, authenticated)
-	if authenticatedResponse.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, authenticatedResponse.Code)
-	}
-	rootBody := authenticatedResponse.Body.String()
-	for _, expected := range []string{
-		`<a href="/groups/engineering">engineering</a>`,
-		`<form method="post" action="/ui/groups">`,
-	} {
-		if !strings.Contains(rootBody, expected) {
-			t.Fatalf("root page does not contain %q", expected)
+	for _, path := range []string{"/", "/groups/engineering/backend"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.SetBasicAuth("alice", "secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: expected status %d, got %d", path, http.StatusOK, response.Code)
 		}
-	}
-	for _, unexpected := range []string{
-		`/groups/engineering/backend`,
-		`<code>web.git</code>`,
-		`action="/ui/subgroups"`,
-		`action="/ui/repositories"`,
-	} {
-		if strings.Contains(rootBody, unexpected) {
-			t.Fatalf("root page unexpectedly contains %q", unexpected)
+		body := response.Body.String()
+		if !strings.Contains(body, `<main id="app"`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js">`) {
+			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 	}
 
-	groupRequest := httptest.NewRequest(http.MethodGet, "/groups/engineering", nil)
-	groupRequest.SetBasicAuth("alice", "secret")
-	groupResponse := httptest.NewRecorder()
-	handler.ServeHTTP(groupResponse, groupRequest)
-	if groupResponse.Code != http.StatusOK {
-		t.Fatalf("group page: expected status %d, got %d", http.StatusOK, groupResponse.Code)
+	assetRequest := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	assetRequest.SetBasicAuth("alice", "secret")
+	assetResponse := httptest.NewRecorder()
+	handler.ServeHTTP(assetResponse, assetRequest)
+	if assetResponse.Code != http.StatusOK || !strings.Contains(assetResponse.Body.String(), "renderGroup") {
+		t.Fatalf("TypeScript asset was not served: %d", assetResponse.Code)
 	}
-	groupBody := groupResponse.Body.String()
-	for _, expected := range []string{
-		`<a href="/groups/engineering/backend">backend</a>`,
-		`<code>web.git</code>`,
-		`<form method="post" action="/ui/subgroups">`,
-		`<form method="post" action="/ui/repositories">`,
-	} {
-		if !strings.Contains(groupBody, expected) {
-			t.Fatalf("group page does not contain %q", expected)
+
+	for _, path := range []string{"/docs", "/openapi.json"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: expected status %d, got %d", path, http.StatusOK, response.Code)
 		}
-	}
-	if strings.Contains(groupBody, `<code>api.git</code>`) {
-		t.Fatal("parent group page must not list a subgroup repository")
-	}
-
-	subgroupRequest := httptest.NewRequest(http.MethodGet, "/groups/engineering/backend", nil)
-	subgroupRequest.SetBasicAuth("alice", "secret")
-	subgroupResponse := httptest.NewRecorder()
-	handler.ServeHTTP(subgroupResponse, subgroupRequest)
-	if subgroupResponse.Code != http.StatusOK {
-		t.Fatalf("subgroup page: expected status %d, got %d", http.StatusOK, subgroupResponse.Code)
-	}
-	if !strings.Contains(subgroupResponse.Body.String(), `<code>api.git</code>`) {
-		t.Fatal("subgroup page does not contain its repository")
-	}
-
-	if strings.Contains(strings.ToLower(rootBody+groupBody+subgroupResponse.Body.String()), "<script") {
-		t.Fatal("page must not contain JavaScript")
-	}
-}
-
-func TestWebUIFormRedirectsAfterCreation(t *testing.T) {
-	handler := New(Config{
-		Root:           t.TempDir(),
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
-	})
-	tests := []struct {
-		name     string
-		path     string
-		form     string
-		location string
-	}{
-		{
-			name:     "top-level group",
-			path:     "/ui/groups",
-			form:     "name=engineering",
-			location: "/?created=group",
-		},
-		{
-			name:     "subgroup",
-			path:     "/ui/subgroups",
-			form:     "parent=engineering&name=backend",
-			location: "/groups/engineering?created=subgroup",
-		},
-		{
-			name:     "repository",
-			path:     "/ui/repositories",
-			form:     "group=engineering%2Fbackend&name=api",
-			location: "/groups/engineering/backend?created=repository",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.form))
-			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			request.SetBasicAuth("alice", "secret")
-			response := httptest.NewRecorder()
-
-			handler.ServeHTTP(response, request)
-
-			if response.Code != http.StatusSeeOther {
-				t.Fatalf("expected status %d, got %d: %s", http.StatusSeeOther, response.Code, response.Body.String())
-			}
-			if location := response.Header().Get("Location"); location != test.location {
-				t.Fatalf("unexpected redirect location %q", location)
-			}
-		})
 	}
 }

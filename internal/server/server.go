@@ -36,34 +36,12 @@ func New(c Config) http.Handler {
 		}
 		return pr.Role.Allows(need)
 	}
-	authorizeGroup := func(r *http.Request, group string, write bool) (string, bool) {
-		u, p, ok := r.BasicAuth()
-		if !ok {
-			return "", false
-		}
-		pr, e := ar.Authenticate(r.Context(), group, u, p)
-		if e != nil {
-			return "", false
-		}
-		need := control.RoleRead
-		if write {
-			need = control.RoleAdmin
-		}
-		if !pr.Role.Allows(need) {
-			return "", false
-		}
-		return pr.Name, true
-	}
 	mux := http.NewServeMux()
-	api := httpapi.API{Storage: st, Authorize: authorizeGroup}
-	mux.Handle("/api/", api.Routes())
-	mux.Handle("/healthz", api.Routes())
-	ui := webui.Handler{Storage: st, Authorize: authorizeGroup}
+	httpapi.Register(mux, httpapi.API{Storage: st, Resolver: ar})
+	ui := webui.Handler{}
 	mux.Handle("GET /{$}", ui)
 	mux.Handle("GET /groups/{path...}", ui)
-	mux.Handle("POST /ui/groups", ui)
-	mux.Handle("POST /ui/subgroups", ui)
-	mux.Handle("POST /ui/repositories", ui)
+	mux.Handle("GET /assets/{path...}", ui)
 	lh := lfs.Handler{Storage: st, PublicURL: c.PublicURL, Authorize: authorizeRepo}
 	gh := githttp.Handler{Storage: st, Authorize: authorizeRepo}
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
