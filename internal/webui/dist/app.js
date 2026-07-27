@@ -17,6 +17,13 @@ function groupURL(path) {
 function apiGroupURL(path) {
     return `/api/groups/${encodeURIComponent(path)}`;
 }
+function repositoryURL(groupPath, repository) {
+    const repositoryPath = [
+        ...groupPath.split("/"),
+        `${repository}.git`,
+    ].map(encodeURIComponent).join("/");
+    return new URL(`/${repositoryPath}`, window.location.origin).href;
+}
 function currentGroup() {
     const prefix = "/groups/";
     if (!window.location.pathname.startsWith(prefix)) {
@@ -58,6 +65,74 @@ function statusMessage(message, error = false) {
     output.className = error ? "error" : "message";
     output.setAttribute("role", error ? "alert" : "status");
     return output;
+}
+async function copyText(value) {
+    if (navigator.clipboard) {
+        try {
+            await navigator.clipboard.writeText(value);
+            return;
+        }
+        catch {
+            // Fall back for browsers that expose the API but deny clipboard access.
+        }
+    }
+    const input = element("textarea");
+    input.value = value;
+    input.readOnly = true;
+    input.className = "copy-fallback";
+    document.body.append(input);
+    input.select();
+    let copied = false;
+    try {
+        copied = document.execCommand("copy");
+    }
+    finally {
+        input.remove();
+    }
+    if (!copied) {
+        throw new Error("Could not copy the repository URL.");
+    }
+}
+function copyIcon() {
+    const namespace = "http://www.w3.org/2000/svg";
+    const icon = document.createElementNS(namespace, "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("aria-hidden", "true");
+    const front = document.createElementNS(namespace, "rect");
+    front.setAttribute("x", "8");
+    front.setAttribute("y", "8");
+    front.setAttribute("width", "12");
+    front.setAttribute("height", "13");
+    front.setAttribute("rx", "1");
+    const back = document.createElementNS(namespace, "path");
+    back.setAttribute("d", "M5 16H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1");
+    icon.append(front, back);
+    return icon;
+}
+function copyButton(value) {
+    const button = element("button");
+    button.type = "button";
+    button.className = "copy-button";
+    button.title = "Copy repository URL";
+    button.setAttribute("aria-label", `Copy ${value}`);
+    button.append(copyIcon());
+    button.addEventListener("click", async () => {
+        try {
+            await copyText(value);
+            button.classList.add("copied");
+            button.title = "Copied";
+            button.setAttribute("aria-label", `Copied ${value}`);
+            window.setTimeout(() => {
+                button.classList.remove("copied");
+                button.title = "Copy repository URL";
+                button.setAttribute("aria-label", `Copy ${value}`);
+            }, 1500);
+        }
+        catch (reason) {
+            app.prepend(statusMessage(reason instanceof Error ? reason.message : "Could not copy the repository URL.", true));
+        }
+    });
+    return button;
 }
 function groupList(groups) {
     if (groups.length === 0) {
@@ -158,9 +233,14 @@ async function renderGroup(path, message) {
     }
     else {
         const list = element("ul");
+        list.className = "repository-list";
         for (const repository of data.repositories) {
             const item = element("li");
-            item.append(element("code", `${repository}.git`));
+            const cloneURL = repositoryURL(data.path, repository);
+            const link = element("a", cloneURL);
+            link.href = cloneURL;
+            link.className = "repository-link";
+            item.append(link, copyButton(cloneURL));
             list.append(item);
         }
         repositories.append(list);

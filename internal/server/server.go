@@ -18,14 +18,14 @@ func New(c Config) http.Handler {
 	st := storage.Store{Root: c.Root}
 	cs := control.NewStore(c.Root)
 	ar := &auth.Resolver{Controls: cs, BootstrapUser: c.BootstrapUser, BootstrapToken: c.BootstrapToken}
-	authorizeRepo := func(r *http.Request, repo repopath.Repository, write bool) bool {
+	authorizeRepo := func(r *http.Request, repo repopath.Repository, write bool) (bool, bool) {
 		u, p, ok := r.BasicAuth()
 		if !ok {
-			return false
+			return false, false
 		}
 		pr, e := ar.Authenticate(r.Context(), repo.Group(), u, p)
 		if e != nil {
-			return false
+			return false, false
 		}
 		need := control.RoleRead
 		if write {
@@ -34,7 +34,7 @@ func New(c Config) http.Handler {
 		if repo.Name == "control" && write {
 			need = control.RoleOwner
 		}
-		return pr.Role.Allows(need)
+		return true, pr.Role.Allows(need)
 	}
 	mux := http.NewServeMux()
 	httpapi.Register(mux, httpapi.API{Storage: st, Resolver: ar})

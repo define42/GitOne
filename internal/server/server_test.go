@@ -104,6 +104,25 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 		t.Fatalf("repository was not created: %v", err)
 	}
 
+	unauthenticatedGit := httptest.NewRequest(http.MethodGet, "/engineering/api.git/info/refs?service=git-upload-pack", nil)
+	unauthenticatedGit.SetBasicAuth("alice", "")
+	unauthenticatedGitResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticatedGitResponse, unauthenticatedGit)
+	if unauthenticatedGitResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("expected Git authentication challenge, got status %d: %s", unauthenticatedGitResponse.Code, unauthenticatedGitResponse.Body.String())
+	}
+	if unauthenticatedGitResponse.Header().Get("WWW-Authenticate") != `Basic realm="GitOne"` {
+		t.Fatalf("unexpected Git authentication challenge: %q", unauthenticatedGitResponse.Header().Get("WWW-Authenticate"))
+	}
+
+	authenticatedGit := httptest.NewRequest(http.MethodGet, "/engineering/api.git/info/refs?service=git-upload-pack", nil)
+	authenticatedGit.SetBasicAuth("alice", "secret")
+	authenticatedGitResponse := httptest.NewRecorder()
+	handler.ServeHTTP(authenticatedGitResponse, authenticatedGit)
+	if authenticatedGitResponse.Code != http.StatusOK {
+		t.Fatalf("authenticated Git read: status %d: %s", authenticatedGitResponse.Code, authenticatedGitResponse.Body.String())
+	}
+
 	renameRepository := httptest.NewRequest(http.MethodPatch, "/api/repositories/engineering%2Fapi", strings.NewReader(`{"newName":"service"}`))
 	renameRepository.Header.Set("Content-Type", "application/json")
 	renameRepository.SetBasicAuth("alice", "secret")
@@ -251,7 +270,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		}
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=2">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=3">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 	}
@@ -268,6 +287,10 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	}
 	if !strings.Contains(assetResponse.Body.String(), "request(apiGroupURL(name), { method: \"POST\" })") {
 		t.Fatal("served UI does not use the path-based group creation endpoint")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "navigator.clipboard") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryURL(data.path, repository)") {
+		t.Fatal("served UI does not provide copyable full repository URLs")
 	}
 
 	for _, path := range []string{"/docs", "/openapi.json"} {

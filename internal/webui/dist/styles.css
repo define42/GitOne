@@ -66,3 +66,52 @@ button {
 code {
   font-size: 0.9em;
 }
+
+.repository-list {
+  display: grid;
+  gap: 0.6rem;
+  list-style: none;
+  padding: 0;
+}
+
+.repository-list li {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.repository-link {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.copy-button {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  padding: 0.35rem;
+}
+
+.copy-button svg {
+  fill: none;
+  height: 1rem;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 1rem;
+}
+
+.copy-button.copied {
+  color: #16833f;
+}
+
+.copy-fallback {
+  height: 1px;
+  left: -10000px;
+  position: fixed;
+  top: 0;
+  width: 1px;
+}

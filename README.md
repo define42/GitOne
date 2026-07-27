@@ -23,7 +23,7 @@ make run RUN_ARGS="-root ./data -listen :8080 -public-url http://localhost:8080"
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups. Select a group to browse its immediate subgroups and repositories.
+Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups. Select a group to browse its immediate subgroups and repositories; each repository shows its full clone URL with a copy button.
 
 Build the UI separately with:
 
@@ -113,6 +113,12 @@ Create a repository:
 ```bash
 curl -u bootstrap:replace-me -X POST \
   http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi
+```
+
+Clone the repository and enter the bootstrap token when Git prompts for a password:
+
+```bash
+git clone http://bootstrap@localhost:8080/engineering/backend/api.git
 ```
 
 List top-level groups:

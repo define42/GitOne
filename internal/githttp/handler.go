@@ -14,7 +14,7 @@ import (
 	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
 )
 
-type Authorizer func(*http.Request, repopath.Repository, bool) bool
+type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 
 type Handler struct {
 	Storage   storage.Store
@@ -28,9 +28,17 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write := suffix == "/git-receive-pack" || (suffix == "/info/refs" && r.URL.Query().Get("service") == "git-receive-pack")
-	if h.Authorize != nil && !h.Authorize(r, repo, write) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+	if h.Authorize != nil {
+		authenticated, allowed := h.Authorize(r, repo, write)
+		if !allowed {
+			if !authenticated {
+				w.Header().Set("WWW-Authenticate", `Basic realm="GitOne"`)
+				http.Error(w, "authentication required", http.StatusUnauthorized)
+			} else {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			}
+			return
+		}
 	}
 	switch {
 	case suffix == "/info/refs":

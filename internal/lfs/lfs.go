@@ -19,7 +19,7 @@ import (
 type Handler struct {
 	Storage   storage.Store
 	PublicURL string
-	Authorize func(*http.Request, repopath.Repository, bool) bool
+	Authorize func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 }
 type batchRequest struct {
 	Operation string   `json:"operation"`
@@ -55,14 +55,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case suffix == "/info/lfs/objects/batch":
 		h.batch(w, r, repo)
 	case strings.HasPrefix(suffix, "/info/lfs/objects/"):
-		if h.Authorize != nil && !h.Authorize(r, repo, r.Method == http.MethodPut) {
-			http.Error(w, "forbidden", 403)
+		if !h.authorize(w, r, repo, r.Method == http.MethodPut) {
 			return
 		}
 		h.object(w, r, repo, strings.TrimPrefix(suffix, "/info/lfs/objects/"))
 	case suffix == "/info/lfs/objects/verify":
-		if h.Authorize != nil && !h.Authorize(r, repo, true) {
-			http.Error(w, "forbidden", 403)
+		if !h.authorize(w, r, repo, true) {
 			return
 		}
 		w.WriteHeader(200)
@@ -77,8 +75,7 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 		http.Error(w, "invalid JSON", 400)
 		return
 	}
-	if h.Authorize != nil && !h.Authorize(r, repo, q.Operation == "upload") {
-		http.Error(w, "forbidden", 403)
+	if !h.authorize(w, r, repo, q.Operation == "upload") {
 		return
 	}
 	resp := batchResponse{Transfer: "basic"}
@@ -110,6 +107,24 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 	w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
 	json.NewEncoder(w).Encode(resp)
 }
+
+func (h Handler) authorize(w http.ResponseWriter, r *http.Request, repo repopath.Repository, write bool) bool {
+	if h.Authorize == nil {
+		return true
+	}
+	authenticated, allowed := h.Authorize(r, repo, write)
+	if allowed {
+		return true
+	}
+	if !authenticated {
+		w.Header().Set("WWW-Authenticate", `Basic realm="GitOne"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	} else {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}
+	return false
+}
+
 func (h Handler) object(w http.ResponseWriter, r *http.Request, repo repopath.Repository, oid string) {
 	if !validOID(oid) {
 		http.Error(w, "invalid oid", 400)

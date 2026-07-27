@@ -21,7 +21,7 @@ func TestUploadAndDownload(t *testing.T) {
 	data := []byte("large object")
 	sum := sha256.Sum256(data)
 	oid := hex.EncodeToString(sum[:])
-	h := Handler{Storage: st, PublicURL: "http://example", Authorize: func(*http.Request, repopath.Repository, bool) bool { return true }}
+	h := Handler{Storage: st, PublicURL: "http://example", Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) { return true, true }}
 	put := httptest.NewRequest(http.MethodPut, "/g/r.git/info/lfs/objects/"+oid, bytes.NewReader(data))
 	pw := httptest.NewRecorder()
 	h.ServeHTTP(pw, put)
@@ -38,7 +38,7 @@ func TestUploadAndDownload(t *testing.T) {
 func TestRejectWrongHash(t *testing.T) {
 	root := t.TempDir()
 	_ = os.MkdirAll(root+"/g/r.lfs/objects", 0750)
-	h := Handler{Storage: storage.Store{Root: root}, Authorize: func(*http.Request, repopath.Repository, bool) bool { return true }}
+	h := Handler{Storage: storage.Store{Root: root}, Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) { return true, true }}
 	oid := string(bytes.Repeat([]byte{'0'}, 64))
 	r := httptest.NewRequest(http.MethodPut, "/g/r.git/info/lfs/objects/"+oid, bytes.NewBufferString("wrong"))
 	w := httptest.NewRecorder()
