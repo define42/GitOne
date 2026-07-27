@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -56,6 +57,31 @@ type groupDetailOutput struct {
 		Username     string              `json:"username"`
 		Subgroups    []groupSummary      `json:"subgroups"`
 		Repositories []repositorySummary `json:"repositories"`
+	}
+}
+
+type groupSettingsOutput struct {
+	Body control.Document
+}
+
+type updateGroupSettingsBody struct {
+	Name         string                              `json:"name" minLength:"1"`
+	Description  string                              `json:"description"`
+	Inherit      bool                                `json:"inherit"`
+	Members      map[string]control.Role             `json:"members"`
+	Tokens       []control.Token                     `json:"tokens"`
+	Repositories map[string]control.RepositoryPolicy `json:"repositories"`
+}
+
+type updateGroupSettingsInput struct {
+	GroupPathInput
+	Body updateGroupSettingsBody
+}
+
+type updateGroupSettingsOutput struct {
+	Body struct {
+		Path     string           `json:"path"`
+		Settings control.Document `json:"settings"`
 	}
 }
 
@@ -149,6 +175,14 @@ func Register(mux *http.ServeMux, service API) huma.API {
 	}), service.getGroup)
 
 	huma.Register(api, protected(huma.Operation{
+		OperationID: "get-group-settings",
+		Method:      http.MethodGet,
+		Path:        "/api/groups/{path}/settings",
+		Summary:     "Get complete group control settings",
+		Tags:        []string{"Groups"},
+	}), service.getGroupSettings)
+
+	huma.Register(api, protected(huma.Operation{
 		OperationID:   "create-group",
 		Method:        http.MethodPost,
 		Path:          "/api/groups/{path}",
@@ -165,6 +199,14 @@ func Register(mux *http.ServeMux, service API) huma.API {
 		Tags:          []string{"Groups"},
 		DefaultStatus: http.StatusNoContent,
 	}), service.renameGroup)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "update-group-settings",
+		Method:      http.MethodPut,
+		Path:        "/api/groups/{path}/settings",
+		Summary:     "Update complete group control settings",
+		Tags:        []string{"Groups"},
+	}), service.updateGroupSettings)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID:   "delete-group",
@@ -323,6 +365,154 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	return output, nil
 }
 
+func (a API) getGroupSettings(ctx context.Context, input *GroupPathInput) (*groupSettingsOutput, error) {
+	path, err := canonicalGroup(input.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorize(ctx, input.Authorization, path, control.RoleAdmin); err != nil {
+		return nil, err
+	}
+	document, err := a.Resolver.Controls.Load(ctx, path)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not load group settings", err)
+	}
+	output := &groupSettingsOutput{}
+	output.Body = document
+	return output, nil
+}
+
+func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettingsInput) (*updateGroupSettingsOutput, error) {
+	path, err := canonicalGroup(input.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	author, err := a.authorize(ctx, input.Authorization, path, control.RoleAdmin)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(input.Body.Name)
+	if name == "" || strings.Contains(name, "/") {
+		return nil, huma.Error400BadRequest("group name must be one path segment")
+	}
+	parts := strings.Split(path, "/")
+	parts[len(parts)-1] = name
+	target, err := canonicalGroup(strings.Join(parts, "/"))
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	document := control.Document{
+		Version:      1,
+		Group:        target,
+		Description:  input.Body.Description,
+		Inherit:      input.Body.Inherit,
+		Members:      input.Body.Members,
+		Tokens:       input.Body.Tokens,
+		Repositories: input.Body.Repositories,
+	}
+	if document.Members == nil {
+		document.Members = map[string]control.Role{}
+	}
+	if document.Tokens == nil {
+		document.Tokens = []control.Token{}
+	}
+	if document.Repositories == nil {
+		document.Repositories = map[string]control.RepositoryPolicy{}
+	}
+	if err = control.Validate(target, document); err != nil {
+		return nil, huma.Error400BadRequest("invalid group settings", err)
+	}
+
+	if target == path {
+		if err = a.Storage.UpdateGroupControl(path, document, author); err != nil {
+			return nil, huma.Error500InternalServerError("could not update group settings", err)
+		}
+		a.Resolver.Controls.Invalidate(path)
+	} else if err = a.renameGroupControls(ctx, path, target, document, author); err != nil {
+		return nil, huma.Error409Conflict("could not rename group", err)
+	}
+
+	output := &updateGroupSettingsOutput{}
+	output.Body.Path = target
+	output.Body.Settings = document
+	return output, nil
+}
+
+type groupControlRename struct {
+	oldPath  string
+	newPath  string
+	original control.Document
+	updated  control.Document
+}
+
+func (a API) renameGroupControls(
+	ctx context.Context,
+	path string,
+	target string,
+	current control.Document,
+	author string,
+) error {
+	groups, err := a.Storage.ListGroups()
+	if err != nil {
+		return err
+	}
+	renames := make([]groupControlRename, 0)
+	for _, group := range groups {
+		if group.Path != path && !strings.HasPrefix(group.Path, path+"/") {
+			continue
+		}
+		original, loadErr := a.Resolver.Controls.Load(ctx, group.Path)
+		if loadErr != nil {
+			return loadErr
+		}
+		newPath := target + strings.TrimPrefix(group.Path, path)
+		updated := original
+		updated.Group = newPath
+		if group.Path == path {
+			updated = current
+		}
+		if validateErr := control.Validate(newPath, updated); validateErr != nil {
+			return validateErr
+		}
+		renames = append(renames, groupControlRename{
+			oldPath:  group.Path,
+			newPath:  newPath,
+			original: original,
+			updated:  updated,
+		})
+	}
+	if len(renames) == 0 {
+		return fmt.Errorf("group not found")
+	}
+	if err = a.Storage.RenameGroup(path, target); err != nil {
+		return err
+	}
+	for _, rename := range renames {
+		if err = a.Storage.UpdateGroupControl(rename.newPath, rename.updated, author); err != nil {
+			rollbackErr := a.Storage.RenameGroup(target, path)
+			if rollbackErr == nil {
+				for _, rollback := range renames {
+					_ = a.Storage.UpdateGroupControl(rollback.oldPath, rollback.original, author)
+				}
+			}
+			a.invalidateGroupRenames(renames)
+			if rollbackErr != nil {
+				return fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+			}
+			return err
+		}
+	}
+	a.invalidateGroupRenames(renames)
+	return nil
+}
+
+func (a API) invalidateGroupRenames(renames []groupControlRename) {
+	for _, rename := range renames {
+		a.Resolver.Controls.Invalidate(rename.oldPath)
+		a.Resolver.Controls.Invalidate(rename.newPath)
+	}
+}
+
 func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createGroupOutput, error) {
 	path, err := canonicalGroup(input.Path)
 	if err != nil {
@@ -349,10 +539,16 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, input.Authorization, path, control.RoleAdmin); err != nil {
+	author, err := a.authorize(ctx, input.Authorization, path, control.RoleAdmin)
+	if err != nil {
 		return nil, err
 	}
-	if err = a.Storage.RenameGroup(path, newPath); err != nil {
+	document, err := a.Resolver.Controls.Load(ctx, path)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not load group settings", err)
+	}
+	document.Group = newPath
+	if err = a.renameGroupControls(ctx, path, newPath, document, author); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
 	return &emptyOutput{}, nil

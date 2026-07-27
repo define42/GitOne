@@ -8,9 +8,11 @@ import (
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -345,6 +347,110 @@ func (s Store) CreateGroup(group, owner, description string) error {
 	return nil
 }
 
+func (s Store) UpdateGroupControl(group string, document control.Document, author string) error {
+	if err := control.Validate(group, document); err != nil {
+		return err
+	}
+	groupPath, err := s.GroupPath(group)
+	if err != nil {
+		return err
+	}
+	repository, err := git.PlainOpen(filepath.Join(groupPath, "control.git"))
+	if err != nil {
+		return err
+	}
+	head, err := repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		return err
+	}
+	parent, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		return err
+	}
+	tree, err := parent.Tree()
+	if err != nil {
+		return err
+	}
+
+	contents, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return err
+	}
+	contents = append(contents, '\n')
+	blob := &plumbing.MemoryObject{}
+	blob.SetType(plumbing.BlobObject)
+	writer, err := blob.Writer()
+	if err != nil {
+		return err
+	}
+	if _, err = writer.Write(contents); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err = writer.Close(); err != nil {
+		return err
+	}
+	blobHash, err := repository.Storer.SetEncodedObject(blob)
+	if err != nil {
+		return err
+	}
+
+	entries := append([]object.TreeEntry(nil), tree.Entries...)
+	found := false
+	for index := range entries {
+		if entries[index].Name == "control.json" {
+			entries[index].Mode = filemode.Regular
+			entries[index].Hash = blobHash
+			found = true
+			break
+		}
+	}
+	if !found {
+		entries = append(entries, object.TreeEntry{
+			Name: "control.json",
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		})
+	}
+	sort.Sort(object.TreeEntrySorter(entries))
+	updatedTree := &object.Tree{Entries: entries}
+	encodedTree := &plumbing.MemoryObject{}
+	if err = updatedTree.Encode(encodedTree); err != nil {
+		return err
+	}
+	treeHash, err := repository.Storer.SetEncodedObject(encodedTree)
+	if err != nil {
+		return err
+	}
+
+	if author == "" {
+		author = "GitOne"
+	}
+	signature := object.Signature{
+		Name:  author,
+		Email: author + "@localhost",
+		When:  time.Now().UTC(),
+	}
+	commit := &object.Commit{
+		Author:       signature,
+		Committer:    signature,
+		Message:      "Update group control\n",
+		TreeHash:     treeHash,
+		ParentHashes: []plumbing.Hash{parent.Hash},
+	}
+	encodedCommit := &plumbing.MemoryObject{}
+	if err = commit.Encode(encodedCommit); err != nil {
+		return err
+	}
+	commitHash, err := repository.Storer.SetEncodedObject(encodedCommit)
+	if err != nil {
+		return err
+	}
+	return repository.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), commitHash),
+	)
+}
+
 func (s Store) DeleteRepository(r repopath.Repository) error {
 	gitp, err := s.GitPath(r)
 	if err != nil {
@@ -427,6 +533,9 @@ func (s Store) DeleteGroup(group string) error {
 }
 
 func (s Store) RenameGroup(group, newPath string) error {
+	if newPath == group || strings.HasPrefix(newPath, group+"/") {
+		return errors.New("cannot move a group into itself")
+	}
 	src, err := s.GroupPath(group)
 	if err != nil {
 		return err
@@ -437,6 +546,16 @@ func (s Store) RenameGroup(group, newPath string) error {
 	}
 	if _, err = os.Stat(dst); err == nil {
 		return errors.New("destination group exists")
+	}
+	root, err := repopath.SafeJoin(s.Root)
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(dst)
+	if parent != root {
+		if _, err = os.Stat(filepath.Join(parent, "control.git")); err != nil {
+			return errors.New("destination parent group does not exist")
+		}
 	}
 	if err = os.MkdirAll(filepath.Dir(dst), 0750); err != nil {
 		return err

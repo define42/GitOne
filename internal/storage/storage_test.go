@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"context"
 	"errors"
+	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -64,6 +66,69 @@ func TestCreateGroupAndRepository(t *testing.T) {
 		if _, e := os.Stat(p); e != nil {
 			t.Fatalf("missing %s: %v", p, e)
 		}
+	}
+}
+
+func TestUpdateGroupControl(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", "Before"); err != nil {
+		t.Fatal(err)
+	}
+	controls := control.NewStore(root)
+	document, err := controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Description = "After"
+	document.Inherit = false
+	document.Members["bob"] = control.RoleWrite
+	document.Tokens = append(document.Tokens, control.Token{
+		Name: "deploy",
+		Key:  "ci",
+		Hash: "sha256:test",
+		Role: control.RoleWrite,
+	})
+	document.Repositories["api"] = control.RepositoryPolicy{
+		Visibility: "private",
+		LFS: control.LFSPolicy{
+			Enabled:             true,
+			MaximumObjectBytes:  1024,
+			MaximumStorageBytes: 4096,
+		},
+	}
+
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := control.NewStore(root).Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Description != "After" ||
+		updated.Inherit ||
+		updated.Members["bob"] != control.RoleWrite ||
+		len(updated.Tokens) != 1 ||
+		!updated.Repositories["api"].LFS.Enabled {
+		t.Fatalf("unexpected updated control document: %#v", updated)
+	}
+
+	repository, err := git.PlainOpen(filepath.Join(root, "engineering", "control.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commit.Message != "Update group control\n" ||
+		commit.Author.Name != "alice" ||
+		len(commit.ParentHashes) != 1 {
+		t.Fatalf("unexpected control commit: %#v", commit)
 	}
 }
 

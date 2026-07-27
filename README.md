@@ -23,7 +23,7 @@ make run RUN_ARGS="-root ./data -listen :8080 -public-url http://localhost:8080"
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups and their descriptions. Select a group to see its description and browse its immediate subgroups, subgroup descriptions, and repositories; each repository shows a copyable clone URL containing the authenticated username, such as `http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files, show the latest 100 commits in the selected branch’s history, and create a branch from any existing branch. Repositories can be deleted from the group view only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
+Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable clone URL containing the authenticated username, such as `http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files, show the latest 100 commits in the selected branch’s history, and create a branch from any existing branch. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
 Build the UI separately with:
 
@@ -67,7 +67,9 @@ make ui
 | --- | --- | --- |
 | `GET` | `/api/groups` | List accessible top-level groups. |
 | `GET` | `/api/groups/{path}` | Get a group’s description, immediate subgroups, and repositories with their descriptions. |
+| `GET` | `/api/groups/{path}/settings` | Get the complete `control.json` document for an admin-authorized group. |
 | `POST` | `/api/groups/{path}` | Create a group. `path` is the URL-encoded full group path. Optional query parameter: `description`. |
+| `PUT` | `/api/groups/{path}/settings` | Replace group control settings and optionally rename the group through the `name` field. |
 | `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.json`. |

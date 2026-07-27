@@ -62,6 +62,108 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 	}
 }
 
+func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
+	root := t.TempDir()
+	handler := New(Config{
+		Root:           root,
+		BootstrapUser:  "alice",
+		BootstrapToken: "secret",
+	})
+	for _, path := range []string{"engineering", "engineering%2Fbackend"} {
+		request := httptest.NewRequest(http.MethodPost, "/api/groups/"+path, nil)
+		request.SetBasicAuth("alice", "secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %s: status %d: %s", path, response.Code, response.Body.String())
+		}
+	}
+
+	settingsRequest := httptest.NewRequest(http.MethodGet, "/api/groups/engineering/settings", nil)
+	settingsRequest.SetBasicAuth("alice", "secret")
+	settingsResponse := httptest.NewRecorder()
+	handler.ServeHTTP(settingsResponse, settingsRequest)
+	if settingsResponse.Code != http.StatusOK {
+		t.Fatalf("get settings: status %d: %s", settingsResponse.Code, settingsResponse.Body.String())
+	}
+	var original control.Document
+	if err := json.Unmarshal(settingsResponse.Body.Bytes(), &original); err != nil {
+		t.Fatal(err)
+	}
+	if original.Group != "engineering" || original.Members["alice"] != control.RoleOwner {
+		t.Fatalf("unexpected original settings: %#v", original)
+	}
+
+	body := `{
+		"name": "product",
+		"description": "Product engineering",
+		"inherit": false,
+		"members": {
+			"alice": "owner",
+			"bob": "read"
+		},
+		"tokens": [{
+			"name": "deploy",
+			"key": "ci",
+			"hash": "sha256:deadbeef",
+			"role": "write",
+			"repositories": ["api"],
+			"disabled": true
+		}],
+		"repositories": {
+			"api": {
+				"visibility": "private",
+				"lfs": {
+					"enabled": true,
+					"maximumObjectBytes": 1024,
+					"maximumStorageBytes": 4096
+				}
+			}
+		}
+	}`
+	updateRequest := httptest.NewRequest(
+		http.MethodPut,
+		"/api/groups/engineering/settings",
+		strings.NewReader(body),
+	)
+	updateRequest.Header.Set("Content-Type", "application/json")
+	updateRequest.SetBasicAuth("alice", "secret")
+	updateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(updateResponse, updateRequest)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("update settings: status %d: %s", updateResponse.Code, updateResponse.Body.String())
+	}
+
+	controls := control.NewStore(root)
+	updated, err := controls.Load(context.Background(), "product")
+	if err != nil {
+		t.Fatal(err)
+	}
+	descendant, err := controls.Load(context.Background(), "product/backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Group != "product" ||
+		updated.Description != "Product engineering" ||
+		updated.Inherit ||
+		updated.Members["bob"] != control.RoleRead ||
+		len(updated.Tokens) != 1 ||
+		!updated.Repositories["api"].LFS.Enabled {
+		t.Fatalf("unexpected updated settings: %#v", updated)
+	}
+	if descendant.Group != "product/backend" {
+		t.Fatalf("descendant control group was not renamed: %#v", descendant)
+	}
+
+	forbidden := httptest.NewRequest(http.MethodGet, "/api/groups/product/settings", nil)
+	forbidden.SetBasicAuth("bob", "bob")
+	forbiddenResponse := httptest.NewRecorder()
+	handler.ServeHTTP(forbiddenResponse, forbidden)
+	if forbiddenResponse.Code != http.StatusForbidden {
+		t.Fatalf("read-only member accessed settings: status %d", forbiddenResponse.Code)
+	}
+}
+
 func TestLegacyCreateGroupEndpointIsRemoved(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
@@ -780,6 +882,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "subgroupDescription.input.value") {
 		t.Fatal("served UI does not provide group and subgroup descriptions")
 	}
+	if !strings.Contains(assetResponse.Body.String(), "groupSettingsControl") ||
+		!strings.Contains(assetResponse.Body.String(), "groupSettingsAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), "hashTokenSecret") ||
+		!strings.Contains(assetResponse.Body.String(), `method: "PUT"`) {
+		t.Fatal("served UI does not provide complete group control settings")
+	}
 	if !strings.Contains(assetResponse.Body.String(), "group.description") {
 		t.Fatal("served UI does not show group descriptions")
 	}
@@ -799,6 +907,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			for _, expected := range []string{
 				`"Repository browser"`,
 				`"/api/repositories/{repository}/branches"`,
+				`"/api/groups/{path}/settings"`,
 				`"/api/repositories/{repository}/branches/{branch}"`,
 				`"/api/repositories/{repository}/tree/{ref}"`,
 				`"/api/repositories/{repository}/tree/{ref}/{path}"`,

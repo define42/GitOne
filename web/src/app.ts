@@ -92,6 +92,42 @@ interface Problem {
   detail?: string;
 }
 
+type GroupRole = "read" | "write" | "admin" | "owner";
+
+interface GroupToken {
+  name: string;
+  key: string;
+  hash: string;
+  role: GroupRole;
+  repositories?: string[];
+  expiresAt?: string | null;
+  disabled?: boolean;
+}
+
+interface GroupRepositoryPolicy {
+  visibility?: "" | "private" | "internal" | "public";
+  lfs: {
+    enabled: boolean;
+    maximumObjectBytes?: number;
+    maximumStorageBytes?: number;
+  };
+}
+
+interface GroupControlSettings {
+  version: number;
+  group: string;
+  description: string;
+  inherit: boolean;
+  members: Record<string, GroupRole>;
+  tokens: GroupToken[];
+  repositories: Record<string, GroupRepositoryPolicy>;
+}
+
+interface GroupSettingsUpdate {
+  path: string;
+  settings: GroupControlSettings;
+}
+
 const appRoot = document.querySelector<HTMLElement>("#app");
 const notificationRoot = document.querySelector<HTMLElement>("#notifications");
 
@@ -192,6 +228,10 @@ function groupURL(path: string): string {
 
 function apiGroupURL(path: string): string {
   return `/api/groups/${encodeURIComponent(path)}`;
+}
+
+function groupSettingsAPIURL(path: string): string {
+  return `${apiGroupURL(path)}/settings`;
 }
 
 function repositoryURL(groupPath: string, repository: string, username: string): string {
@@ -668,6 +708,555 @@ function sectionHeading(
   }
   header.append(heading, ...actions);
   return header;
+}
+
+function roleSelect(value: GroupRole): HTMLSelectElement {
+  const select = element("select");
+  for (const role of ["read", "write", "admin", "owner"] as GroupRole[]) {
+    const option = element("option", role[0].toUpperCase() + role.slice(1));
+    option.value = role;
+    option.selected = role === value;
+    select.append(option);
+  }
+  return select;
+}
+
+function fieldLabel<T extends HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+  text: string,
+  field: T,
+): HTMLLabelElement {
+  const label = element("label", text);
+  label.append(field);
+  return label;
+}
+
+function removeButton(label: string): HTMLButtonElement {
+  const button = actionButton("Remove", "trash", "icon-button danger-secondary");
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  return button;
+}
+
+function localDateTime(value?: string | null): string {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+async function hashTokenSecret(secret: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(secret),
+  );
+  return `sha256:${Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function groupSettingsControl(
+  path: string,
+  detail: GroupDetail,
+  settings: GroupControlSettings,
+): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
+  const trigger = actionButton("Settings", "settings", "secondary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog settings-dialog";
+  const form = element("form");
+  form.className = "settings-form";
+
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", "Group settings");
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+
+  const layout = element("div");
+  layout.className = "settings-layout";
+  const tabs = element("div");
+  tabs.className = "settings-tabs";
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "Group settings");
+  const panels = element("div");
+  panels.className = "settings-panels";
+
+  const generalPanel = element("section");
+  generalPanel.className = "settings-panel-view";
+  generalPanel.setAttribute("role", "tabpanel");
+  generalPanel.append(element("h3", "General"));
+  const generalGrid = element("div");
+  generalGrid.className = "settings-field-grid";
+  const name = element("input");
+  name.required = true;
+  name.autocomplete = "off";
+  name.value = settings.group.split("/").at(-1) ?? settings.group;
+  const currentPath = element("input");
+  currentPath.readOnly = true;
+  currentPath.value = settings.group;
+  const version = element("input");
+  version.readOnly = true;
+  version.value = String(settings.version);
+  const description = element("textarea");
+  description.rows = 4;
+  description.value = settings.description;
+  const inherit = element("input");
+  inherit.type = "checkbox";
+  inherit.checked = settings.inherit;
+  const inheritLabel = element("label");
+  inheritLabel.className = "checkbox-label settings-checkbox";
+  inheritLabel.append(
+    inherit,
+    document.createTextNode("Inherit access from the parent group"),
+  );
+  generalGrid.append(
+    fieldLabel("Group name", name),
+    fieldLabel("Current path", currentPath),
+    fieldLabel("Control version", version),
+    fieldLabel("Description", description),
+    inheritLabel,
+  );
+  generalPanel.append(generalGrid);
+
+  const accessPanel = element("section");
+  accessPanel.className = "settings-panel-view";
+  accessPanel.setAttribute("role", "tabpanel");
+  const accessHeader = element("div");
+  accessHeader.className = "settings-section-header";
+  accessHeader.append(element("h3", "Members"));
+  const addMember = actionButton("Add member", "plus", "secondary");
+  accessHeader.append(addMember);
+  const members = element("div");
+  members.className = "settings-items member-items";
+  const addMemberRow = (username = "", role: GroupRole = "read"): void => {
+    const row = element("fieldset");
+    row.className = "settings-item member-row";
+    const legend = element("legend", "Member");
+    legend.className = "sr-only";
+    const memberName = element("input");
+    memberName.className = "member-name";
+    memberName.required = true;
+    memberName.autocomplete = "off";
+    memberName.value = username;
+    const memberRole = roleSelect(role);
+    memberRole.className = "member-role";
+    const remove = removeButton(`Remove ${username || "member"}`);
+    remove.addEventListener("click", () => row.remove());
+    row.append(
+      legend,
+      fieldLabel("Username", memberName),
+      fieldLabel("Role", memberRole),
+      remove,
+    );
+    members.append(row);
+    if (!username) {
+      memberName.focus();
+    }
+  };
+  for (const [username, role] of Object.entries(settings.members).sort()) {
+    addMemberRow(username, role);
+  }
+  addMember.addEventListener("click", () => addMemberRow());
+  accessPanel.append(accessHeader, members);
+
+  const tokensPanel = element("section");
+  tokensPanel.className = "settings-panel-view";
+  tokensPanel.setAttribute("role", "tabpanel");
+  const tokensHeader = element("div");
+  tokensHeader.className = "settings-section-header";
+  tokensHeader.append(element("h3", "Tokens"));
+  const addToken = actionButton("Add token", "plus", "secondary");
+  tokensHeader.append(addToken);
+  const tokens = element("div");
+  tokens.className = "settings-items token-items";
+  const tokenEmpty = element("p", "No tokens.");
+  tokenEmpty.className = "settings-empty";
+  const refreshTokenEmpty = (): void => {
+    tokenEmpty.hidden = tokens.querySelector(".token-row") !== null;
+  };
+  const addTokenRow = (token: GroupToken = {
+    name: "",
+    key: "",
+    hash: "",
+    role: "write",
+  }): void => {
+    const row = element("fieldset");
+    row.className = "settings-item token-row";
+    const legend = element("legend", token.name || "New token");
+    const remove = removeButton(`Remove ${token.name || "token"}`);
+    remove.classList.add("settings-item-remove");
+    remove.addEventListener("click", () => {
+      row.remove();
+      refreshTokenEmpty();
+    });
+
+    const fields = element("div");
+    fields.className = "settings-field-grid token-field-grid";
+    const tokenName = element("input");
+    tokenName.className = "token-name";
+    tokenName.required = true;
+    tokenName.autocomplete = "off";
+    tokenName.value = token.name;
+    tokenName.addEventListener("input", () => {
+      legend.textContent = tokenName.value || "New token";
+    });
+    const tokenKey = element("input");
+    tokenKey.className = "token-key";
+    tokenKey.required = true;
+    tokenKey.autocomplete = "off";
+    tokenKey.value = token.key;
+    const tokenRole = roleSelect(token.role);
+    tokenRole.className = "token-role";
+    const tokenHash = element("input");
+    tokenHash.className = "token-hash";
+    tokenHash.autocomplete = "off";
+    tokenHash.spellcheck = false;
+    tokenHash.value = token.hash;
+    const tokenSecret = element("input");
+    tokenSecret.className = "token-secret";
+    tokenSecret.type = "password";
+    tokenSecret.autocomplete = "new-password";
+    const tokenRepositories = element("input");
+    tokenRepositories.className = "token-repositories";
+    tokenRepositories.placeholder = "api, web";
+    tokenRepositories.value = token.repositories?.join(", ") ?? "";
+    const tokenExpiry = element("input");
+    tokenExpiry.className = "token-expires";
+    tokenExpiry.type = "datetime-local";
+    tokenExpiry.value = localDateTime(token.expiresAt);
+    const tokenDisabled = element("input");
+    tokenDisabled.className = "token-disabled";
+    tokenDisabled.type = "checkbox";
+    tokenDisabled.checked = token.disabled ?? false;
+    const disabledLabel = element("label");
+    disabledLabel.className = "checkbox-label settings-checkbox";
+    disabledLabel.append(tokenDisabled, document.createTextNode("Disabled"));
+    fields.append(
+      fieldLabel("Token name", tokenName),
+      fieldLabel("Key", tokenKey),
+      fieldLabel("Role", tokenRole),
+      fieldLabel("Token hash", tokenHash),
+      fieldLabel("New secret", tokenSecret),
+      fieldLabel("Repository scope", tokenRepositories),
+      fieldLabel("Expires", tokenExpiry),
+      disabledLabel,
+    );
+    row.append(legend, remove, fields);
+    tokens.append(row);
+    refreshTokenEmpty();
+    if (!token.name) {
+      tokenName.focus();
+    }
+  };
+  for (const token of settings.tokens) {
+    addTokenRow(token);
+  }
+  addToken.addEventListener("click", () => addTokenRow());
+  tokensPanel.append(tokensHeader, tokenEmpty, tokens);
+  refreshTokenEmpty();
+
+  const repositoriesPanel = element("section");
+  repositoriesPanel.className = "settings-panel-view";
+  repositoriesPanel.setAttribute("role", "tabpanel");
+  const repositoriesHeader = element("div");
+  repositoriesHeader.className = "settings-section-header";
+  repositoriesHeader.append(element("h3", "Repository policies"));
+  const addPolicy = actionButton("Add policy", "plus", "secondary");
+  repositoriesHeader.append(addPolicy);
+  const repositoryNames = Array.from(new Set([
+    ...detail.repositories.map((repository) => repository.name),
+    ...Object.keys(settings.repositories),
+  ])).sort();
+  const repositoryOptions = element("datalist");
+  repositoryOptions.id = "repository-policy-options";
+  for (const repositoryName of repositoryNames) {
+    const option = element("option");
+    option.value = repositoryName;
+    repositoryOptions.append(option);
+  }
+  const policies = element("div");
+  policies.className = "settings-items policy-items";
+  const policyEmpty = element("p", "No repository policies.");
+  policyEmpty.className = "settings-empty";
+  const refreshPolicyEmpty = (): void => {
+    policyEmpty.hidden = policies.querySelector(".policy-row") !== null;
+  };
+  const addPolicyRow = (
+    repositoryName = "",
+    policy: GroupRepositoryPolicy = {
+      visibility: "",
+      lfs: {enabled: false},
+    },
+  ): void => {
+    const row = element("fieldset");
+    row.className = "settings-item policy-row";
+    const legend = element("legend", repositoryName || "New policy");
+    const remove = removeButton(`Remove ${repositoryName || "policy"}`);
+    remove.classList.add("settings-item-remove");
+    remove.addEventListener("click", () => {
+      row.remove();
+      refreshPolicyEmpty();
+    });
+    const fields = element("div");
+    fields.className = "settings-field-grid policy-field-grid";
+    const policyRepository = element("input");
+    policyRepository.className = "policy-repository";
+    policyRepository.required = true;
+    policyRepository.autocomplete = "off";
+    policyRepository.setAttribute("list", repositoryOptions.id);
+    policyRepository.value = repositoryName;
+    policyRepository.addEventListener("input", () => {
+      legend.textContent = policyRepository.value || "New policy";
+    });
+    const visibility = element("select");
+    visibility.className = "policy-visibility";
+    for (const [value, label] of [
+      ["", "Default"],
+      ["private", "Private"],
+      ["internal", "Internal"],
+      ["public", "Public"],
+    ]) {
+      const option = element("option", label);
+      option.value = value;
+      option.selected = value === (policy.visibility ?? "");
+      visibility.append(option);
+    }
+    const lfsEnabled = element("input");
+    lfsEnabled.className = "policy-lfs-enabled";
+    lfsEnabled.type = "checkbox";
+    lfsEnabled.checked = policy.lfs.enabled;
+    const lfsLabel = element("label");
+    lfsLabel.className = "checkbox-label settings-checkbox";
+    lfsLabel.append(lfsEnabled, document.createTextNode("LFS enabled"));
+    const maximumObject = element("input");
+    maximumObject.className = "policy-maximum-object";
+    maximumObject.type = "number";
+    maximumObject.min = "0";
+    maximumObject.step = "1";
+    maximumObject.value = policy.lfs.maximumObjectBytes
+      ? String(policy.lfs.maximumObjectBytes)
+      : "";
+    const maximumStorage = element("input");
+    maximumStorage.className = "policy-maximum-storage";
+    maximumStorage.type = "number";
+    maximumStorage.min = "0";
+    maximumStorage.step = "1";
+    maximumStorage.value = policy.lfs.maximumStorageBytes
+      ? String(policy.lfs.maximumStorageBytes)
+      : "";
+    fields.append(
+      fieldLabel("Repository", policyRepository),
+      fieldLabel("Visibility", visibility),
+      lfsLabel,
+      fieldLabel("Maximum object bytes", maximumObject),
+      fieldLabel("Maximum storage bytes", maximumStorage),
+    );
+    row.append(legend, remove, fields);
+    policies.append(row);
+    refreshPolicyEmpty();
+    if (!repositoryName) {
+      policyRepository.focus();
+    }
+  };
+  for (const [repositoryName, policy] of Object.entries(settings.repositories).sort()) {
+    addPolicyRow(repositoryName, policy);
+  }
+  addPolicy.addEventListener("click", () => {
+    const used = new Set(Array.from(
+      policies.querySelectorAll<HTMLInputElement>(".policy-repository"),
+    ).map((input) => input.value));
+    addPolicyRow(repositoryNames.find((repository) => !used.has(repository)) ?? "");
+  });
+  repositoriesPanel.append(
+    repositoriesHeader,
+    repositoryOptions,
+    policyEmpty,
+    policies,
+  );
+  refreshPolicyEmpty();
+
+  const panelDefinitions: Array<[string, HTMLElement]> = [
+    ["General", generalPanel],
+    ["Access", accessPanel],
+    ["Tokens", tokensPanel],
+    ["Repositories", repositoriesPanel],
+  ];
+  const tabButtons: HTMLButtonElement[] = [];
+  const selectPanel = (selected: number): void => {
+    panelDefinitions.forEach(([, panel], index) => {
+      panel.hidden = index !== selected;
+      tabButtons[index].classList.toggle("active", index === selected);
+      tabButtons[index].setAttribute("aria-selected", String(index === selected));
+    });
+  };
+  panelDefinitions.forEach(([label, panel], index) => {
+    const tab = actionButton(label);
+    tab.className = "settings-tab";
+    tab.setAttribute("role", "tab");
+    tab.addEventListener("click", () => selectPanel(index));
+    tabButtons.push(tab);
+    tabs.append(tab);
+    panels.append(panel);
+  });
+  selectPanel(0);
+  layout.append(tabs, panels);
+
+  const actions = element("div");
+  actions.className = "dialog-actions";
+  const cancel = actionButton("Cancel", undefined, "secondary");
+  const save = actionButton("Save changes", undefined, "primary");
+  save.type = "submit";
+  actions.append(cancel, save);
+  form.append(header, layout, actions);
+  dialog.append(form);
+
+  trigger.addEventListener("click", () => {
+    dialog.showModal();
+    selectPanel(0);
+    name.focus();
+  });
+  const discardChanges = (): void => {
+    dialog.close();
+    void renderGroup(path);
+  };
+  close.addEventListener("click", discardChanges);
+  cancel.addEventListener("click", discardChanges);
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      discardChanges();
+    }
+  });
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    discardChanges();
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    cancel.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    try {
+      const updatedMembers: Record<string, GroupRole> = {};
+      for (const row of members.querySelectorAll<HTMLElement>(".member-row")) {
+        const username = row.querySelector<HTMLInputElement>(".member-name")?.value.trim() ?? "";
+        const role = row.querySelector<HTMLSelectElement>(".member-role")?.value as GroupRole;
+        if (!username) {
+          throw new Error("Every member needs a username.");
+        }
+        if (username in updatedMembers) {
+          throw new Error(`Member ${username} is listed more than once.`);
+        }
+        updatedMembers[username] = role;
+      }
+
+      const updatedTokens: GroupToken[] = [];
+      for (const row of tokens.querySelectorAll<HTMLElement>(".token-row")) {
+        const tokenName = row.querySelector<HTMLInputElement>(".token-name")?.value.trim() ?? "";
+        const key = row.querySelector<HTMLInputElement>(".token-key")?.value.trim() ?? "";
+        const secret = row.querySelector<HTMLInputElement>(".token-secret")?.value ?? "";
+        let hash = row.querySelector<HTMLInputElement>(".token-hash")?.value.trim() ?? "";
+        if (secret) {
+          hash = await hashTokenSecret(secret);
+        }
+        if (!tokenName || !key || !hash) {
+          throw new Error("Every token needs a name, key, and hash or new secret.");
+        }
+        const repositoryScope = row
+          .querySelector<HTMLInputElement>(".token-repositories")
+          ?.value.split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const expiry = row.querySelector<HTMLInputElement>(".token-expires")?.value ?? "";
+        updatedTokens.push({
+          name: tokenName,
+          key,
+          hash,
+          role: row.querySelector<HTMLSelectElement>(".token-role")?.value as GroupRole,
+          repositories: repositoryScope,
+          expiresAt: expiry ? new Date(expiry).toISOString() : undefined,
+          disabled: row.querySelector<HTMLInputElement>(".token-disabled")?.checked ?? false,
+        });
+      }
+
+      const updatedPolicies: Record<string, GroupRepositoryPolicy> = {};
+      for (const row of policies.querySelectorAll<HTMLElement>(".policy-row")) {
+        const repositoryName = row
+          .querySelector<HTMLInputElement>(".policy-repository")
+          ?.value.trim() ?? "";
+        if (!repositoryName) {
+          throw new Error("Every repository policy needs a repository.");
+        }
+        if (repositoryName in updatedPolicies) {
+          throw new Error(`Repository ${repositoryName} has more than one policy.`);
+        }
+        const maximumObjectValue = row
+          .querySelector<HTMLInputElement>(".policy-maximum-object")
+          ?.value.trim() ?? "";
+        const maximumStorageValue = row
+          .querySelector<HTMLInputElement>(".policy-maximum-storage")
+          ?.value.trim() ?? "";
+        const maximumObjectBytes = maximumObjectValue ? Number(maximumObjectValue) : 0;
+        const maximumStorageBytes = maximumStorageValue ? Number(maximumStorageValue) : 0;
+        if (!Number.isSafeInteger(maximumObjectBytes) ||
+          !Number.isSafeInteger(maximumStorageBytes) ||
+          maximumObjectBytes < 0 ||
+          maximumStorageBytes < 0) {
+          throw new Error("Repository limits must be non-negative whole bytes.");
+        }
+        updatedPolicies[repositoryName] = {
+          visibility: row
+            .querySelector<HTMLSelectElement>(".policy-visibility")
+            ?.value as GroupRepositoryPolicy["visibility"],
+          lfs: {
+            enabled: row
+              .querySelector<HTMLInputElement>(".policy-lfs-enabled")
+              ?.checked ?? false,
+            maximumObjectBytes,
+            maximumStorageBytes,
+          },
+        };
+      }
+
+      const updated = await request<GroupSettingsUpdate>(
+        groupSettingsAPIURL(path),
+        {
+          method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            name: name.value.trim(),
+            description: description.value,
+            inherit: inherit.checked,
+            members: updatedMembers,
+            tokens: updatedTokens,
+            repositories: updatedPolicies,
+          }),
+        },
+      );
+      dialog.close();
+      window.history.replaceState({}, "", groupURL(updated.path));
+      await renderGroup(updated.path, "Group settings saved.");
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "Could not save group settings.",
+        true,
+      );
+    } finally {
+      save.disabled = false;
+      cancel.disabled = false;
+      form.removeAttribute("aria-busy");
+    }
+  });
+
+  return {trigger, dialog};
 }
 
 function breadcrumbs(path: string): HTMLElement {
@@ -1281,7 +1870,10 @@ async function renderRoot(message?: string): Promise<void> {
 }
 
 async function renderGroup(path: string, message?: string): Promise<void> {
-  const data = await request<GroupDetail>(apiGroupURL(path));
+  const [data, controlSettings] = await Promise.all([
+    request<GroupDetail>(apiGroupURL(path)),
+    request<GroupControlSettings>(groupSettingsAPIURL(path)).catch(() => null),
+  ]);
   document.title = `${data.path} · GitOne`;
   app.replaceChildren();
 
@@ -1329,6 +1921,9 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     },
     [repositoryDescription.label, initializeReadmeLabel],
   );
+  const settingsControl = controlSettings
+    ? groupSettingsControl(data.path, data, controlSettings)
+    : null;
 
   const subgroups = element("section");
   subgroups.className = "content-section";
@@ -1369,10 +1964,10 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     repositories.append(list);
   }
 
-  const settings = element("details");
-  settings.className = "settings-panel";
+  const danger = element("details");
+  danger.className = "settings-panel";
   const settingsSummary = element("summary");
-  settingsSummary.append(icon("settings"), document.createTextNode("Group settings"));
+  settingsSummary.append(icon("trash"), document.createTextNode("Danger zone"));
   const settingsContent = element("div");
   settingsContent.className = "settings-content";
   if (data.repositories.length > 0) {
@@ -1395,7 +1990,13 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     data.path,
     data.subgroups.length === 0 && data.repositories.length === 0,
   ));
-  settings.append(settingsSummary, settingsContent);
+  danger.append(settingsSummary, settingsContent);
+
+  const pageActions = [
+    ...(settingsControl ? [settingsControl.trigger] : []),
+    createSubgroup.trigger,
+    createRepository.trigger,
+  ];
 
   app.append(
     breadcrumbs(data.path),
@@ -1403,13 +2004,14 @@ async function renderGroup(path: string, message?: string): Promise<void> {
       "Group",
       data.path,
       data.description,
-      [createSubgroup.trigger, createRepository.trigger],
+      pageActions,
     ),
     subgroups,
     repositories,
-    settings,
+    danger,
     createSubgroup.dialog,
     createRepository.dialog,
+    ...(settingsControl ? [settingsControl.dialog] : []),
   );
   if (message) {
     showStatus(message);

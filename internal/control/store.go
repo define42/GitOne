@@ -91,7 +91,7 @@ func Validate(group string, d Document) error {
 			return fmt.Errorf("invalid repository name %q", name)
 		}
 	}
-	return nil
+	return ValidateSettings(d)
 }
 func validRole(r Role) bool {
 	return r == RoleRead || r == RoleWrite || r == RoleAdmin || r == RoleOwner
