@@ -346,15 +346,15 @@ func compareTrees(
 		file := repositoryComparisonFile{Status: "modified"}
 		switch {
 		case fromFile == nil:
-			file.Path = toFile.Name
+			file.Path = change.To.Name
 			file.Status = "added"
 		case toFile == nil:
-			file.Path = fromFile.Name
+			file.Path = change.From.Name
 			file.Status = "deleted"
 		default:
-			file.Path = toFile.Name
-			if fromFile.Name != toFile.Name {
-				file.OldPath = fromFile.Name
+			file.Path = change.To.Name
+			if change.From.Name != change.To.Name {
+				file.OldPath = change.From.Name
 				file.Status = "renamed"
 			}
 		}

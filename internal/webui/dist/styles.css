@@ -1573,7 +1573,7 @@ table {
 }
 
 .commit-list li > span,
-.history-list li > span {
+.history-list > li > span {
   color: var(--muted);
   font-size: 0.8rem;
 }
@@ -1587,7 +1587,7 @@ table {
   margin-top: 2rem;
 }
 
-.history-list li {
+.history-list > li {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1597,17 +1597,66 @@ table {
 }
 
 .history-heading {
-  align-items: baseline;
+  align-items: start;
   display: flex;
-  flex-wrap: wrap;
   gap: 0.5rem 1rem;
   justify-content: space-between;
 }
 
-.history-heading code {
+.history-identity {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.history-identity code {
   color: var(--muted);
   font-size: 0.75rem;
   overflow-wrap: anywhere;
+}
+
+.history-diff-toggle {
+  flex: 0 0 auto;
+  min-height: 2.25rem;
+}
+
+.history-commit-diff {
+  border-top: 1px solid var(--border);
+  margin: 0.5rem -1rem -1rem;
+}
+
+.history-diff-summary {
+  align-items: center;
+  background: var(--surface-subtle);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  justify-content: space-between;
+  padding: 0.8rem 1rem;
+}
+
+.history-diff-parent {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.history-diff-files {
+  display: grid;
+}
+
+.history-diff-file {
+  border: 0;
+  border-radius: 0;
+}
+
+.history-diff-file + .history-diff-file {
+  border-top: 1px solid var(--border);
+}
+
+.history-diff-empty {
+  border: 0;
+  margin: 1rem;
 }
 
 .commit-message {
@@ -1806,8 +1855,17 @@ table {
     width: 5.5rem;
   }
 
-  .history-heading code {
+  .history-identity code {
     width: 100%;
+  }
+
+  .history-diff-summary {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .history-diff-summary .comparison-stats {
+    justify-content: flex-start;
   }
 
   .file-editor-content > textarea {

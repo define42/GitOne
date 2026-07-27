@@ -667,6 +667,74 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 		t.Fatalf("unexpected highlighted repository blob: %#v", highlightedBlob)
 	}
 
+	headCommit, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialCommit, err := headCommit.Parent(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var commitDiff struct {
+		Repository string `json:"repository"`
+		Commit     string `json:"commit"`
+		Parent     string `json:"parent"`
+		Files      []struct {
+			Path      string `json:"path"`
+			Status    string `json:"status"`
+			Additions int    `json:"additions"`
+			Patch     string `json:"patch"`
+		} `json:"files"`
+	}
+	if err = json.Unmarshal(get(
+		"/api/repositories/engineering%2Fapi/commits/"+head.Hash().String()+"/diff",
+	).Body.Bytes(), &commitDiff); err != nil {
+		t.Fatal(err)
+	}
+	if commitDiff.Repository != "engineering/api" ||
+		commitDiff.Commit != head.Hash().String() ||
+		commitDiff.Parent != initialCommit.Hash.String() ||
+		len(commitDiff.Files) != 2 {
+		t.Fatalf("unexpected commit diff: %#v", commitDiff)
+	}
+	commitDiffFiles := map[string]struct {
+		Status    string
+		Additions int
+		Patch     string
+	}{}
+	for _, file := range commitDiff.Files {
+		commitDiffFiles[file.Path] = struct {
+			Status    string
+			Additions int
+			Patch     string
+		}{file.Status, file.Additions, file.Patch}
+	}
+	if commitDiffFiles["docs/guide.txt"].Status != "added" ||
+		commitDiffFiles["docs/guide.txt"].Additions != 1 ||
+		!strings.Contains(commitDiffFiles["docs/guide.txt"].Patch, "Browse me") ||
+		commitDiffFiles["server.js"].Status != "added" ||
+		!strings.Contains(commitDiffFiles["server.js"].Patch, "node:http") {
+		t.Fatalf("unexpected files in commit diff: %#v", commitDiffFiles)
+	}
+
+	var initialDiff struct {
+		Commit string `json:"commit"`
+		Parent string `json:"parent"`
+		Files  []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	if err = json.Unmarshal(get(
+		"/api/repositories/engineering%2Fapi/commits/"+initialCommit.Hash.String()+"/diff",
+	).Body.Bytes(), &initialDiff); err != nil {
+		t.Fatal(err)
+	}
+	if initialDiff.Commit != initialCommit.Hash.String() ||
+		initialDiff.Parent != "" ||
+		len(initialDiff.Files) != 2 {
+		t.Fatalf("unexpected initial commit diff: %#v", initialDiff)
+	}
+
 	var editableBlob struct {
 		Commit  string `json:"commit"`
 		CanEdit bool   `json:"canEdit"`
@@ -1312,11 +1380,13 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "repositoryMergesAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), "branchComparisonResult") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryHistory") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryCommitDiffAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), "Loading commit diff") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryNavigation") ||
 		!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 20`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "tree"`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "blob"`) {
-		t.Fatal("served UI does not support repository files, branch creation, and branch history")
+		t.Fatal("served UI does not support repository files, branches, and commit history diffs")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") ||
 		!strings.Contains(assetResponse.Body.String(), `input.value !== repositoryName`) ||
@@ -1366,6 +1436,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 				`"/api/repositories/{repository}/blob/{ref}/{path}"`,
 				`"/api/repositories/{repository}/files/{ref}/{path}"`,
 				`"/api/repositories/{repository}/commits/{ref}"`,
+				`"/api/repositories/{repository}/commits/{commit}/diff"`,
 			} {
 				if !strings.Contains(document, expected) {
 					t.Fatalf("OpenAPI document does not contain %s", expected)

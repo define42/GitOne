@@ -98,6 +98,12 @@ type repositoryCommitsInput struct {
 	Limit      int    `query:"limit" minimum:"1" maximum:"100" default:"20"`
 }
 
+type repositoryCommitDiffInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Commit     string `path:"commit" doc:"Complete commit hash"`
+}
+
 type repositoryTreeEntry struct {
 	Name string `json:"name" doc:"Entry name"`
 	Path string `json:"path" doc:"Full path inside the repository"`
@@ -181,6 +187,15 @@ type repositoryCommitsOutput struct {
 		Repository string                 `json:"repository"`
 		Ref        string                 `json:"ref"`
 		Commits    []repositoryCommitInfo `json:"commits"`
+	}
+}
+
+type repositoryCommitDiffOutput struct {
+	Body struct {
+		Repository string                     `json:"repository"`
+		Commit     string                     `json:"commit"`
+		Parent     string                     `json:"parent,omitempty"`
+		Files      []repositoryComparisonFile `json:"files"`
 	}
 }
 
@@ -295,6 +310,14 @@ func registerRepositoryBrowser(api huma.API, service API) {
 		Summary:     "List repository commits",
 		Tags:        []string{"Repository browser"},
 	}), service.listRepositoryCommits)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "read-repository-commit-diff",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/commits/{commit}/diff",
+		Summary:     "Read the changes introduced by a commit",
+		Tags:        []string{"Repository browser"},
+	}), service.readRepositoryCommitDiff)
 }
 
 func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranchesInput) (*repositoryBranchesOutput, error) {

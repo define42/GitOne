@@ -114,6 +114,13 @@ interface RepositoryCommits {
   commits: RepositoryCommit[];
 }
 
+interface RepositoryCommitDiff {
+  repository: string;
+  commit: string;
+  parent?: string;
+  files: RepositoryComparisonFile[];
+}
+
 interface RepositoryComparisonFile {
   path: string;
   oldPath?: string;
@@ -380,6 +387,10 @@ function repositoryComparisonAPIURL(
 
 function repositoryMergesAPIURL(repository: string): string {
   return `/api/repositories/${encodeURIComponent(repository)}/merges`;
+}
+
+function repositoryCommitDiffAPIURL(repository: string, commit: string): string {
+  return `/api/repositories/${encodeURIComponent(repository)}/commits/${encodeURIComponent(commit)}/diff`;
 }
 
 function repositoryFileAPIURL(
@@ -1508,7 +1519,10 @@ function repositoryCommitList(data: RepositoryCommits): HTMLElement {
   return section;
 }
 
-function repositoryHistory(data: RepositoryCommits): HTMLElement {
+function repositoryHistory(
+  route: RepositoryBrowserRoute,
+  data: RepositoryCommits,
+): HTMLElement {
   const section = element("section");
   section.className = "repository-history content-section";
   section.append(sectionHeading(`History for ${data.ref}`, data.commits.length));
@@ -1522,10 +1536,60 @@ function repositoryHistory(data: RepositoryCommits): HTMLElement {
     const item = element("li");
     const heading = element("div");
     heading.className = "history-heading";
-    heading.append(
+    const identity = element("div");
+    identity.className = "history-identity";
+    identity.append(
       element("strong", commit.message.split("\n")[0] || "(no message)"),
       element("code", commit.hash),
     );
+    const diffButton = actionButton("View diff", "git-compare", "secondary history-diff-toggle");
+    diffButton.setAttribute("aria-expanded", "false");
+    const diffPanel = element("div");
+    diffPanel.className = "history-commit-diff";
+    diffPanel.id = `commit-diff-${commit.hash}`;
+    diffPanel.hidden = true;
+    diffButton.setAttribute("aria-controls", diffPanel.id);
+    let diffLoaded = false;
+    const setDiffButtonLabel = (label: string): void => {
+      diffButton.replaceChildren(icon("git-compare"), document.createTextNode(label));
+    };
+    diffButton.addEventListener("click", async () => {
+      if (!diffPanel.hidden) {
+        diffPanel.hidden = true;
+        diffButton.setAttribute("aria-expanded", "false");
+        setDiffButtonLabel("View diff");
+        return;
+      }
+      diffPanel.hidden = false;
+      diffButton.setAttribute("aria-expanded", "true");
+      setDiffButtonLabel("Hide diff");
+      if (diffLoaded) {
+        return;
+      }
+
+      diffButton.disabled = true;
+      diffPanel.setAttribute("aria-busy", "true");
+      diffPanel.replaceChildren(emptyState("Loading commit diff…"));
+      try {
+        const diff = await request<RepositoryCommitDiff>(
+          repositoryCommitDiffAPIURL(route.repository, commit.hash),
+        );
+        diffPanel.replaceChildren(repositoryCommitDiff(diff));
+        diffLoaded = true;
+      } catch (reason) {
+        diffPanel.hidden = true;
+        diffButton.setAttribute("aria-expanded", "false");
+        setDiffButtonLabel("View diff");
+        showStatus(
+          reason instanceof Error ? reason.message : "Could not load the commit diff.",
+          true,
+        );
+      } finally {
+        diffPanel.removeAttribute("aria-busy");
+        diffButton.disabled = false;
+      }
+    });
+    heading.append(identity, diffButton);
     const message = element("pre", commit.message.trimEnd() || "(no message)");
     message.className = "commit-message";
     const authored = element(
@@ -1538,11 +1602,55 @@ function repositoryHistory(data: RepositoryCommits): HTMLElement {
       `Committed by ${commit.committer} ${relativeTime(commit.committed)}`,
     );
     committed.title = new Date(commit.committed).toLocaleString();
-    item.append(heading, message, authored, committed);
+    item.append(heading, message, authored, committed, diffPanel);
     list.append(item);
   }
   section.append(list);
   return section;
+}
+
+function repositoryCommitDiff(data: RepositoryCommitDiff): HTMLElement {
+  const content = element("div");
+  content.className = "history-diff-content";
+  const summary = element("div");
+  summary.className = "history-diff-summary";
+  const parent = element(
+    "span",
+    data.parent
+      ? `Compared with parent ${data.parent.slice(0, 12)}`
+      : "Initial commit",
+  );
+  parent.className = "history-diff-parent";
+  const stats = element("div");
+  stats.className = "comparison-stats";
+  const additions = data.files.reduce((total, file) => total + file.additions, 0);
+  const deletions = data.files.reduce((total, file) => total + file.deletions, 0);
+  stats.append(
+    comparisonStat(
+      data.files.length === 1 ? "file changed" : "files changed",
+      String(data.files.length),
+    ),
+    comparisonStat("additions", `+${additions}`),
+    comparisonStat("deletions", `−${deletions}`),
+  );
+  summary.append(parent, stats);
+  content.append(summary);
+
+  const files = element("div");
+  files.className = "history-diff-files";
+  if (data.files.length === 0) {
+    const empty = emptyState("This commit does not change any files.");
+    empty.classList.add("history-diff-empty");
+    files.append(empty);
+  } else {
+    for (const file of data.files) {
+      const fileDiff = comparisonDiff(file);
+      fileDiff.classList.add("history-diff-file");
+      files.append(fileDiff);
+    }
+  }
+  content.append(files);
+  return content;
 }
 
 function repositoryNavigation(route: RepositoryBrowserRoute): HTMLElement {
@@ -2408,7 +2516,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   );
 
   if (route.view === "history") {
-    app.append(repositoryHistory(commits));
+    app.append(repositoryHistory(route, commits));
     return;
   }
   if (content === null) {
