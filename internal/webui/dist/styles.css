@@ -1479,8 +1479,8 @@ textarea:focus {
   padding: 0 0 1.5rem;
 }
 
-.clone-control {
-  max-width: 42rem;
+.clone-dialog {
+  width: 40rem;
 }
 
 .clone-field {
@@ -1550,6 +1550,13 @@ textarea:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 1rem;
+  min-width: 0;
+}
+
+.branch-picker {
+  align-items: flex-end;
+  display: flex;
+  gap: 0.6rem;
   min-width: 0;
 }
 
@@ -2201,6 +2208,7 @@ table {
   .repository-toolbar {
     align-items: stretch;
     display: grid;
+    justify-content: stretch;
   }
 
   .repository-toolbar > button {
@@ -2209,7 +2217,7 @@ table {
 
   .repository-actions {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .repository-actions > button {
@@ -2219,6 +2227,11 @@ table {
   .branch-control {
     align-items: stretch;
     display: grid;
+  }
+
+  .branch-picker {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
   .branch-control label {
@@ -2393,6 +2406,14 @@ table {
 @media (max-width: 28rem) {
   .global-navigation a:last-child {
     display: none;
+  }
+
+  .branch-picker .new-branch-trigger,
+  .branch-picker .branch-compare-trigger {
+    font-size: 0;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    width: 2.65rem;
   }
 
   .page-actions {

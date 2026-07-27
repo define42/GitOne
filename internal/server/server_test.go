@@ -1339,6 +1339,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if strings.Contains(assetResponse.Body.String(), `"Recent commits"`) {
 		t.Fatal("served UI should reserve commit lists for history")
 	}
+	if strings.Contains(assetResponse.Body.String(), `sectionHeading(content.path || "Files"`) {
+		t.Fatal("served UI should not repeat the files view title above the repository tree")
+	}
 	stylesRequest := httptest.NewRequest(http.MethodGet, "/assets/styles.css", nil)
 	stylesRequest.SetBasicAuth("alice", "secret")
 	stylesResponse := httptest.NewRecorder()
@@ -1417,10 +1420,21 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "repositoryCommitDiffAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), "Loading commit diff") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryNavigation") ||
-			!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 1`) ||
+		!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 1`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "tree"`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "blob"`) {
 		t.Fatal("served UI does not support repository files, branches, and commit history diffs")
+	}
+	if !strings.Contains(assetResponse.Body.String(), `actionButton("Clone", "copy", "primary")`) ||
+		!strings.Contains(assetResponse.Body.String(), `"action-dialog clone-dialog"`) ||
+		!strings.Contains(assetResponse.Body.String(), "const command = `git clone ${value}`") ||
+		!strings.Contains(assetResponse.Body.String(), "copyButton(command)") ||
+		!strings.Contains(assetResponse.Body.String(), "clone.trigger") ||
+		!strings.Contains(assetResponse.Body.String(), "clone.dialog") {
+		t.Fatal("served UI does not present the clone command from the repository toolbar")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "branchPicker.append(branchLabel, branchCreator.trigger, branchComparison.trigger)") {
+		t.Fatal("served UI does not place the new branch and compare actions beside the branch selector")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") ||
 		!strings.Contains(assetResponse.Body.String(), `input.value !== repositoryName`) ||

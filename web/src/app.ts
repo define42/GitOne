@@ -564,7 +564,7 @@ async function copyText(value: string): Promise<void> {
     input.remove();
   }
   if (!copied) {
-    throw new Error("Could not copy the repository URL.");
+    throw new Error("Could not copy the clone command.");
   }
 }
 
@@ -572,7 +572,7 @@ function copyButton(value: string): HTMLButtonElement {
   const button = element("button");
   button.type = "button";
   button.className = "icon-button copy-button";
-  button.title = "Copy repository URL";
+  button.title = "Copy clone command";
   button.setAttribute("aria-label", `Copy ${value}`);
   button.append(icon("copy"));
   button.addEventListener("click", async () => {
@@ -585,11 +585,11 @@ function copyButton(value: string): HTMLButtonElement {
       window.setTimeout(() => {
         button.classList.remove("copied");
         button.replaceChildren(icon("copy"));
-        button.title = "Copy repository URL";
+        button.title = "Copy clone command";
         button.setAttribute("aria-label", `Copy ${value}`);
       }, 1500);
     } catch (reason) {
-      showStatus(reason instanceof Error ? reason.message : "Could not copy the repository URL.", true);
+      showStatus(reason instanceof Error ? reason.message : "Could not copy the clone command.", true);
     }
   });
   return button;
@@ -1703,6 +1703,9 @@ function repositoryBranchCreator(
   data: RepositoryBranches,
 ): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
   const trigger = actionButton("New branch", "git-branch", "secondary");
+  trigger.classList.add("new-branch-trigger");
+  trigger.setAttribute("aria-label", "New branch");
+  trigger.title = "New branch";
   const dialog = element("dialog");
   dialog.className = "action-dialog";
   if (data.branches.length === 0) {
@@ -2015,6 +2018,9 @@ function repositoryBranchComparison(
   data: RepositoryBranches,
 ): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
   const trigger = actionButton("Compare", "git-compare", "secondary");
+  trigger.classList.add("branch-compare-trigger");
+  trigger.setAttribute("aria-label", "Compare branches");
+  trigger.title = "Compare branches";
   const dialog = element("dialog");
   dialog.className = "action-dialog comparison-dialog";
   if (data.branches.length < 2) {
@@ -2113,22 +2119,54 @@ function repositoryBranchComparison(
   return {trigger, dialog};
 }
 
-function cloneControl(value: string): HTMLElement {
-  const control = element("div");
-  control.className = "clone-control";
-  const label = element("label", "Clone");
+function cloneControl(
+  value: string,
+): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
+  const command = `git clone ${value}`;
+  const trigger = actionButton("Clone", "copy", "primary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog clone-dialog";
+  const content = element("div");
+  content.className = "dialog-form";
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", "Clone repository");
+  title.id = "clone-dialog-title";
+  dialog.setAttribute("aria-labelledby", title.id);
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+  const label = element("label", "Clone command");
   const field = element("div");
   field.className = "clone-field";
   const input = element("input");
-  input.value = value;
+  input.value = command;
   input.readOnly = true;
   input.spellcheck = false;
-  input.setAttribute("aria-label", "HTTPS clone URL");
+  input.setAttribute("aria-label", "Git clone command");
   input.addEventListener("focus", () => input.select());
-  field.append(input, copyButton(value));
+  field.append(input, copyButton(command));
   label.append(field);
-  control.append(label);
-  return control;
+  content.append(header, label);
+  dialog.append(content);
+
+  trigger.addEventListener("click", () => {
+    dialog.showModal();
+    input.focus();
+  });
+  close.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+  return {trigger, dialog};
 }
 
 function latestCommitBar(data: RepositoryCommits): HTMLElement | null {
@@ -2484,10 +2522,10 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
 
   const overview = element("section");
   overview.className = "repository-overview";
-  overview.append(cloneControl(repositoryURL(groupPath, repositoryName, group.username)));
 
   const branchCreator = repositoryBranchCreator(route, branches);
   const branchComparison = repositoryBranchComparison(route, branches);
+  const clone = cloneControl(repositoryURL(groupPath, repositoryName, group.username));
   const toolbar = element("div");
   toolbar.className = "repository-toolbar";
   const branchControl = element("div");
@@ -2517,7 +2555,14 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     });
   });
   branchLabel.append(branchSelect);
-  branchControl.append(branchLabel);
+  const branchPicker = element("div");
+  branchPicker.className = "branch-picker";
+  branchPicker.append(
+    branchLabel,
+    branchCreator.trigger,
+    branchComparison.trigger,
+  );
+  branchControl.append(branchPicker);
   const commitHash = content?.commit
     ?? branches.branches.find((branch) => branch.name === route.ref)?.commit;
   if (commitHash) {
@@ -2528,7 +2573,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   }
   const repositoryActions = element("div");
   repositoryActions.className = "repository-actions";
-  repositoryActions.append(branchComparison.trigger, branchCreator.trigger);
+  repositoryActions.append(clone.trigger);
   toolbar.append(branchControl, repositoryActions);
   overview.append(toolbar);
   app.append(
@@ -2536,6 +2581,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     repositoryNavigation(route),
     branchCreator.dialog,
     branchComparison.dialog,
+    clone.dialog,
   );
 
   if (route.view === "history") {
@@ -2549,7 +2595,6 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   if ("entries" in content) {
     const section = element("section");
     section.className = "content-section";
-    section.append(sectionHeading(content.path || "Files", content.entries.length));
     const latestCommit = latestCommitBar(commits);
     if (latestCommit) {
       section.append(latestCommit);
