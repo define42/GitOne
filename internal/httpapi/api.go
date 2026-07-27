@@ -51,11 +51,16 @@ type GroupPathInput struct {
 
 type groupDetailOutput struct {
 	Body struct {
-		Path         string         `json:"path"`
-		Description  string         `json:"description"`
-		Subgroups    []groupSummary `json:"subgroups"`
-		Repositories []string       `json:"repositories"`
+		Path         string              `json:"path"`
+		Description  string              `json:"description"`
+		Subgroups    []groupSummary      `json:"subgroups"`
+		Repositories []repositorySummary `json:"repositories"`
 	}
+}
+
+type repositorySummary struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 type createGroupOutput struct {
@@ -92,7 +97,8 @@ type RepositoryPathInput struct {
 
 type createRepositoryInput struct {
 	RepositoryPathInput
-	InitializeReadme bool `query:"initializeReadme" default:"false" doc:"Create an initial main commit containing README.md"`
+	InitializeReadme bool   `query:"initializeReadme" default:"false" doc:"Create an initial main commit containing README.md"`
+	Description      string `query:"description" doc:"Repository description stored in .gitone.json"`
 }
 
 type renameRepositoryBody struct {
@@ -265,7 +271,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		output.Body.Description = document.Description
 	}
 	output.Body.Subgroups = []groupSummary{}
-	output.Body.Repositories = []string{}
+	output.Body.Repositories = []repositorySummary{}
 	prefix := path + "/"
 	for i := range groups {
 		group := &groups[i]
@@ -296,7 +302,19 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	if current == nil {
 		return nil, huma.Error404NotFound("group not found")
 	}
-	output.Body.Repositories = current.Repositories
+	for _, name := range current.Repositories {
+		description, descriptionErr := a.Storage.RepositoryDescription(repopath.Repository{
+			Groups: strings.Split(path, "/"),
+			Name:   name,
+		})
+		if descriptionErr != nil {
+			description = ""
+		}
+		output.Body.Repositories = append(output.Body.Repositories, repositorySummary{
+			Name:        name,
+			Description: description,
+		})
+	}
 	return output, nil
 }
 
@@ -361,6 +379,7 @@ func (a API) createRepository(ctx context.Context, input *createRepositoryInput)
 	if err = a.Storage.CreateRepository(repository, storage.CreateRepositoryOptions{
 		InitializeReadme: input.InitializeReadme,
 		Author:           author,
+		Description:      input.Description,
 	}); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}

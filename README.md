@@ -65,11 +65,11 @@ make ui
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/api/groups` | List accessible top-level groups. |
-| `GET` | `/api/groups/{path}` | Get a group’s immediate subgroups and repositories. |
+| `GET` | `/api/groups/{path}` | Get a group’s description, immediate subgroups, and repositories with their descriptions. |
 | `POST` | `/api/groups/{path}` | Create a group. `path` is the URL-encoded full group path. Optional query parameter: `description`. |
 | `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
-| `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameter `initializeReadme=true` creates `README.md` on `main`. |
+| `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.json`. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |
 
@@ -112,7 +112,7 @@ Create a repository:
 
 ```bash
 curl -u bootstrap:replace-me -X POST \
-  'http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi?initializeReadme=true'
+  'http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi?initializeReadme=true&description=Backend%20API'
 ```
 
 Clone the repository and enter the bootstrap token when Git prompts for a password:

@@ -154,11 +154,11 @@ function groupList(groups) {
     }
     return list;
 }
-function descriptionField() {
+function descriptionField(placeholder = "What this group contains") {
     const label = element("label", "Description");
     const input = element("input");
     input.name = "description";
-    input.placeholder = "What this group contains";
+    input.placeholder = placeholder;
     label.append(input);
     return { label, input };
 }
@@ -256,11 +256,19 @@ async function renderGroup(path, message) {
         list.className = "repository-list";
         for (const repository of data.repositories) {
             const item = element("li");
-            const cloneURL = repositoryURL(data.path, repository);
+            const cloneURL = repositoryURL(data.path, repository.name);
             const link = element("a", cloneURL);
             link.href = cloneURL;
             link.className = "repository-link";
-            item.append(link, copyButton(cloneURL));
+            const heading = element("div");
+            heading.className = "repository-heading";
+            heading.append(link, copyButton(cloneURL));
+            item.append(heading);
+            if (repository.description) {
+                const description = element("span", repository.description);
+                description.className = "repository-description";
+                item.append(description);
+            }
             list.append(item);
         }
         repositories.append(list);
@@ -278,11 +286,16 @@ async function renderGroup(path, message) {
     const initializeReadmeLabel = element("label");
     initializeReadmeLabel.className = "checkbox-label";
     initializeReadmeLabel.append(initializeReadme, document.createTextNode("Initialize with README.md"));
+    const repositoryDescription = descriptionField("What this repository contains");
     app.append(createForm("Create repository", "Repository name", "api", "Create repository", async (name) => {
         const repositoryPath = encodeURIComponent(`${data.path}/${name}`);
-        await request(`/api/repositories/${repositoryPath}?initializeReadme=${initializeReadme.checked}`, { method: "POST" });
+        const parameters = new URLSearchParams({
+            initializeReadme: String(initializeReadme.checked),
+            description: repositoryDescription.input.value,
+        });
+        await request(`/api/repositories/${repositoryPath}?${parameters}`, { method: "POST" });
         await renderGroup(data.path, "Repository created.");
-    }, [initializeReadmeLabel]));
+    }, [repositoryDescription.label, initializeReadmeLabel]));
 }
 async function render() {
     try {

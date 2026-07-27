@@ -18,6 +18,13 @@ func TestCreateGroupAndRepository(t *testing.T) {
 	if e := s.CreateRepository(r, CreateRepositoryOptions{}); e != nil {
 		t.Fatal(e)
 	}
+	description, err := s.RepositoryDescription(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if description != "" {
+		t.Fatalf("unexpected empty repository description: %q", description)
+	}
 	for _, p := range []string{filepath.Join(root, "engineering", "control.git"), filepath.Join(root, "engineering", "api.git"), filepath.Join(root, "engineering", "api.lfs", "objects")} {
 		if _, e := os.Stat(p); e != nil {
 			t.Fatalf("missing %s: %v", p, e)
@@ -71,6 +78,59 @@ func TestCreateRepositoryWithReadme(t *testing.T) {
 	}
 	if contents != "api\n" {
 		t.Fatalf("unexpected README.md contents: %q", contents)
+	}
+}
+
+func TestCreateRepositoryWithDescriptionOnly(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, CreateRepositoryOptions{
+		Author:      "alice",
+		Description: "Backend API",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	repository, err := git.PlainOpen(filepath.Join(root, "engineering", "api.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree.Entries) != 1 || tree.Entries[0].Name != ".gitone.json" {
+		t.Fatalf("unexpected description-only tree: %#v", tree.Entries)
+	}
+	metadata, err := commit.File(".gitone.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := metadata.Contents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contents != "{\n  \"description\": \"Backend API\"\n}\n" {
+		t.Fatalf("unexpected .gitone.json contents: %q", contents)
+	}
+	description, err := store.RepositoryDescription(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if description != "Backend API" {
+		t.Fatalf("unexpected repository description: %q", description)
 	}
 }
 

@@ -100,7 +100,7 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 		t.Fatalf("create group: status %d: %s", groupResponse.Code, groupResponse.Body.String())
 	}
 
-	createRepository := httptest.NewRequest(http.MethodPost, "/api/repositories/engineering%2Fapi?initializeReadme=true", nil)
+	createRepository := httptest.NewRequest(http.MethodPost, "/api/repositories/engineering%2Fapi?initializeReadme=true&description=Engineering%20API", nil)
 	createRepository.SetBasicAuth("alice", "secret")
 	repositoryResponse := httptest.NewRecorder()
 	handler.ServeHTTP(repositoryResponse, createRepository)
@@ -133,6 +133,17 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 	}
 	if readmeContents != "api\n" {
 		t.Fatalf("unexpected README.md contents: %q", readmeContents)
+	}
+	metadata, err := initialCommit.File(".gitone.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataContents, err := metadata.Contents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadataContents != "{\n  \"description\": \"Engineering API\"\n}\n" {
+		t.Fatalf("unexpected .gitone.json contents: %q", metadataContents)
 	}
 
 	unauthenticatedGit := httptest.NewRequest(http.MethodGet, "/engineering/api.git/info/refs?service=git-upload-pack", nil)
@@ -224,7 +235,7 @@ func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 
 	create("/api/groups/doh")
 	create("/api/groups/doh%2Fwhaat")
-	create("/api/repositories/doh%2Fwhaat%2Fhello?initializeReadme=true")
+	create("/api/repositories/doh%2Fwhaat%2Fhello?initializeReadme=true&description=Hello%20repository")
 
 	checkout := filepath.Join(t.TempDir(), "hello")
 	credentials := &gittransport.BasicAuth{
@@ -258,6 +269,13 @@ func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 	}
 	if string(readme) != "hello\n" {
 		t.Fatalf("unexpected cloned README.md contents: %q", readme)
+	}
+	metadata, err := os.ReadFile(filepath.Join(checkout, ".gitone.json"))
+	if err != nil {
+		t.Fatalf("cloned .gitone.json does not exist: %v", err)
+	}
+	if string(metadata) != "{\n  \"description\": \"Hello repository\"\n}\n" {
+		t.Fatalf("unexpected cloned .gitone.json contents: %q", metadata)
 	}
 
 	updatedReadme := append(readme, []byte("Updated through Git Smart HTTP.\n")...)
@@ -318,10 +336,14 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	if err := store.CreateGroup("engineering/backend", "alice", "Backend services"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateRepository(repopath.Repository{Groups: []string{"engineering"}, Name: "web"}, storage.CreateRepositoryOptions{}); err != nil {
+	if err := store.CreateRepository(repopath.Repository{Groups: []string{"engineering"}, Name: "web"}, storage.CreateRepositoryOptions{
+		Description: "Engineering web portal",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateRepository(repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "api"}, storage.CreateRepositoryOptions{}); err != nil {
+	if err := store.CreateRepository(repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "api"}, storage.CreateRepositoryOptions{
+		Description: "Backend API",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	handler := New(Config{
@@ -366,7 +388,10 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 			Path        string `json:"path"`
 			Description string `json:"description"`
 		} `json:"subgroups"`
-		Repositories []string `json:"repositories"`
+		Repositories []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"repositories"`
 	}
 	if err := json.Unmarshal(parentResponse.Body.Bytes(), &parent); err != nil {
 		t.Fatal(err)
@@ -376,7 +401,8 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 		parent.Subgroups[0].Path != "engineering/backend" ||
 		parent.Subgroups[0].Description != "Backend services" ||
 		len(parent.Repositories) != 1 ||
-		parent.Repositories[0] != "web" {
+		parent.Repositories[0].Name != "web" ||
+		parent.Repositories[0].Description != "Engineering web portal" {
 		t.Fatalf("unexpected parent group detail: %#v", parent)
 	}
 
@@ -388,9 +414,12 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 		t.Fatalf("get group: expected status %d, got %d: %s", http.StatusOK, detailResponse.Code, detailResponse.Body.String())
 	}
 	var detail struct {
-		Path         string   `json:"path"`
-		Description  string   `json:"description"`
-		Repositories []string `json:"repositories"`
+		Path         string `json:"path"`
+		Description  string `json:"description"`
+		Repositories []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"repositories"`
 	}
 	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
 		t.Fatal(err)
@@ -398,7 +427,8 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	if detail.Path != "engineering/backend" ||
 		detail.Description != "Backend services" ||
 		len(detail.Repositories) != 1 ||
-		detail.Repositories[0] != "api" {
+		detail.Repositories[0].Name != "api" ||
+		detail.Repositories[0].Description != "Backend API" {
 		t.Fatalf("unexpected group detail: %#v", detail)
 	}
 }
@@ -430,7 +460,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		}
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=7">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=9">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 	}
@@ -449,11 +479,17 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		t.Fatal("served UI does not use the path-based group creation endpoint")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "navigator.clipboard") ||
-		!strings.Contains(assetResponse.Body.String(), "repositoryURL(data.path, repository)") {
+		!strings.Contains(assetResponse.Body.String(), "repositoryURL(data.path, repository.name)") {
 		t.Fatal("served UI does not provide copyable full repository URLs")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "initializeReadme.checked = true") {
 		t.Fatal("served UI does not default the README initialization option to checked")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "repositoryDescription.input.value") {
+		t.Fatal("served UI does not provide the repository description option")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "repository.description") {
+		t.Fatal("served UI does not show repository descriptions")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "description.input.value") ||
 		!strings.Contains(assetResponse.Body.String(), "subgroupDescription.input.value") {

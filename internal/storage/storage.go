@@ -20,6 +20,11 @@ type Store struct{ Root string }
 type CreateRepositoryOptions struct {
 	InitializeReadme bool
 	Author           string
+	Description      string
+}
+
+type repositoryMetadata struct {
+	Description string `json:"description"`
 }
 
 type GroupInfo struct {
@@ -121,8 +126,8 @@ func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryO
 	if e = os.MkdirAll(gp, 0750); e != nil {
 		return e
 	}
-	if options.InitializeReadme {
-		if e = s.createInitializedRepository(gitp, r.Name, options.Author); e != nil {
+	if options.InitializeReadme || options.Description != "" {
+		if e = s.createInitializedRepository(gitp, r.Name, options); e != nil {
 			return e
 		}
 	} else {
@@ -137,7 +142,45 @@ func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryO
 	return nil
 }
 
-func (s Store) createInitializedRepository(destination, name, author string) error {
+func (s Store) RepositoryDescription(r repopath.Repository) (string, error) {
+	path, err := s.GitPath(r)
+	if err != nil {
+		return "", err
+	}
+	repository, err := git.PlainOpen(path)
+	if err != nil {
+		return "", err
+	}
+	head, err := repository.Head()
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	commit, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		return "", err
+	}
+	file, err := commit.File(".gitone.json")
+	if errors.Is(err, object.ErrFileNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	contents, err := file.Contents()
+	if err != nil {
+		return "", err
+	}
+	var metadata repositoryMetadata
+	if err = json.Unmarshal([]byte(contents), &metadata); err != nil {
+		return "", fmt.Errorf("read .gitone.json: %w", err)
+	}
+	return metadata.Description, nil
+}
+
+func (s Store) createInitializedRepository(destination, name string, options CreateRepositoryOptions) error {
 	root, err := repopath.SafeJoin(s.Root)
 	if err != nil {
 		return err
@@ -156,19 +199,34 @@ func (s Store) createInitializedRepository(destination, name, author string) err
 	if err != nil {
 		return err
 	}
-	if err = os.WriteFile(filepath.Join(temporary, "README.md"), []byte(name+"\n"), 0640); err != nil {
-		return err
+	if options.InitializeReadme {
+		if err = os.WriteFile(filepath.Join(temporary, "README.md"), []byte(name+"\n"), 0640); err != nil {
+			return err
+		}
+		if _, err = worktree.Add("README.md"); err != nil {
+			return err
+		}
 	}
-	if _, err = worktree.Add("README.md"); err != nil {
-		return err
+	if options.Description != "" {
+		metadata, marshalErr := json.MarshalIndent(repositoryMetadata{Description: options.Description}, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		metadata = append(metadata, '\n')
+		if err = os.WriteFile(filepath.Join(temporary, ".gitone.json"), metadata, 0640); err != nil {
+			return err
+		}
+		if _, err = worktree.Add(".gitone.json"); err != nil {
+			return err
+		}
 	}
-	if author == "" {
-		author = "GitOne"
+	if options.Author == "" {
+		options.Author = "GitOne"
 	}
 	commit, err := worktree.Commit("Initialize repository", &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  author,
-			Email: author + "@localhost",
+			Name:  options.Author,
+			Email: options.Author + "@localhost",
 			When:  time.Now().UTC(),
 		},
 	})

@@ -103,9 +103,18 @@ code {
 }
 
 .repository-list li {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.repository-heading {
   align-items: center;
   display: flex;
   gap: 0.5rem;
+}
+
+.repository-description {
+  opacity: 0.75;
 }
 
 .repository-link {
