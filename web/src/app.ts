@@ -175,6 +175,133 @@ function copyButton(value: string): HTMLButtonElement {
   return button;
 }
 
+function repositoryDeleteControl(groupPath: string, repositoryName: string): HTMLElement {
+  const container = element("div");
+  container.className = "repository-delete-control";
+  const revealButton = element("button", "Delete");
+  revealButton.type = "button";
+  revealButton.className = "danger";
+  container.append(revealButton);
+
+  revealButton.addEventListener("click", () => {
+    const form = element("form");
+    form.className = "repository-delete-form";
+    const label = element("label", `Type "${repositoryName}" to confirm deletion`);
+    const input = element("input");
+    input.name = "repositoryName";
+    input.autocomplete = "off";
+    input.required = true;
+    label.append(input);
+
+    const actions = element("div");
+    actions.className = "repository-delete-actions";
+    const confirmButton = element("button", "Delete repository");
+    confirmButton.type = "submit";
+    confirmButton.className = "danger";
+    const cancelButton = element("button", "Cancel");
+    cancelButton.type = "button";
+    actions.append(confirmButton, cancelButton);
+    form.append(label, actions);
+    container.replaceChildren(form);
+    input.focus();
+
+    input.addEventListener("input", () => {
+      input.setCustomValidity("");
+    });
+    cancelButton.addEventListener("click", () => {
+      container.replaceChildren(revealButton);
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (input.value !== repositoryName) {
+        input.setCustomValidity(`Enter ${repositoryName} exactly.`);
+        input.reportValidity();
+        return;
+      }
+      confirmButton.disabled = true;
+      cancelButton.disabled = true;
+      try {
+        const repositoryPath = encodeURIComponent(`${groupPath}/${repositoryName}`);
+        await request(`/api/repositories/${repositoryPath}`, {method: "DELETE"});
+        await renderGroup(groupPath, `Repository ${repositoryName} deleted.`);
+      } catch (reason) {
+        app.prepend(statusMessage(reason instanceof Error ? reason.message : "Could not delete the repository.", true));
+        confirmButton.disabled = false;
+        cancelButton.disabled = false;
+      }
+    });
+  });
+  return container;
+}
+
+function groupDeleteControl(groupPath: string, empty: boolean): HTMLElement {
+  const section = element("section");
+  section.className = "group-delete-section";
+  section.append(element("h3", "Delete group"));
+  if (!empty) {
+    section.append(element("p", "Remove all repositories and subgroups before deleting this group."));
+    return section;
+  }
+
+  const container = element("div");
+  const revealButton = element("button", "Delete group");
+  revealButton.type = "button";
+  revealButton.className = "danger";
+  container.append(revealButton);
+  section.append(container);
+
+  revealButton.addEventListener("click", () => {
+    const form = element("form");
+    form.className = "group-delete-form";
+    const label = element("label", `Type "${groupPath}" to confirm deletion`);
+    const input = element("input");
+    input.name = "groupPath";
+    input.autocomplete = "off";
+    input.required = true;
+    label.append(input);
+
+    const actions = element("div");
+    actions.className = "group-delete-actions";
+    const confirmButton = element("button", "Delete group");
+    confirmButton.type = "submit";
+    confirmButton.className = "danger";
+    const cancelButton = element("button", "Cancel");
+    cancelButton.type = "button";
+    actions.append(confirmButton, cancelButton);
+    form.append(label, actions);
+    container.replaceChildren(form);
+    input.focus();
+
+    input.addEventListener("input", () => {
+      input.setCustomValidity("");
+    });
+    cancelButton.addEventListener("click", () => {
+      container.replaceChildren(revealButton);
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (input.value !== groupPath) {
+        input.setCustomValidity(`Enter ${groupPath} exactly.`);
+        input.reportValidity();
+        return;
+      }
+      confirmButton.disabled = true;
+      cancelButton.disabled = true;
+      try {
+        await request(apiGroupURL(groupPath), {method: "DELETE"});
+        const parentParts = groupPath.split("/");
+        parentParts.pop();
+        window.location.assign(parentParts.length > 0 ? groupURL(parentParts.join("/")) : "/");
+      } catch (reason) {
+        app.prepend(statusMessage(reason instanceof Error ? reason.message : "Could not delete the group.", true));
+        confirmButton.disabled = false;
+        cancelButton.disabled = false;
+      }
+    });
+  });
+  return section;
+}
+
 function groupList(groups: GroupSummary[]): HTMLElement {
   if (groups.length === 0) {
     return element("p", "None.");
@@ -334,6 +461,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
         description.className = "repository-description";
         item.append(description);
       }
+      item.append(repositoryDeleteControl(data.path, repository.name));
       list.append(item);
     }
     repositories.append(list);
@@ -383,6 +511,11 @@ async function renderGroup(path: string, message?: string): Promise<void> {
       await renderGroup(data.path, "Repository created.");
     },
     [repositoryDescription.label, initializeReadmeLabel],
+  ));
+
+  app.append(groupDeleteControl(
+    data.path,
+    data.subgroups.length === 0 && data.repositories.length === 0,
   ));
 }
 

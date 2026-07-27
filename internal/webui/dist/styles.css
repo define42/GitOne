@@ -117,6 +117,32 @@ code {
   opacity: 0.75;
 }
 
+.repository-delete-control {
+  margin-top: 0.35rem;
+}
+
+.repository-delete-form,
+.group-delete-form {
+  border-left: 0.25rem solid #b42318;
+  padding-left: 0.75rem;
+}
+
+.repository-delete-actions,
+.group-delete-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.group-delete-section {
+  border-top: 1px solid;
+  padding-top: 1rem;
+}
+
+.danger {
+  border-color: currentColor;
+  color: #b42318;
+}
+
 .repository-link {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.9em;

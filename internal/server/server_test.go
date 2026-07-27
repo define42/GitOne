@@ -435,6 +435,14 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 		detail.Repositories[0].Description != "Backend API" {
 		t.Fatalf("unexpected group detail: %#v", detail)
 	}
+
+	deleteNonEmptyGroup := httptest.NewRequest(http.MethodDelete, "/api/groups/engineering%2Fbackend", nil)
+	deleteNonEmptyGroup.SetBasicAuth("alice", "secret")
+	deleteNonEmptyGroupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(deleteNonEmptyGroupResponse, deleteNonEmptyGroup)
+	if deleteNonEmptyGroupResponse.Code != http.StatusConflict {
+		t.Fatalf("delete non-empty group: expected status %d, got %d: %s", http.StatusConflict, deleteNonEmptyGroupResponse.Code, deleteNonEmptyGroupResponse.Body.String())
+	}
 }
 
 func TestTypeScriptUIAndHumaDocs(t *testing.T) {
@@ -464,7 +472,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		}
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=10">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=12">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 	}
@@ -494,6 +502,16 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	}
 	if !strings.Contains(assetResponse.Body.String(), "repository.description") {
 		t.Fatal("served UI does not show repository descriptions")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") ||
+		!strings.Contains(assetResponse.Body.String(), `input.value !== repositoryName`) ||
+		!strings.Contains(assetResponse.Body.String(), `method: "DELETE"`) {
+		t.Fatal("served UI does not require repository-name confirmation before deletion")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "data.subgroups.length === 0 && data.repositories.length === 0") ||
+		!strings.Contains(assetResponse.Body.String(), `input.value !== groupPath`) ||
+		!strings.Contains(assetResponse.Body.String(), `request(apiGroupURL(groupPath), { method: "DELETE" })`) {
+		t.Fatal("served UI does not restrict group deletion to confirmed empty groups")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "description.input.value") ||
 		!strings.Contains(assetResponse.Body.String(), "subgroupDescription.input.value") {
