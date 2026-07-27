@@ -496,14 +496,17 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 
 	var commits struct {
+		Ref     string `json:"ref"`
 		Commits []struct {
 			Message string `json:"message"`
 		} `json:"commits"`
 	}
-	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/commits/HEAD?limit=1").Body.Bytes(), &commits); err != nil {
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/commits/feature%2Fdocs?limit=100").Body.Bytes(), &commits); err != nil {
 		t.Fatal(err)
 	}
-	if len(commits.Commits) != 1 || commits.Commits[0].Message != "Add guide" {
+	if commits.Ref != "feature/docs" ||
+		len(commits.Commits) != 2 ||
+		commits.Commits[0].Message != "Add guide" {
 		t.Fatalf("unexpected repository commits: %#v", commits)
 	}
 }
@@ -654,7 +657,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=14">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=15">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 		if strings.Contains(body, `<h1><a href="/">GitOne</a></h1>`) ||
@@ -708,9 +711,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "repositoryBranchesAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), `parameters.get("ref") || "main"`) ||
 		!strings.Contains(assetResponse.Body.String(), `branchSelect.addEventListener("change"`) ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryHistory") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryNavigation") ||
+		!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 20`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "tree"`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "blob"`) {
-		t.Fatal("served UI does not support repository and branch browsing")
+		t.Fatal("served UI does not support repository files and branch history")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") ||
 		!strings.Contains(assetResponse.Body.String(), `input.value !== repositoryName`) ||

@@ -139,6 +139,24 @@ td {
   margin: 0.6rem 0;
 }
 
+.repository-navigation {
+  border-bottom: 1px solid;
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.repository-navigation a {
+  border-bottom: 0.2rem solid transparent;
+  padding: 0.6rem 0.2rem;
+  text-decoration: none;
+}
+
+.repository-navigation a[aria-current="page"] {
+  border-bottom-color: currentColor;
+  font-weight: 700;
+}
+
 .file-content {
   border: 1px solid;
   max-height: 40rem;
@@ -165,6 +183,42 @@ td {
 }
 
 .commit-list li > span {
+  opacity: 0.75;
+}
+
+.history-list {
+  display: grid;
+  gap: 1rem;
+  list-style: none;
+  padding: 0;
+}
+
+.history-list li {
+  border: 1px solid;
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+}
+
+.history-heading {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  justify-content: space-between;
+}
+
+.history-heading code {
+  overflow-wrap: anywhere;
+}
+
+.commit-message {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.history-list li > span {
   opacity: 0.75;
 }
 

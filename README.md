@@ -23,7 +23,7 @@ make run RUN_ARGS="-root ./data -listen :8080 -public-url http://localhost:8080"
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups and their descriptions. Select a group to see its description and browse its immediate subgroups, subgroup descriptions, and repositories; each repository shows a copyable clone URL containing the authenticated username, such as `http://alice@localhost:8080/engineering/api.git`. Repositories can be deleted from this view only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
+Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups and their descriptions. Select a group to see its description and browse its immediate subgroups, subgroup descriptions, and repositories; each repository shows a copyable clone URL containing the authenticated username, such as `http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files or show the latest 100 commits in the selected branch’s history. Repositories can be deleted from the group view only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
 Build the UI separately with:
 

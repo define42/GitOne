@@ -81,6 +81,7 @@ interface RepositoryBrowserRoute {
   ref: string;
   path: string;
   file: string | null;
+  view: "files" | "history";
 }
 
 interface Problem {
@@ -126,7 +127,12 @@ function repositoryURL(groupPath: string, repository: string, username: string):
 
 function repositoryBrowserURL(
   repository: string,
-  options: {ref?: string; path?: string; file?: string} = {},
+  options: {
+    ref?: string;
+    path?: string;
+    file?: string;
+    view?: "files" | "history";
+  } = {},
 ): string {
   const encodedRepository = repository.split("/").map(encodeURIComponent).join("/");
   const url = new URL(`/repositories/${encodedRepository}`, window.location.origin);
@@ -138,6 +144,9 @@ function repositoryBrowserURL(
   }
   if (options.file) {
     url.searchParams.set("file", options.file);
+  }
+  if (options.view === "history") {
+    url.searchParams.set("view", "history");
   }
   return `${url.pathname}${url.search}`;
 }
@@ -175,6 +184,7 @@ function currentRepository(): RepositoryBrowserRoute | null {
     ref: parameters.get("ref") || "main",
     path: parameters.get("path") || "",
     file: parameters.get("file"),
+    view: parameters.get("view") === "history" ? "history" : "files",
   };
 }
 
@@ -531,7 +541,13 @@ function repositoryBreadcrumbs(route: RepositoryBrowserRoute): HTMLElement {
   repositoryItem.append(repositoryLink);
   list.append(repositoryItem);
 
-  const selectedPath = route.file ?? route.path;
+  if (route.view === "history") {
+    const historyItem = element("li");
+    historyItem.append(element("span", "History"));
+    list.append(historyItem);
+  }
+
+  const selectedPath = route.view === "files" ? route.file ?? route.path : "";
   if (selectedPath) {
     const pathParts = selectedPath.split("/");
     for (let index = 0; index < pathParts.length; index += 1) {
@@ -592,16 +608,75 @@ function repositoryCommitList(data: RepositoryCommits): HTMLElement {
   return section;
 }
 
+function repositoryHistory(data: RepositoryCommits): HTMLElement {
+  const section = element("section");
+  section.className = "repository-history";
+  section.append(element("h3", `History for ${data.ref}`));
+  if (data.commits.length === 0) {
+    section.append(element("p", "No commits."));
+    return section;
+  }
+  section.append(element("p", `Showing the latest ${data.commits.length} commits.`));
+  const list = element("ol");
+  list.className = "history-list";
+  for (const commit of data.commits) {
+    const item = element("li");
+    const heading = element("div");
+    heading.className = "history-heading";
+    heading.append(
+      element("strong", commit.message.split("\n")[0] || "(no message)"),
+      element("code", commit.hash),
+    );
+    const message = element("pre", commit.message.trimEnd() || "(no message)");
+    message.className = "commit-message";
+    const authored = element(
+      "span",
+      `Authored by ${commit.author} <${commit.email}> · ${new Date(commit.authored).toLocaleString()}`,
+    );
+    const committed = element(
+      "span",
+      `Committed by ${commit.committer} · ${new Date(commit.committed).toLocaleString()}`,
+    );
+    item.append(heading, message, authored, committed);
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
+
+function repositoryNavigation(route: RepositoryBrowserRoute): HTMLElement {
+  const nav = element("nav");
+  nav.className = "repository-navigation";
+  nav.setAttribute("aria-label", "Repository");
+  const files = element("a", "Files");
+  files.href = repositoryBrowserURL(route.repository, {ref: route.ref});
+  const history = element("a", "History");
+  history.href = repositoryBrowserURL(route.repository, {
+    ref: route.ref,
+    view: "history",
+  });
+  if (route.view === "history") {
+    history.setAttribute("aria-current", "page");
+  } else {
+    files.setAttribute("aria-current", "page");
+  }
+  nav.append(files, history);
+  return nav;
+}
+
 async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<void> {
   const branchesRequest = request<RepositoryBranches>(
     repositoryBranchesAPIURL(route.repository),
   );
   const commitsRequest = request<RepositoryCommits>(
-    `${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=20`,
+    `${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=${route.view === "history" ? 100 : 20}`,
   );
-  const contentRequest = route.file === null
-    ? request<RepositoryTree>(repositoryAPIURL(route.repository, "tree", route.ref, route.path))
-    : request<RepositoryBlob>(repositoryAPIURL(route.repository, "blob", route.ref, route.file));
+  const contentRequest: Promise<RepositoryTree | RepositoryBlob | null> =
+    route.view === "history"
+      ? Promise.resolve(null)
+      : route.file === null
+        ? request<RepositoryTree>(repositoryAPIURL(route.repository, "tree", route.ref, route.path))
+        : request<RepositoryBlob>(repositoryAPIURL(route.repository, "blob", route.ref, route.file));
   const [branches, commits, content] = await Promise.all([
     branchesRequest,
     commitsRequest,
@@ -630,13 +705,25 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   branchSelect.addEventListener("change", () => {
     window.location.href = repositoryBrowserURL(route.repository, {
       ref: branchSelect.value,
+      view: route.view,
     });
   });
   branchLabel.append(branchSelect);
-  const commit = element("p");
-  commit.append("Commit: ", element("code", content.commit.slice(0, 12)));
-  ref.append(branchLabel, commit);
-  app.append(heading, ref);
+  ref.append(branchLabel);
+  if (content !== null) {
+    const commit = element("p");
+    commit.append("Commit: ", element("code", content.commit.slice(0, 12)));
+    ref.append(commit);
+  }
+  app.append(heading, ref, repositoryNavigation(route));
+
+  if (route.view === "history") {
+    app.append(repositoryHistory(commits));
+    return;
+  }
+  if (content === null) {
+    throw new Error("Repository contents are unavailable.");
+  }
 
   if ("entries" in content) {
     const section = element("section");
