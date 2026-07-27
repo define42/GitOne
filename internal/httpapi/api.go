@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 
@@ -13,10 +12,6 @@ import (
 type API struct {
 	Storage   storage.Store
 	Authorize func(*http.Request, string, bool) (string, bool)
-}
-type createRepo struct {
-	Group string `json:"group"`
-	Name  string `json:"name"`
 }
 type renameGroup struct {
 	NewPath string `json:"newPath"`
@@ -31,7 +26,7 @@ func (a API) Routes() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	m.HandleFunc("POST /api/groups/{path...}", a.createGroup)
+	m.HandleFunc("POST /api/groups", a.createGroup)
 	m.HandleFunc("DELETE /api/groups/{path...}", a.deleteGroup)
 	m.HandleFunc("PATCH /api/groups/{path...}", a.renameGroup)
 	m.HandleFunc("POST /api/repositories", a.createRepo)
@@ -47,12 +42,12 @@ func (a API) allowed(r *http.Request, g string) bool {
 	return ok
 }
 func (a API) createGroup(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1))
-	if err != nil || len(body) != 0 {
-		http.Error(w, "request body not allowed", 400)
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := r.ParseForm(); err != nil || len(r.PostForm) != 1 || len(r.PostForm["path"]) != 1 {
+		http.Error(w, "invalid form", 400)
 		return
 	}
-	group := r.PathValue("path")
+	group := r.PostForm.Get("path")
 	if a.Authorize == nil {
 		http.Error(w, "forbidden", 403)
 		return
@@ -102,21 +97,26 @@ func (a API) renameGroup(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 func (a API) createRepo(w http.ResponseWriter, r *http.Request) {
-	var q createRepo
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&q) != nil {
-		http.Error(w, "invalid JSON", 400)
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := r.ParseForm(); err != nil ||
+		len(r.PostForm) != 2 ||
+		len(r.PostForm["group"]) != 1 ||
+		len(r.PostForm["name"]) != 1 {
+		http.Error(w, "invalid form", 400)
 		return
 	}
-	if !a.allowed(r, q.Group) {
+	group := r.PostForm.Get("group")
+	name := r.PostForm.Get("name")
+	if !a.allowed(r, group) {
 		http.Error(w, "forbidden", 403)
 		return
 	}
-	groups, e := repopath.ParseGroup(q.Group)
+	groups, e := repopath.ParseGroup(group)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	repo := repopath.Repository{Groups: groups, Name: strings.TrimSuffix(q.Name, ".git")}
+	repo := repopath.Repository{Groups: groups, Name: strings.TrimSuffix(name, ".git")}
 	if e = a.Storage.CreateRepository(repo); e != nil {
 		http.Error(w, e.Error(), 409)
 		return

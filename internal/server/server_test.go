@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,7 +19,8 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 		BootstrapUser:  "alice",
 		BootstrapToken: "secret",
 	})
-	request := httptest.NewRequest(http.MethodPost, "/api/groups/engineering", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.SetBasicAuth("alice", "secret")
 	response := httptest.NewRecorder()
 
@@ -38,14 +41,14 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 	}
 }
 
-func TestCreateGroupRejectsOwnerFields(t *testing.T) {
+func TestCreateGroupRejectsUnknownFormFields(t *testing.T) {
 	handler := New(Config{
 		Root:           t.TempDir(),
 		BootstrapUser:  "alice",
 		BootstrapToken: "secret",
 	})
-	request := httptest.NewRequest(http.MethodPost, "/api/groups/engineering", strings.NewReader(`{"owner":"mallory"}`))
-	request.Header.Set("Content-Type", "application/json")
+	request := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering&owner=mallory"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.SetBasicAuth("alice", "secret")
 	response := httptest.NewRecorder()
 
@@ -53,5 +56,36 @@ func TestCreateGroupRejectsOwnerFields(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, response.Code, response.Body.String())
+	}
+}
+
+func TestCreateRepositoryFromURLEncodedForm(t *testing.T) {
+	root := t.TempDir()
+	handler := New(Config{
+		Root:           root,
+		BootstrapUser:  "alice",
+		BootstrapToken: "secret",
+	})
+
+	createGroup := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering"))
+	createGroup.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createGroup.SetBasicAuth("alice", "secret")
+	groupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(groupResponse, createGroup)
+	if groupResponse.Code != http.StatusCreated {
+		t.Fatalf("create group: status %d: %s", groupResponse.Code, groupResponse.Body.String())
+	}
+
+	createRepository := httptest.NewRequest(http.MethodPost, "/api/repositories", strings.NewReader("group=engineering&name=api"))
+	createRepository.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	createRepository.SetBasicAuth("alice", "secret")
+	repositoryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(repositoryResponse, createRepository)
+	if repositoryResponse.Code != http.StatusCreated {
+		t.Fatalf("create repository: status %d: %s", repositoryResponse.Code, repositoryResponse.Body.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "engineering", "api.git")); err != nil {
+		t.Fatalf("repository was not created: %v", err)
 	}
 }

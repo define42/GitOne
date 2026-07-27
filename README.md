@@ -27,7 +27,7 @@ All administration calls use HTTP Basic authentication.
 
 ```text
 GET  /healthz
-POST   /api/groups/{path...}
+POST   /api/groups
 PATCH  /api/groups/{group...}
 DELETE /api/groups/{group...}
 POST   /api/repositories
@@ -38,21 +38,23 @@ DELETE /api/repositories/{group...}/{repo}
 Create the first group with the bootstrap credentials:
 
 ```bash
-curl -u bootstrap:replace-me -X POST http://localhost:8080/api/groups/engineering
+curl -u bootstrap:replace-me -X POST http://localhost:8080/api/groups \
+  --data-urlencode 'path=engineering'
 ```
 
 Create a subgroup using an owner/admin token inherited from its parent:
 
 ```bash
-curl -u bootstrap:replace-me -X POST http://localhost:8080/api/groups/engineering/backend
+curl -u bootstrap:replace-me -X POST http://localhost:8080/api/groups \
+  --data-urlencode 'path=engineering/backend'
 ```
 
 Create a repository:
 
 ```bash
 curl -u bootstrap:replace-me -X POST http://localhost:8080/api/repositories \
-  -H 'Content-Type: application/json' \
-  -d '{"group":"engineering/backend","name":"api"}'
+  --data-urlencode 'group=engineering/backend' \
+  --data-urlencode 'name=api'
 ```
 
 ## Git Smart HTTP endpoints
