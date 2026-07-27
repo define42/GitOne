@@ -23,7 +23,7 @@ make run RUN_ARGS="-root ./data -listen :8080 -public-url http://localhost:8080"
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups. Select a group to browse its immediate subgroups and repositories; each repository shows its full clone URL with a copy button.
+Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. The main page lists only top-level groups and their descriptions. Select a group to see its description and browse its immediate subgroups, subgroup descriptions, and repositories; each repository shows its full clone URL with a copy button.
 
 Build the UI separately with:
 
@@ -66,7 +66,7 @@ make ui
 | --- | --- | --- |
 | `GET` | `/api/groups` | List accessible top-level groups. |
 | `GET` | `/api/groups/{path}` | Get a group’s immediate subgroups and repositories. |
-| `POST` | `/api/groups/{path}` | Create a group. `path` is the URL-encoded full group path. |
+| `POST` | `/api/groups/{path}` | Create a group. `path` is the URL-encoded full group path. Optional query parameter: `description`. |
 | `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameter `initializeReadme=true` creates `README.md` on `main`. |
@@ -98,14 +98,14 @@ Create the first group with the bootstrap credentials:
 
 ```bash
 curl -u bootstrap:replace-me -X POST \
-  http://localhost:8080/api/groups/engineering
+  'http://localhost:8080/api/groups/engineering?description=Engineering%20projects'
 ```
 
 Create a subgroup using an owner/admin token inherited from its parent:
 
 ```bash
 curl -u bootstrap:replace-me -X POST \
-  http://localhost:8080/api/groups/engineering%2Fbackend
+  'http://localhost:8080/api/groups/engineering%2Fbackend?description=Backend%20services'
 ```
 
 Create a repository:
@@ -140,6 +140,7 @@ curl -u bootstrap:replace-me \
 {
   "version": 1,
   "group": "engineering/backend",
+  "description": "Backend services",
   "inherit": true,
   "members": {
     "alice": "owner"

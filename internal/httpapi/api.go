@@ -29,8 +29,9 @@ type healthOutput struct {
 }
 
 type groupSummary struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Description string `json:"description"`
 }
 
 type listGroupsInput struct {
@@ -51,6 +52,7 @@ type GroupPathInput struct {
 type groupDetailOutput struct {
 	Body struct {
 		Path         string         `json:"path"`
+		Description  string         `json:"description"`
 		Subgroups    []groupSummary `json:"subgroups"`
 		Repositories []string       `json:"repositories"`
 	}
@@ -60,6 +62,11 @@ type createGroupOutput struct {
 	Body struct {
 		Path string `json:"path"`
 	}
+}
+
+type createGroupInput struct {
+	GroupPathInput
+	Description string `query:"description" doc:"Group description stored in control.json"`
 }
 
 type renameGroupBody struct {
@@ -222,9 +229,14 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 		if strings.Contains(group.Path, "/") || !principal.Role.Allows(control.RoleRead) {
 			continue
 		}
+		description := ""
+		if document, loadErr := a.Resolver.Controls.Load(ctx, group.Path); loadErr == nil {
+			description = document.Description
+		}
 		output.Body.Groups = append(output.Body.Groups, groupSummary{
-			Name: group.Path,
-			Path: group.Path,
+			Name:        group.Path,
+			Path:        group.Path,
+			Description: description,
 		})
 	}
 	if !authenticated {
@@ -249,6 +261,9 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	var current *storage.GroupInfo
 	output := &groupDetailOutput{}
 	output.Body.Path = path
+	if document, loadErr := a.Resolver.Controls.Load(ctx, path); loadErr == nil {
+		output.Body.Description = document.Description
+	}
 	output.Body.Subgroups = []groupSummary{}
 	output.Body.Repositories = []string{}
 	prefix := path + "/"
@@ -268,9 +283,14 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		if _, authErr := a.authorize(ctx, input.Authorization, group.Path, control.RoleRead); authErr != nil {
 			continue
 		}
+		description := ""
+		if document, loadErr := a.Resolver.Controls.Load(ctx, group.Path); loadErr == nil {
+			description = document.Description
+		}
 		output.Body.Subgroups = append(output.Body.Subgroups, groupSummary{
-			Name: name,
-			Path: group.Path,
+			Name:        name,
+			Path:        group.Path,
+			Description: description,
 		})
 	}
 	if current == nil {
@@ -280,7 +300,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	return output, nil
 }
 
-func (a API) createGroup(ctx context.Context, input *GroupPathInput) (*createGroupOutput, error) {
+func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createGroupOutput, error) {
 	path, err := canonicalGroup(input.Path)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
@@ -289,7 +309,7 @@ func (a API) createGroup(ctx context.Context, input *GroupPathInput) (*createGro
 	if err != nil {
 		return nil, err
 	}
-	if err = a.Storage.CreateGroup(path, owner); err != nil {
+	if err = a.Storage.CreateGroup(path, owner, input.Description); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
 	output := &createGroupOutput{}

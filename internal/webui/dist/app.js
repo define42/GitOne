@@ -139,14 +139,28 @@ function groupList(groups) {
         return element("p", "None.");
     }
     const list = element("ul");
+    list.className = "group-list";
     for (const group of groups) {
         const item = element("li");
         const link = element("a", group.name);
         link.href = groupURL(group.path);
         item.append(link);
+        if (group.description) {
+            const description = element("span", group.description);
+            description.className = "group-description";
+            item.append(description);
+        }
         list.append(item);
     }
     return list;
+}
+function descriptionField() {
+    const label = element("label", "Description");
+    const input = element("input");
+    input.name = "description";
+    input.placeholder = "What this group contains";
+    label.append(input);
+    return { label, input };
 }
 function createForm(heading, labelText, placeholder, submitText, onSubmit, additionalFields = []) {
     const section = element("section");
@@ -207,10 +221,11 @@ async function renderRoot(message) {
     const groups = element("section");
     groups.append(element("h2", "Groups"), groupList(data.groups));
     app.append(groups);
+    const description = descriptionField();
     const form = createForm("Create group", "Group name", "engineering", "Create group", async (name) => {
-        await request(apiGroupURL(name), { method: "POST" });
+        await request(`${apiGroupURL(name)}?description=${encodeURIComponent(description.input.value)}`, { method: "POST" });
         await renderRoot("Group created.");
-    });
+    }, [description.label]);
     const explanation = element("p", "The authenticated Basic Auth user becomes the group owner.");
     form.insertBefore(explanation, form.querySelector("form"));
     app.append(form);
@@ -223,6 +238,11 @@ async function renderGroup(path, message) {
         app.append(statusMessage(message));
     }
     app.append(breadcrumbs(data.path), element("h2", data.path));
+    if (data.description) {
+        const description = element("p", data.description);
+        description.className = "group-description";
+        app.append(description);
+    }
     const subgroups = element("section");
     subgroups.append(element("h3", "Subgroups"), groupList(data.subgroups));
     app.append(subgroups);
@@ -246,10 +266,11 @@ async function renderGroup(path, message) {
         repositories.append(list);
     }
     app.append(repositories);
+    const subgroupDescription = descriptionField();
     app.append(createForm("Create subgroup", "Subgroup name", "backend", "Create subgroup", async (name) => {
-        await request(apiGroupURL(`${data.path}/${name}`), { method: "POST" });
+        await request(`${apiGroupURL(`${data.path}/${name}`)}?description=${encodeURIComponent(subgroupDescription.input.value)}`, { method: "POST" });
         await renderGroup(data.path, "Subgroup created.");
-    }));
+    }, [subgroupDescription.label]));
     const initializeReadme = element("input");
     initializeReadme.type = "checkbox";
     initializeReadme.name = "initializeReadme";

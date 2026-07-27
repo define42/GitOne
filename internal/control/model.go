@@ -14,6 +14,7 @@ const (
 type Document struct {
 	Version      int                         `json:"version"`
 	Group        string                      `json:"group"`
+	Description  string                      `json:"description"`
 	Inherit      bool                        `json:"inherit"`
 	Members      map[string]Role             `json:"members"`
 	Tokens       []Token                     `json:"tokens"`

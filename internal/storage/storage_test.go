@@ -11,7 +11,7 @@ import (
 func TestCreateGroupAndRepository(t *testing.T) {
 	root := t.TempDir()
 	s := Store{Root: root}
-	if e := s.CreateGroup("engineering", "alice"); e != nil {
+	if e := s.CreateGroup("engineering", "alice", "Engineering projects"); e != nil {
 		t.Fatal(e)
 	}
 	r := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
@@ -28,7 +28,7 @@ func TestCreateGroupAndRepository(t *testing.T) {
 func TestCreateRepositoryWithReadme(t *testing.T) {
 	root := t.TempDir()
 	store := Store{Root: root}
-	if err := store.CreateGroup("engineering", "alice"); err != nil {
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
 		t.Fatal(err)
 	}
 	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
@@ -76,7 +76,7 @@ func TestCreateRepositoryWithReadme(t *testing.T) {
 
 func TestSubgroupNeedsParent(t *testing.T) {
 	s := Store{Root: t.TempDir()}
-	if e := s.CreateGroup("a/b", "alice"); e == nil {
+	if e := s.CreateGroup("a/b", "alice", ""); e == nil {
 		t.Fatal("expected parent error")
 	}
 }
@@ -92,7 +92,7 @@ func TestCreateTopLevelGroupWithRelativeRoot(t *testing.T) {
 	}
 	s := Store{Root: root}
 
-	if err = s.CreateGroup("engineering", "alice"); err != nil {
+	if err = s.CreateGroup("engineering", "alice", ""); err != nil {
 		t.Fatalf("create top-level group: %v", err)
 	}
 	if _, err = os.Stat(filepath.Join(root, "engineering", "control.git")); err != nil {
@@ -102,10 +102,10 @@ func TestCreateTopLevelGroupWithRelativeRoot(t *testing.T) {
 
 func TestListGroupsAndRepositories(t *testing.T) {
 	s := Store{Root: t.TempDir()}
-	if err := s.CreateGroup("engineering", "alice"); err != nil {
+	if err := s.CreateGroup("engineering", "alice", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateGroup("engineering/backend", "alice"); err != nil {
+	if err := s.CreateGroup("engineering/backend", "alice", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CreateRepository(repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "api"}, CreateRepositoryOptions{}); err != nil {
