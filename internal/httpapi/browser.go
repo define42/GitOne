@@ -1,0 +1,421 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	pathpkg "path"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/repopath"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
+)
+
+const maxBrowsableBlobSize = 10 * 1024 * 1024
+
+type repositoryBranchesInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+}
+
+type repositoryBrowserRefInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Ref        string `path:"ref" doc:"Git branch, tag, hash, or HEAD"`
+}
+
+type repositoryBrowserPathInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Ref        string `path:"ref" doc:"Git branch, tag, hash, or HEAD"`
+	Path       string `path:"path" doc:"URL-encoded path inside the repository"`
+}
+
+type repositoryCommitsInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Ref        string `path:"ref" doc:"Git branch, tag, hash, or HEAD"`
+	Limit      int    `query:"limit" minimum:"1" maximum:"100" default:"20"`
+}
+
+type repositoryTreeEntry struct {
+	Name string `json:"name" doc:"Entry name"`
+	Path string `json:"path" doc:"Full path inside the repository"`
+	Type string `json:"type" enum:"file,directory,submodule"`
+	Mode string `json:"mode" doc:"Git file mode"`
+	Hash string `json:"hash" doc:"Git object hash"`
+	Size int64  `json:"size,omitempty" doc:"File size in bytes"`
+}
+
+type repositoryBranch struct {
+	Name   string `json:"name" doc:"Branch name"`
+	Commit string `json:"commit" doc:"Commit hash at the branch tip"`
+}
+
+type repositoryBranchesOutput struct {
+	Body struct {
+		Repository    string             `json:"repository"`
+		DefaultBranch string             `json:"defaultBranch"`
+		Branches      []repositoryBranch `json:"branches"`
+	}
+}
+
+type repositoryTreeOutput struct {
+	Body struct {
+		Repository string                `json:"repository"`
+		Ref        string                `json:"ref"`
+		Commit     string                `json:"commit"`
+		Path       string                `json:"path"`
+		Entries    []repositoryTreeEntry `json:"entries"`
+	}
+}
+
+type repositoryBlobOutput struct {
+	Body struct {
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		Commit     string `json:"commit"`
+		Path       string `json:"path"`
+		Hash       string `json:"hash"`
+		Size       int64  `json:"size"`
+		Encoding   string `json:"encoding" enum:"utf-8,base64"`
+		Content    string `json:"content"`
+	}
+}
+
+type repositoryCommitInfo struct {
+	Hash      string    `json:"hash"`
+	Author    string    `json:"author"`
+	Email     string    `json:"email"`
+	Authored  time.Time `json:"authored"`
+	Committer string    `json:"committer"`
+	Committed time.Time `json:"committed"`
+	Message   string    `json:"message"`
+}
+
+type repositoryCommitsOutput struct {
+	Body struct {
+		Repository string                 `json:"repository"`
+		Ref        string                 `json:"ref"`
+		Commits    []repositoryCommitInfo `json:"commits"`
+	}
+}
+
+func registerRepositoryBrowser(api huma.API, service API) {
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "list-repository-branches",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/branches",
+		Summary:     "List repository branches",
+		Tags:        []string{"Repository browser"},
+	}), service.listRepositoryBranches)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "list-repository-root",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/tree/{ref}",
+		Summary:     "List a repository root",
+		Tags:        []string{"Repository browser"},
+	}), service.listRepositoryRoot)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "list-repository-directory",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/tree/{ref}/{path}",
+		Summary:     "List a repository directory",
+		Tags:        []string{"Repository browser"},
+	}), service.listRepositoryDirectory)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "read-repository-file",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/blob/{ref}/{path}",
+		Summary:     "Read a file from a repository",
+		Tags:        []string{"Repository browser"},
+	}), service.readRepositoryBlob)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "list-repository-commits",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/commits/{ref}",
+		Summary:     "List repository commits",
+		Tags:        []string{"Repository browser"},
+	}), service.listRepositoryCommits)
+}
+
+func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranchesInput) (*repositoryBranchesOutput, error) {
+	repository, parsed, err := a.openBrowsableRepository(ctx, input.Authorization, input.Repository)
+	if err != nil {
+		return nil, err
+	}
+	iterator, err := repository.Branches()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not read repository branches", err)
+	}
+	defer iterator.Close()
+
+	branches := make([]repositoryBranch, 0)
+	err = iterator.ForEach(func(reference *plumbing.Reference) error {
+		branches = append(branches, repositoryBranch{
+			Name:   reference.Name().Short(),
+			Commit: reference.Hash().String(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not iterate over repository branches", err)
+	}
+	sort.Slice(branches, func(left, right int) bool {
+		return branches[left].Name < branches[right].Name
+	})
+
+	output := &repositoryBranchesOutput{}
+	output.Body.Repository = parsed.Full()
+	output.Body.DefaultBranch = "main"
+	output.Body.Branches = branches
+	return output, nil
+}
+
+func (a API) listRepositoryRoot(ctx context.Context, input *repositoryBrowserRefInput) (*repositoryTreeOutput, error) {
+	return a.listRepositoryTree(ctx, input.Authorization, input.Repository, input.Ref, "")
+}
+
+func (a API) listRepositoryDirectory(ctx context.Context, input *repositoryBrowserPathInput) (*repositoryTreeOutput, error) {
+	return a.listRepositoryTree(ctx, input.Authorization, input.Repository, input.Ref, input.Path)
+}
+
+func (a API) listRepositoryTree(ctx context.Context, authorization, repositoryPath, ref, treePath string) (*repositoryTreeOutput, error) {
+	repository, parsed, err := a.openBrowsableRepository(ctx, authorization, repositoryPath)
+	if err != nil {
+		return nil, err
+	}
+	commit, err := resolveBrowserCommit(repository, ref)
+	if err != nil {
+		return nil, huma.Error404NotFound("Git reference not found", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not load Git tree", err)
+	}
+	cleanPath, err := cleanRepositoryPath(treePath)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid repository path", err)
+	}
+	if cleanPath != "" {
+		tree, err = tree.Tree(cleanPath)
+		if err != nil {
+			return nil, huma.Error404NotFound("directory not found", err)
+		}
+	}
+
+	entries := make([]repositoryTreeEntry, 0, len(tree.Entries))
+	for _, entry := range tree.Entries {
+		entryPath := entry.Name
+		if cleanPath != "" {
+			entryPath = cleanPath + "/" + entry.Name
+		}
+		item := repositoryTreeEntry{
+			Name: entry.Name,
+			Path: entryPath,
+			Type: repositoryEntryType(entry),
+			Mode: entry.Mode.String(),
+			Hash: entry.Hash.String(),
+		}
+		if item.Type == "file" {
+			if blob, blobErr := repository.BlobObject(entry.Hash); blobErr == nil {
+				item.Size = blob.Size
+			}
+		}
+		entries = append(entries, item)
+	}
+
+	output := &repositoryTreeOutput{}
+	output.Body.Repository = parsed.Full()
+	output.Body.Ref = ref
+	output.Body.Commit = commit.Hash.String()
+	output.Body.Path = cleanPath
+	output.Body.Entries = entries
+	return output, nil
+}
+
+func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPathInput) (*repositoryBlobOutput, error) {
+	repository, parsed, err := a.openBrowsableRepository(ctx, input.Authorization, input.Repository)
+	if err != nil {
+		return nil, err
+	}
+	commit, err := resolveBrowserCommit(repository, input.Ref)
+	if err != nil {
+		return nil, huma.Error404NotFound("Git reference not found", err)
+	}
+	cleanPath, err := cleanRepositoryPath(input.Path)
+	if err != nil || cleanPath == "" {
+		return nil, huma.Error400BadRequest("invalid file path", err)
+	}
+	file, err := commit.File(cleanPath)
+	if err != nil {
+		return nil, huma.Error404NotFound("file not found", err)
+	}
+	if file.Blob.Size > maxBrowsableBlobSize {
+		return nil, huma.Error413RequestEntityTooLarge(
+			fmt.Sprintf("file exceeds the %d-byte browsing limit", maxBrowsableBlobSize),
+		)
+	}
+	reader, err := file.Blob.Reader()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not open Git blob", err)
+	}
+	defer reader.Close()
+	content, err := io.ReadAll(io.LimitReader(reader, maxBrowsableBlobSize+1))
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not read Git blob", err)
+	}
+
+	encoding := "utf-8"
+	encodedContent := string(content)
+	if !utf8.Valid(content) || containsBinaryData(content) {
+		encoding = "base64"
+		encodedContent = base64.StdEncoding.EncodeToString(content)
+	}
+
+	output := &repositoryBlobOutput{}
+	output.Body.Repository = parsed.Full()
+	output.Body.Ref = input.Ref
+	output.Body.Commit = commit.Hash.String()
+	output.Body.Path = cleanPath
+	output.Body.Hash = file.Blob.Hash.String()
+	output.Body.Size = file.Blob.Size
+	output.Body.Encoding = encoding
+	output.Body.Content = encodedContent
+	return output, nil
+}
+
+func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommitsInput) (*repositoryCommitsOutput, error) {
+	repository, parsed, err := a.openBrowsableRepository(ctx, input.Authorization, input.Repository)
+	if err != nil {
+		return nil, err
+	}
+	commit, err := resolveBrowserCommit(repository, input.Ref)
+	if err != nil {
+		return nil, huma.Error404NotFound("Git reference not found", err)
+	}
+	iterator, err := repository.Log(&git.LogOptions{From: commit.Hash})
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not read commit history", err)
+	}
+	defer iterator.Close()
+
+	limit := input.Limit
+	if limit == 0 {
+		limit = 20
+	}
+	commits := make([]repositoryCommitInfo, 0, limit)
+	stop := errors.New("commit limit reached")
+	err = iterator.ForEach(func(current *object.Commit) error {
+		if len(commits) >= limit {
+			return stop
+		}
+		commits = append(commits, repositoryCommitInfo{
+			Hash:      current.Hash.String(),
+			Author:    current.Author.Name,
+			Email:     current.Author.Email,
+			Authored:  current.Author.When,
+			Committer: current.Committer.Name,
+			Committed: current.Committer.When,
+			Message:   current.Message,
+		})
+		return nil
+	})
+	if err != nil && !errors.Is(err, stop) {
+		return nil, huma.Error500InternalServerError("could not iterate over commits", err)
+	}
+
+	output := &repositoryCommitsOutput{}
+	output.Body.Repository = parsed.Full()
+	output.Body.Ref = input.Ref
+	output.Body.Commits = commits
+	return output, nil
+}
+
+func (a API) openBrowsableRepository(ctx context.Context, authorization, value string) (*git.Repository, repopath.Repository, error) {
+	parsed, err := parseRepositoryPath(value)
+	if err != nil {
+		return nil, repopath.Repository{}, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorize(ctx, authorization, parsed.Group(), control.RoleRead); err != nil {
+		return nil, repopath.Repository{}, err
+	}
+	repositoryPath, err := a.Storage.GitPath(parsed)
+	if err != nil {
+		return nil, repopath.Repository{}, huma.Error400BadRequest(err.Error())
+	}
+	repository, err := git.PlainOpen(repositoryPath)
+	if err != nil {
+		return nil, repopath.Repository{}, huma.Error404NotFound("repository not found", err)
+	}
+	return repository, parsed, nil
+}
+
+func resolveBrowserCommit(repository *git.Repository, ref string) (*object.Commit, error) {
+	for _, candidate := range []string{ref, "refs/heads/" + ref, "refs/tags/" + ref} {
+		hash, err := repository.ResolveRevision(plumbing.Revision(candidate))
+		if err != nil {
+			continue
+		}
+		commit, err := repository.CommitObject(*hash)
+		if err == nil {
+			return commit, nil
+		}
+	}
+	return nil, fmt.Errorf("revision %q does not exist", ref)
+}
+
+func cleanRepositoryPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "/")
+	if value == "" {
+		return "", nil
+	}
+	cleaned := pathpkg.Clean(value)
+	if cleaned == "." {
+		return "", nil
+	}
+	if cleaned == ".." ||
+		strings.HasPrefix(cleaned, "../") ||
+		strings.HasPrefix(cleaned, "/") ||
+		strings.ContainsRune(cleaned, '\x00') {
+		return "", fmt.Errorf("path traversal is not allowed")
+	}
+	return cleaned, nil
+}
+
+func repositoryEntryType(entry object.TreeEntry) string {
+	switch {
+	case entry.Mode == filemode.Submodule:
+		return "submodule"
+	case entry.Mode.IsFile():
+		return "file"
+	default:
+		return "directory"
+	}
+}
+
+func containsBinaryData(content []byte) bool {
+	checkLength := min(len(content), 8*1024)
+	for _, value := range content[:checkLength] {
+		if value == 0 {
+			return true
+		}
+	}
+	return false
+}

@@ -202,6 +202,8 @@ func Register(mux *http.ServeMux, service API) huma.API {
 		DefaultStatus: http.StatusNoContent,
 	}), service.deleteRepository)
 
+	registerRepositoryBrowser(api, service)
+
 	return api
 }
 

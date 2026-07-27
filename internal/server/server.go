@@ -41,6 +41,7 @@ func New(c Config) http.Handler {
 	ui := webui.Handler{}
 	mux.Handle("GET /{$}", ui)
 	mux.Handle("GET /groups/{path...}", ui)
+	mux.Handle("GET /repositories/{path...}", ui)
 	mux.Handle("GET /assets/{path...}", ui)
 	lh := lfs.Handler{Storage: st, PublicURL: c.PublicURL, Authorize: authorizeRepo}
 	gh := githttp.Handler{Storage: st, Authorize: authorizeRepo}

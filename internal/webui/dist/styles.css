@@ -91,6 +91,7 @@ label {
 }
 
 input,
+select,
 button {
   box-sizing: border-box;
   font: inherit;
@@ -104,6 +105,67 @@ button {
 
 code {
   font-size: 0.9em;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid;
+  padding: 0.6rem;
+  text-align: left;
+}
+
+.repository-tree th:last-child,
+.repository-tree td:last-child {
+  text-align: right;
+}
+
+.repository-ref {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.repository-ref label {
+  min-width: 12rem;
+}
+
+.repository-ref p {
+  margin: 0.6rem 0;
+}
+
+.file-content {
+  border: 1px solid;
+  max-height: 40rem;
+  overflow: auto;
+  padding: 1rem;
+  white-space: pre;
+}
+
+.commit-list {
+  display: grid;
+  gap: 0.75rem;
+  padding-left: 1.5rem;
+}
+
+.commit-list li,
+.commit-list li div {
+  display: grid;
+  gap: 0.2rem 0.6rem;
+}
+
+.commit-list li div {
+  align-items: baseline;
+  grid-template-columns: auto 1fr;
+}
+
+.commit-list li > span {
+  opacity: 0.75;
 }
 
 .group-list {

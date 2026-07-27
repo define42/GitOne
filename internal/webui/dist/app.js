@@ -26,6 +26,48 @@ function repositoryURL(groupPath, repository, username) {
     url.username = username;
     return url.href;
 }
+function repositoryBrowserURL(repository, options = {}) {
+    const encodedRepository = repository.split("/").map(encodeURIComponent).join("/");
+    const url = new URL(`/repositories/${encodedRepository}`, window.location.origin);
+    if (options.ref && options.ref !== "main") {
+        url.searchParams.set("ref", options.ref);
+    }
+    if (options.path) {
+        url.searchParams.set("path", options.path);
+    }
+    if (options.file) {
+        url.searchParams.set("file", options.file);
+    }
+    return `${url.pathname}${url.search}`;
+}
+function repositoryBranchesAPIURL(repository) {
+    return `/api/repositories/${encodeURIComponent(repository)}/branches`;
+}
+function repositoryAPIURL(repository, operation, ref, path) {
+    const base = `/api/repositories/${encodeURIComponent(repository)}/${operation}/${encodeURIComponent(ref)}`;
+    return path ? `${base}/${encodeURIComponent(path)}` : base;
+}
+function currentRepository() {
+    const prefix = "/repositories/";
+    if (!window.location.pathname.startsWith(prefix)) {
+        return null;
+    }
+    const repository = window.location.pathname
+        .slice(prefix.length)
+        .split("/")
+        .map(decodeURIComponent)
+        .join("/");
+    if (!repository) {
+        return null;
+    }
+    const parameters = new URLSearchParams(window.location.search);
+    return {
+        repository,
+        ref: parameters.get("ref") || "main",
+        path: parameters.get("path") || "",
+        file: parameters.get("file"),
+    };
+}
 function currentGroup() {
     const prefix = "/groups/";
     if (!window.location.pathname.startsWith(prefix)) {
@@ -333,6 +375,187 @@ function breadcrumbs(path) {
     nav.append(list);
     return nav;
 }
+function repositoryBreadcrumbs(route) {
+    const nav = element("nav");
+    nav.setAttribute("aria-label", "Breadcrumb");
+    const list = element("ol");
+    const homeItem = element("li");
+    const home = element("a", "Groups");
+    home.href = "/";
+    homeItem.append(home);
+    list.append(homeItem);
+    const repositoryParts = route.repository.split("/");
+    const groupParts = repositoryParts.slice(0, -1);
+    for (let index = 0; index < groupParts.length; index += 1) {
+        const item = element("li");
+        const link = element("a", groupParts[index]);
+        link.href = groupURL(groupParts.slice(0, index + 1).join("/"));
+        item.append(link);
+        list.append(item);
+    }
+    const repositoryItem = element("li");
+    const repositoryLink = element("a", repositoryParts.at(-1) ?? route.repository);
+    repositoryLink.href = repositoryBrowserURL(route.repository, { ref: route.ref });
+    repositoryItem.append(repositoryLink);
+    list.append(repositoryItem);
+    const selectedPath = route.file ?? route.path;
+    if (selectedPath) {
+        const pathParts = selectedPath.split("/");
+        for (let index = 0; index < pathParts.length; index += 1) {
+            const item = element("li");
+            if (route.file !== null && index === pathParts.length - 1) {
+                item.append(element("span", pathParts[index]));
+            }
+            else {
+                const link = element("a", pathParts[index]);
+                link.href = repositoryBrowserURL(route.repository, {
+                    ref: route.ref,
+                    path: pathParts.slice(0, index + 1).join("/"),
+                });
+                item.append(link);
+            }
+            list.append(item);
+        }
+    }
+    nav.append(list);
+    return nav;
+}
+function formatFileSize(size) {
+    if (size === undefined) {
+        return "";
+    }
+    if (size < 1024) {
+        return `${size} B`;
+    }
+    if (size < 1024 * 1024) {
+        return `${(size / 1024).toFixed(1)} KiB`;
+    }
+    return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+}
+function repositoryCommitList(data) {
+    const section = element("section");
+    section.append(element("h3", "Recent commits"));
+    if (data.commits.length === 0) {
+        section.append(element("p", "No commits."));
+        return section;
+    }
+    const list = element("ol");
+    list.className = "commit-list";
+    for (const commit of data.commits) {
+        const item = element("li");
+        const heading = element("div");
+        const hash = element("code", commit.hash.slice(0, 8));
+        const message = element("strong", commit.message.split("\n")[0] || "(no message)");
+        heading.append(hash, message);
+        const metadata = element("span", `${commit.author} · ${new Date(commit.committed).toLocaleString()}`);
+        item.append(heading, metadata);
+        list.append(item);
+    }
+    section.append(list);
+    return section;
+}
+async function renderRepositoryBrowser(route) {
+    const branchesRequest = request(repositoryBranchesAPIURL(route.repository));
+    const commitsRequest = request(`${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=20`);
+    const contentRequest = route.file === null
+        ? request(repositoryAPIURL(route.repository, "tree", route.ref, route.path))
+        : request(repositoryAPIURL(route.repository, "blob", route.ref, route.file));
+    const [branches, commits, content] = await Promise.all([
+        branchesRequest,
+        commitsRequest,
+        contentRequest,
+    ]);
+    document.title = `${route.repository} · GitOne`;
+    app.replaceChildren(repositoryBreadcrumbs(route));
+    const heading = element("h2", route.repository);
+    const ref = element("div");
+    ref.className = "repository-ref";
+    const branchLabel = element("label");
+    branchLabel.append(element("span", "Branch"));
+    const branchSelect = element("select");
+    for (const branch of branches.branches) {
+        const option = element("option", branch.name);
+        option.value = branch.name;
+        branchSelect.append(option);
+    }
+    if (!branches.branches.some((branch) => branch.name === route.ref)) {
+        const option = element("option", route.ref);
+        option.value = route.ref;
+        branchSelect.append(option);
+    }
+    branchSelect.value = route.ref;
+    branchSelect.addEventListener("change", () => {
+        window.location.href = repositoryBrowserURL(route.repository, {
+            ref: branchSelect.value,
+        });
+    });
+    branchLabel.append(branchSelect);
+    const commit = element("p");
+    commit.append("Commit: ", element("code", content.commit.slice(0, 12)));
+    ref.append(branchLabel, commit);
+    app.append(heading, ref);
+    if ("entries" in content) {
+        const section = element("section");
+        section.append(element("h3", content.path || "Files"));
+        if (content.entries.length === 0) {
+            section.append(element("p", "This directory is empty."));
+        }
+        else {
+            const table = element("table");
+            table.className = "repository-tree";
+            const header = element("tr");
+            header.append(element("th", "Name"), element("th", "Type"), element("th", "Size"));
+            const head = element("thead");
+            head.append(header);
+            const body = element("tbody");
+            for (const entry of content.entries) {
+                const row = element("tr");
+                const nameCell = element("td");
+                if (entry.type === "directory") {
+                    const link = element("a", `${entry.name}/`);
+                    link.href = repositoryBrowserURL(route.repository, {
+                        ref: route.ref,
+                        path: entry.path,
+                    });
+                    nameCell.append(link);
+                }
+                else if (entry.type === "file") {
+                    const link = element("a", entry.name);
+                    link.href = repositoryBrowserURL(route.repository, {
+                        ref: route.ref,
+                        file: entry.path,
+                    });
+                    nameCell.append(link);
+                }
+                else {
+                    nameCell.append(element("span", entry.name));
+                }
+                row.append(nameCell, element("td", entry.type), element("td", formatFileSize(entry.size)));
+                body.append(row);
+            }
+            table.append(head, body);
+            section.append(table);
+        }
+        app.append(section);
+    }
+    else {
+        const section = element("section");
+        section.append(element("h3", content.path));
+        const metadata = element("p", `${formatFileSize(content.size)} · ${content.encoding} · ${content.hash.slice(0, 12)}`);
+        section.append(metadata);
+        if (content.encoding === "utf-8") {
+            const pre = element("pre");
+            pre.className = "file-content";
+            pre.append(element("code", content.content));
+            section.append(pre);
+        }
+        else {
+            section.append(element("p", "Binary file. Content is available as base64 through the API."));
+        }
+        app.append(section);
+    }
+    app.append(repositoryCommitList(commits));
+}
 async function renderRoot(message) {
     const data = await request("/api/groups");
     document.title = "GitOne";
@@ -384,7 +607,9 @@ async function renderGroup(path, message) {
             link.className = "repository-link";
             const heading = element("div");
             heading.className = "repository-heading";
-            heading.append(link, copyButton(cloneURL));
+            const browseLink = element("a", "Browse");
+            browseLink.href = repositoryBrowserURL(`${data.path}/${repository.name}`);
+            heading.append(link, copyButton(cloneURL), browseLink);
             item.append(heading);
             if (repository.description) {
                 const description = element("span", repository.description);
@@ -423,6 +648,11 @@ async function renderGroup(path, message) {
 }
 async function render() {
     try {
+        const repository = currentRepository();
+        if (repository !== null) {
+            await renderRepositoryBrowser(repository);
+            return;
+        }
         const group = currentGroup();
         if (group === null) {
             await renderRoot();

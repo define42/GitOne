@@ -16,6 +16,7 @@ import (
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gittransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
@@ -327,6 +328,186 @@ func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 	}
 }
 
+func TestRepositoryBrowserAPI(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", "Engineering projects"); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+		Description:      "Backend API",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	checkout := filepath.Join(t.TempDir(), "api")
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{
+		URL: filepath.Join(root, "engineering", "api.git"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Join(checkout, "docs"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(checkout, "docs", "guide.txt"), []byte("Browse me\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repository.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Add("docs/guide.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Commit("Add guide", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "alice",
+			Email: "alice@localhost",
+			When:  time.Now().UTC(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.Push(&git.PushOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bareRepository, err := git.PlainOpen(filepath.Join(root, "engineering", "api.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = bareRepository.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("feature/docs"),
+		head.Hash(),
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := New(Config{
+		Root:           root,
+		BootstrapUser:  "alice",
+		BootstrapToken: "secret",
+	})
+	get := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.SetBasicAuth("alice", "secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: expected status %d, got %d: %s", path, http.StatusOK, response.Code, response.Body.String())
+		}
+		return response
+	}
+
+	unauthenticated := httptest.NewRequest(http.MethodGet, "/api/repositories/engineering%2Fapi/tree/HEAD", nil)
+	unauthenticatedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticatedResponse, unauthenticated)
+	if unauthenticatedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("repository browser authentication: expected status %d, got %d", http.StatusUnauthorized, unauthenticatedResponse.Code)
+	}
+
+	var branches struct {
+		Repository    string `json:"repository"`
+		DefaultBranch string `json:"defaultBranch"`
+		Branches      []struct {
+			Name   string `json:"name"`
+			Commit string `json:"commit"`
+		} `json:"branches"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/branches").Body.Bytes(), &branches); err != nil {
+		t.Fatal(err)
+	}
+	if branches.Repository != "engineering/api" ||
+		branches.DefaultBranch != "main" ||
+		len(branches.Branches) != 3 ||
+		branches.Branches[0].Name != "feature/docs" ||
+		branches.Branches[0].Commit != head.Hash().String() ||
+		branches.Branches[1].Name != "main" ||
+		branches.Branches[2].Name != "master" {
+		t.Fatalf("unexpected repository branches: %#v", branches)
+	}
+
+	var rootTree struct {
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		Commit     string `json:"commit"`
+		Entries    []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"entries"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/tree/main").Body.Bytes(), &rootTree); err != nil {
+		t.Fatal(err)
+	}
+	if rootTree.Repository != "engineering/api" ||
+		rootTree.Ref != "main" ||
+		rootTree.Commit == "" ||
+		len(rootTree.Entries) != 3 {
+		t.Fatalf("unexpected repository root: %#v", rootTree)
+	}
+	var featureTree struct {
+		Ref    string `json:"ref"`
+		Commit string `json:"commit"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/tree/feature%2Fdocs").Body.Bytes(), &featureTree); err != nil {
+		t.Fatal(err)
+	}
+	if featureTree.Ref != "feature/docs" || featureTree.Commit != head.Hash().String() {
+		t.Fatalf("unexpected feature branch tree: %#v", featureTree)
+	}
+
+	var directory struct {
+		Path    string `json:"path"`
+		Entries []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			Size int64  `json:"size"`
+		} `json:"entries"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/tree/HEAD/docs").Body.Bytes(), &directory); err != nil {
+		t.Fatal(err)
+	}
+	if directory.Path != "docs" ||
+		len(directory.Entries) != 1 ||
+		directory.Entries[0].Name != "guide.txt" ||
+		directory.Entries[0].Type != "file" ||
+		directory.Entries[0].Size != int64(len("Browse me\n")) {
+		t.Fatalf("unexpected repository directory: %#v", directory)
+	}
+
+	var blob struct {
+		Path     string `json:"path"`
+		Encoding string `json:"encoding"`
+		Content  string `json:"content"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/HEAD/docs%2Fguide.txt").Body.Bytes(), &blob); err != nil {
+		t.Fatal(err)
+	}
+	if blob.Path != "docs/guide.txt" || blob.Encoding != "utf-8" || blob.Content != "Browse me\n" {
+		t.Fatalf("unexpected repository blob: %#v", blob)
+	}
+
+	var commits struct {
+		Commits []struct {
+			Message string `json:"message"`
+		} `json:"commits"`
+	}
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/commits/HEAD?limit=1").Body.Bytes(), &commits); err != nil {
+		t.Fatal(err)
+	}
+	if len(commits.Commits) != 1 || commits.Commits[0].Message != "Add guide" {
+		t.Fatalf("unexpected repository commits: %#v", commits)
+	}
+}
+
 func TestHumaGroupNavigationAPI(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}
@@ -462,7 +643,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		t.Fatal("missing Basic Auth challenge")
 	}
 
-	for _, path := range []string{"/", "/groups/engineering/backend"} {
+	for _, path := range []string{"/", "/groups/engineering/backend", "/repositories/engineering/api"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		request.SetBasicAuth("alice", "secret")
 		response := httptest.NewRecorder()
@@ -473,7 +654,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=12">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=14">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 		if strings.Contains(body, `<h1><a href="/">GitOne</a></h1>`) ||
@@ -522,6 +703,15 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if !strings.Contains(assetResponse.Body.String(), "repository.description") {
 		t.Fatal("served UI does not show repository descriptions")
 	}
+	if !strings.Contains(assetResponse.Body.String(), "repositoryBrowserURL") ||
+		!strings.Contains(assetResponse.Body.String(), "renderRepositoryBrowser") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryBranchesAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), `parameters.get("ref") || "main"`) ||
+		!strings.Contains(assetResponse.Body.String(), `branchSelect.addEventListener("change"`) ||
+		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "tree"`) ||
+		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "blob"`) {
+		t.Fatal("served UI does not support repository and branch browsing")
+	}
 	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") ||
 		!strings.Contains(assetResponse.Body.String(), `input.value !== repositoryName`) ||
 		!strings.Contains(assetResponse.Body.String(), `method: "DELETE"`) {
@@ -549,6 +739,21 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s: expected status %d, got %d", path, http.StatusOK, response.Code)
+		}
+		if path == "/openapi.json" {
+			document := response.Body.String()
+			for _, expected := range []string{
+				`"Repository browser"`,
+				`"/api/repositories/{repository}/branches"`,
+				`"/api/repositories/{repository}/tree/{ref}"`,
+				`"/api/repositories/{repository}/tree/{ref}/{path}"`,
+				`"/api/repositories/{repository}/blob/{ref}/{path}"`,
+				`"/api/repositories/{repository}/commits/{ref}"`,
+			} {
+				if !strings.Contains(document, expected) {
+					t.Fatalf("OpenAPI document does not contain %s", expected)
+				}
+			}
 		}
 	}
 }

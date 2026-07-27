@@ -47,6 +47,7 @@ make ui
 | --- | --- | --- |
 | `GET` | `/` | Load the TypeScript UI at the top-level group view. |
 | `GET` | `/groups/{path...}` | Load the TypeScript UI at a group or subgroup. |
+| `GET` | `/repositories/{path...}` | Browse a repository tree, files, and recent commits. |
 | `GET` | `/assets/{path...}` | Serve embedded compiled JavaScript and CSS assets. |
 
 ### Huma documentation
@@ -72,6 +73,18 @@ make ui
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.json`. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |
+
+### Repository browser API
+
+The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encoded as individual path segments. Blob responses use UTF-8 text when possible and base64 for binary content. Browsable files are limited to 10 MiB.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/repositories/{repository}/branches` | List branches and their tip commits. The UI defaults to `main`. |
+| `GET` | `/api/repositories/{repository}/tree/{ref}` | List the repository root at a branch, tag, hash, or `HEAD`. |
+| `GET` | `/api/repositories/{repository}/tree/{ref}/{path}` | List a directory at a Git reference. |
+| `GET` | `/api/repositories/{repository}/blob/{ref}/{path}` | Read a file as UTF-8 or base64. |
+| `GET` | `/api/repositories/{repository}/commits/{ref}` | List commits. Optional `limit` is 1–100 and defaults to 20. |
 
 ### Git Smart HTTP
 
