@@ -48,6 +48,8 @@
   --segment-hover: rgb(255 255 255 / 7%);
   --segment-shadow: 0 1px 2px rgb(0 0 0 / 35%);
   --brand-plate: transparent;
+  --repository-file-text: var(--accent);
+  --repository-file-hover: var(--accent-hover);
 }
 
 :root[data-theme="light"] {
@@ -351,6 +353,8 @@
   --diff-metadata: #8b949e;
   --segment-bg: #21262d;
   --segment-hover: rgb(177 186 196 / 10%);
+  --repository-file-text: var(--text);
+  --repository-file-hover: var(--text);
 }
 
 :root[data-theme="gitlab"] {
@@ -1692,10 +1696,16 @@ table {
 
 .repository-tree td a {
   align-items: center;
+  color: var(--repository-file-text);
   display: inline-flex;
   font-weight: 650;
   gap: 0.55rem;
   text-decoration: none;
+}
+
+.repository-tree td a:hover {
+  color: var(--repository-file-hover);
+  text-decoration: underline;
 }
 
 .repository-tree td a .icon {
