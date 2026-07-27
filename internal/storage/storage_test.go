@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"github.com/define42/GitOne/internal/repopath"
 	"os"
 	"path/filepath"
@@ -12,8 +10,7 @@ import (
 func TestCreateGroupAndRepository(t *testing.T) {
 	root := t.TempDir()
 	s := Store{Root: root}
-	sum := sha256.Sum256([]byte("secret"))
-	if e := s.CreateGroup("engineering", "alice", "alice", "sha256:"+hex.EncodeToString(sum[:])); e != nil {
+	if e := s.CreateGroup("engineering", "alice"); e != nil {
 		t.Fatal(e)
 	}
 	r := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
@@ -28,7 +25,7 @@ func TestCreateGroupAndRepository(t *testing.T) {
 }
 func TestSubgroupNeedsParent(t *testing.T) {
 	s := Store{Root: t.TempDir()}
-	if e := s.CreateGroup("a/b", "alice", "alice", "sha256:x"); e == nil {
+	if e := s.CreateGroup("a/b", "alice"); e == nil {
 		t.Fatal("expected parent error")
 	}
 }

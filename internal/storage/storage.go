@@ -61,7 +61,7 @@ func (s Store) CreateRepository(r repopath.Repository) error {
 func plumbingSymbolicMain() *plumbing.Reference {
 	return plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main"))
 }
-func (s Store) CreateGroup(group, owner, tokenName, tokenHash string) error {
+func (s Store) CreateGroup(group, owner string) error {
 	gp, e := s.GroupPath(group)
 	if e != nil {
 		return e
@@ -91,9 +91,6 @@ func (s Store) CreateGroup(group, owner, tokenName, tokenHash string) error {
 		return e
 	}
 	doc := control.Document{Version: 1, Group: group, Inherit: true, Members: map[string]control.Role{owner: control.RoleOwner}, Tokens: []control.Token{}, Repositories: map[string]control.RepositoryPolicy{}}
-	if tokenName != "" {
-		doc.Tokens = append(doc.Tokens, control.Token{Name: tokenName, Key: tokenName, Hash: tokenHash, Role: control.RoleOwner})
-	}
 	b, _ := json.MarshalIndent(doc, "", "  ")
 	b = append(b, '\n')
 	if e = os.WriteFile(filepath.Join(tmp, "control.json"), b, 0640); e != nil {

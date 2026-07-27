@@ -40,21 +40,21 @@ Create the first group with the bootstrap credentials:
 ```bash
 curl -u bootstrap:replace-me -X POST http://localhost:8080/api/groups \
   -H 'Content-Type: application/json' \
-  -d '{"path":"engineering","owner":"alice","tokenName":"alice","token":"alice-secret"}'
+  -d '{"path":"engineering"}'
 ```
 
 Create a subgroup using an owner/admin token inherited from its parent:
 
 ```bash
-curl -u alice:alice-secret -X POST http://localhost:8080/api/groups \
+curl -u bootstrap:replace-me -X POST http://localhost:8080/api/groups \
   -H 'Content-Type: application/json' \
-  -d '{"path":"engineering/backend","owner":"alice","tokenName":"backend-admin","token":"backend-secret"}'
+  -d '{"path":"engineering/backend"}'
 ```
 
 Create a repository:
 
 ```bash
-curl -u alice:alice-secret -X POST http://localhost:8080/api/repositories \
+curl -u bootstrap:replace-me -X POST http://localhost:8080/api/repositories \
   -H 'Content-Type: application/json' \
   -d '{"group":"engineering/backend","name":"api"}'
 ```

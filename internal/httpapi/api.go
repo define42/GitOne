@@ -1,8 +1,6 @@
 package httpapi
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -13,13 +11,10 @@ import (
 
 type API struct {
 	Storage   storage.Store
-	Authorize func(*http.Request, string, bool) bool
+	Authorize func(*http.Request, string, bool) (string, bool)
 }
 type createGroup struct {
-	Path      string `json:"path"`
-	Owner     string `json:"owner"`
-	TokenName string `json:"tokenName"`
-	Token     string `json:"token"`
+	Path string `json:"path"`
 }
 type createRepo struct {
 	Group string `json:"group"`
@@ -47,15 +42,26 @@ func (a API) Routes() http.Handler {
 	return m
 }
 func (a API) allowed(r *http.Request, g string) bool {
-	return a.Authorize == nil || a.Authorize(r, g, true)
+	if a.Authorize == nil {
+		return true
+	}
+	_, ok := a.Authorize(r, g, true)
+	return ok
 }
 func (a API) createGroup(w http.ResponseWriter, r *http.Request) {
 	var q createGroup
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&q) != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&q) != nil {
 		http.Error(w, "invalid JSON", 400)
 		return
 	}
-	if !a.allowed(r, q.Path) {
+	if a.Authorize == nil {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	owner, ok := a.Authorize(r, q.Path, true)
+	if !ok || owner == "" {
 		http.Error(w, "forbidden", 403)
 		return
 	}
@@ -63,12 +69,7 @@ func (a API) createGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	if q.Owner == "" {
-		q.Owner = q.TokenName
-	}
-	sum := sha256.Sum256([]byte(q.Token))
-	hash := "sha256:" + hex.EncodeToString(sum[:])
-	if e := a.Storage.CreateGroup(q.Path, q.Owner, q.TokenName, hash); e != nil {
+	if e := a.Storage.CreateGroup(q.Path, owner); e != nil {
 		http.Error(w, e.Error(), 409)
 		return
 	}

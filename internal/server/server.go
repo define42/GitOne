@@ -35,20 +35,23 @@ func New(c Config) http.Handler {
 		}
 		return pr.Role.Allows(need)
 	}
-	authorizeGroup := func(r *http.Request, group string, write bool) bool {
+	authorizeGroup := func(r *http.Request, group string, write bool) (string, bool) {
 		u, p, ok := r.BasicAuth()
 		if !ok {
-			return false
+			return "", false
 		}
 		pr, e := ar.Authenticate(r.Context(), group, u, p)
 		if e != nil {
-			return false
+			return "", false
 		}
 		need := control.RoleRead
 		if write {
 			need = control.RoleAdmin
 		}
-		return pr.Role.Allows(need)
+		if !pr.Role.Allows(need) {
+			return "", false
+		}
+		return pr.Name, true
 	}
 	mux := http.NewServeMux()
 	api := httpapi.API{Storage: st, Authorize: authorizeGroup}
