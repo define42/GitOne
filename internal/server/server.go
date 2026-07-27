@@ -1,13 +1,13 @@
 package server
 
 import (
-	"example.com/puregit-server/internal/auth"
-	"example.com/puregit-server/internal/control"
-	"example.com/puregit-server/internal/githttp"
-	"example.com/puregit-server/internal/httpapi"
-	"example.com/puregit-server/internal/lfs"
-	"example.com/puregit-server/internal/repopath"
-	"example.com/puregit-server/internal/storage"
+	"github.com/define42/GitOne/internal/auth"
+	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/githttp"
+	"github.com/define42/GitOne/internal/httpapi"
+	"github.com/define42/GitOne/internal/lfs"
+	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/storage"
 	"net/http"
 )
 

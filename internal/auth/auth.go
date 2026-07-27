@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
-	"example.com/puregit-server/internal/control"
+	"github.com/define42/GitOne/internal/control"
 	"strings"
 	"time"
 )

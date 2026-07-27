@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"example.com/puregit-server/internal/repopath"
-	"example.com/puregit-server/internal/storage"
+	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,7 +15,6 @@ import (
 func TestUploadAndDownload(t *testing.T) {
 	root := t.TempDir()
 	st := storage.Store{Root: root}
-	repo := repopath.Repository{Groups: []string{"g"}, Name: "r"}
 	if e := os.MkdirAll(root+"/g/r.lfs/objects", 0750); e != nil {
 		t.Fatal(e)
 	}

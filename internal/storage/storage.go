@@ -3,9 +3,9 @@ package storage
 import (
 	"encoding/json"
 	"errors"
-	"example.com/puregit-server/internal/control"
-	"example.com/puregit-server/internal/repopath"
 	"fmt"
+	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -102,8 +102,11 @@ func (s Store) CreateGroup(group, owner, tokenName, tokenHash string) error {
 	if _, e = wt.Add("control.json"); e != nil {
 		return e
 	}
-	_, e = wt.Commit("Initialize group control", &git.CommitOptions{Author: &object.Signature{Name: owner, Email: owner + "@localhost", When: time.Now().UTC()}})
+	commit, e := wt.Commit("Initialize group control", &git.CommitOptions{Author: &object.Signature{Name: owner, Email: owner + "@localhost", When: time.Now().UTC()}})
 	if e != nil {
+		return e
+	}
+	if e = r.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), commit)); e != nil {
 		return e
 	}
 	if e = r.Storer.SetReference(plumbingSymbolicMain()); e != nil {

@@ -1,8 +1,8 @@
 package main
 
 import (
-	app "example.com/puregit-server/internal/server"
 	"flag"
+	app "github.com/define42/GitOne/internal/server"
 	"log"
 	"net/http"
 	"os"

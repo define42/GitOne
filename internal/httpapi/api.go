@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"example.com/puregit-server/internal/repopath"
-	"example.com/puregit-server/internal/storage"
+	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/storage"
 )
 
 type API struct {

@@ -3,7 +3,7 @@ package storage
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"example.com/puregit-server/internal/repopath"
+	"github.com/define42/GitOne/internal/repopath"
 	"os"
 	"path/filepath"
 	"testing"
