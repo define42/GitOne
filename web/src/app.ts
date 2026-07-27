@@ -11,6 +11,7 @@ interface GroupList {
 interface GroupDetail {
   path: string;
   description: string;
+  username: string;
   subgroups: GroupSummary[];
   repositories: RepositorySummary[];
 }
@@ -51,12 +52,14 @@ function apiGroupURL(path: string): string {
   return `/api/groups/${encodeURIComponent(path)}`;
 }
 
-function repositoryURL(groupPath: string, repository: string): string {
+function repositoryURL(groupPath: string, repository: string, username: string): string {
   const repositoryPath = [
     ...groupPath.split("/"),
     `${repository}.git`,
   ].map(encodeURIComponent).join("/");
-  return new URL(`/${repositoryPath}`, window.location.origin).href;
+  const url = new URL(`/${repositoryPath}`, window.location.origin);
+  url.username = username;
+  return url.href;
 }
 
 function currentGroup(): string | null {
@@ -318,7 +321,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     list.className = "repository-list";
     for (const repository of data.repositories) {
       const item = element("li");
-      const cloneURL = repositoryURL(data.path, repository.name);
+      const cloneURL = repositoryURL(data.path, repository.name, data.username);
       const link = element("a", cloneURL);
       link.href = cloneURL;
       link.className = "repository-link";

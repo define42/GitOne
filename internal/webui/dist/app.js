@@ -17,12 +17,14 @@ function groupURL(path) {
 function apiGroupURL(path) {
     return `/api/groups/${encodeURIComponent(path)}`;
 }
-function repositoryURL(groupPath, repository) {
+function repositoryURL(groupPath, repository, username) {
     const repositoryPath = [
         ...groupPath.split("/"),
         `${repository}.git`,
     ].map(encodeURIComponent).join("/");
-    return new URL(`/${repositoryPath}`, window.location.origin).href;
+    const url = new URL(`/${repositoryPath}`, window.location.origin);
+    url.username = username;
+    return url.href;
 }
 function currentGroup() {
     const prefix = "/groups/";
@@ -256,7 +258,7 @@ async function renderGroup(path, message) {
         list.className = "repository-list";
         for (const repository of data.repositories) {
             const item = element("li");
-            const cloneURL = repositoryURL(data.path, repository.name);
+            const cloneURL = repositoryURL(data.path, repository.name, data.username);
             const link = element("a", cloneURL);
             link.href = cloneURL;
             link.className = "repository-link";

@@ -53,6 +53,7 @@ type groupDetailOutput struct {
 	Body struct {
 		Path         string              `json:"path"`
 		Description  string              `json:"description"`
+		Username     string              `json:"username"`
 		Subgroups    []groupSummary      `json:"subgroups"`
 		Repositories []repositorySummary `json:"repositories"`
 	}
@@ -256,7 +257,8 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, input.Authorization, path, control.RoleRead); err != nil {
+	username, err := a.authorize(ctx, input.Authorization, path, control.RoleRead)
+	if err != nil {
 		return nil, err
 	}
 	groups, listErr := a.Storage.ListGroups()
@@ -267,6 +269,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	var current *storage.GroupInfo
 	output := &groupDetailOutput{}
 	output.Body.Path = path
+	output.Body.Username = username
 	if document, loadErr := a.Resolver.Controls.Load(ctx, path); loadErr == nil {
 		output.Body.Description = document.Description
 	}

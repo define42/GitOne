@@ -384,6 +384,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	}
 	var parent struct {
 		Description string `json:"description"`
+		Username    string `json:"username"`
 		Subgroups   []struct {
 			Path        string `json:"path"`
 			Description string `json:"description"`
@@ -398,6 +399,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	}
 	if len(parent.Subgroups) != 1 ||
 		parent.Description != "Product engineering" ||
+		parent.Username != "alice" ||
 		parent.Subgroups[0].Path != "engineering/backend" ||
 		parent.Subgroups[0].Description != "Backend services" ||
 		len(parent.Repositories) != 1 ||
@@ -416,6 +418,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	var detail struct {
 		Path         string `json:"path"`
 		Description  string `json:"description"`
+		Username     string `json:"username"`
 		Repositories []struct {
 			Name        string `json:"name"`
 			Description string `json:"description"`
@@ -426,6 +429,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	}
 	if detail.Path != "engineering/backend" ||
 		detail.Description != "Backend services" ||
+		detail.Username != "alice" ||
 		len(detail.Repositories) != 1 ||
 		detail.Repositories[0].Name != "api" ||
 		detail.Repositories[0].Description != "Backend API" {
@@ -460,7 +464,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		}
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=9">`) {
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=10">`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
 	}
@@ -479,7 +483,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		t.Fatal("served UI does not use the path-based group creation endpoint")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "navigator.clipboard") ||
-		!strings.Contains(assetResponse.Body.String(), "repositoryURL(data.path, repository.name)") {
+		!strings.Contains(assetResponse.Body.String(), "repositoryURL(data.path, repository.name, data.username)") {
 		t.Fatal("served UI does not provide copyable full repository URLs")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "initializeReadme.checked = true") {
