@@ -1,5 +1,7 @@
 GO ?= go
 RUN_ARGS ?=
+GITONE_BOOTSTRAP_USER ?= bootstrap
+GITONE_BOOTSTRAP_TOKEN ?= hello
 
 .PHONY: test run
 
@@ -7,4 +9,6 @@ test:
 	$(GO) test ./...
 
 run:
+	GITONE_BOOTSTRAP_USER="$(GITONE_BOOTSTRAP_USER)" \
+	GITONE_BOOTSTRAP_TOKEN="$(GITONE_BOOTSTRAP_TOKEN)" \
 	$(GO) run ./cmd/gitone $(RUN_ARGS)

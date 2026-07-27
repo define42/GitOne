@@ -17,6 +17,11 @@ import (
 
 type Store struct{ Root string }
 
+type GroupInfo struct {
+	Path         string
+	Repositories []string
+}
+
 func (s Store) GitPath(r repopath.Repository) (string, error) {
 	return repopath.SafeJoin(s.Root, append(r.Groups, r.Name+".git")...)
 }
@@ -30,6 +35,68 @@ func (s Store) GroupPath(group string) (string, error) {
 	}
 	return repopath.SafeJoin(s.Root, parts...)
 }
+
+func (s Store) ListGroups() ([]GroupInfo, error) {
+	root, err := repopath.SafeJoin(s.Root)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = os.Stat(root); errors.Is(err, os.ErrNotExist) {
+		return []GroupInfo{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	groups := []GroupInfo{}
+	var walk func(string, []string) error
+	walk = func(directory string, parts []string) error {
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			return err
+		}
+
+		hasControl := false
+		repositories := []string{}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			switch {
+			case entry.Name() == "control.git":
+				hasControl = true
+			case strings.HasSuffix(entry.Name(), ".git"):
+				repositories = append(repositories, strings.TrimSuffix(entry.Name(), ".git"))
+			}
+		}
+		if hasControl {
+			groups = append(groups, GroupInfo{
+				Path:         strings.Join(parts, "/"),
+				Repositories: repositories,
+			})
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() ||
+				strings.HasSuffix(entry.Name(), ".git") ||
+				strings.HasSuffix(entry.Name(), ".lfs") {
+				continue
+			}
+			nextParts := append(append([]string(nil), parts...), entry.Name())
+			if _, err := repopath.ParseGroup(strings.Join(nextParts, "/")); err != nil {
+				continue
+			}
+			if err := walk(filepath.Join(directory, entry.Name()), nextParts); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err = walk(root, nil); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
 func (s Store) CreateRepository(r repopath.Repository) error {
 	if r.Name == "control" {
 		return errors.New("reserved repository name")
@@ -66,10 +133,14 @@ func (s Store) CreateGroup(group, owner string) error {
 	if e != nil {
 		return e
 	}
+	root, e := repopath.SafeJoin(s.Root)
+	if e != nil {
+		return e
+	}
 	if _, e = os.Stat(gp); e == nil {
 		return errors.New("group exists")
 	}
-	if parent := filepath.Dir(gp); parent != s.Root {
+	if parent := filepath.Dir(gp); parent != root {
 		if _, e = os.Stat(filepath.Join(parent, "control.git")); e != nil {
 			return errors.New("parent group does not exist")
 		}

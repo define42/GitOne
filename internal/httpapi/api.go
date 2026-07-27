@@ -65,7 +65,7 @@ func (a API) createGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 409)
 		return
 	}
-	w.WriteHeader(201)
+	w.WriteHeader(http.StatusCreated)
 }
 func (a API) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	g := r.PathValue("path")
@@ -121,7 +121,7 @@ func (a API) createRepo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 409)
 		return
 	}
-	w.WriteHeader(201)
+	w.WriteHeader(http.StatusCreated)
 }
 func parseRepoPath(v string) (repopath.Repository, error) {
 	return func() (repopath.Repository, error) {

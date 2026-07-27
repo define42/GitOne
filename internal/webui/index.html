@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{if .Current}}{{.Current}} · {{end}}GitOne</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, sans-serif;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 48rem;
+      padding: 2rem 1rem;
+    }
+    header {
+      border-bottom: 1px solid;
+      margin-bottom: 2rem;
+    }
+    nav ol {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      list-style: none;
+      padding: 0;
+    }
+    nav li:not(:last-child)::after {
+      content: " /";
+    }
+    .message {
+      border: 1px solid;
+      padding: 0.75rem;
+    }
+    section {
+      margin: 2rem 0;
+    }
+    form {
+      display: grid;
+      gap: 1rem;
+      max-width: 28rem;
+    }
+    label {
+      display: grid;
+      gap: 0.25rem;
+    }
+    input, button {
+      box-sizing: border-box;
+      font: inherit;
+      padding: 0.6rem;
+    }
+    button {
+      cursor: pointer;
+      width: fit-content;
+    }
+    code {
+      font-size: 0.9em;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><a href="/">GitOne</a></h1>
+    <p>A small Git and Git LFS server.</p>
+  </header>
+
+  {{if .Message}}
+  <p class="message" role="status">{{.Message}}</p>
+  {{end}}
+
+  <main>
+    {{if .AtRoot}}
+    <section>
+      <h2>Groups</h2>
+      {{if .Groups}}
+      <ul>
+        {{range .Groups}}
+        <li><a href="{{.URL}}">{{.Name}}</a></li>
+        {{end}}
+      </ul>
+      {{else}}
+      <p>No groups have been created yet.</p>
+      {{end}}
+    </section>
+
+    <section>
+      <h2>Create group</h2>
+      <p>The authenticated Basic Auth user becomes the group owner.</p>
+      <form method="post" action="/ui/groups">
+        <label>
+          Group name
+          <input name="name" placeholder="engineering" required>
+        </label>
+        <button type="submit">Create group</button>
+      </form>
+    </section>
+    {{else}}
+    <nav aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/">Groups</a></li>
+        {{range .Breadcrumbs}}
+        <li><a href="{{.URL}}">{{.Name}}</a></li>
+        {{end}}
+      </ol>
+    </nav>
+
+    <h2>{{.Current}}</h2>
+
+    <section>
+      <h3>Subgroups</h3>
+      {{if .Groups}}
+      <ul>
+        {{range .Groups}}
+        <li><a href="{{.URL}}">{{.Name}}</a></li>
+        {{end}}
+      </ul>
+      {{else}}
+      <p>No subgroups.</p>
+      {{end}}
+    </section>
+
+    <section>
+      <h3>Repositories</h3>
+      {{if .Repositories}}
+      <ul>
+        {{range .Repositories}}
+        <li><code>{{.}}.git</code></li>
+        {{end}}
+      </ul>
+      {{else}}
+      <p>No repositories.</p>
+      {{end}}
+    </section>
+
+    <section>
+      <h3>Create subgroup</h3>
+      <form method="post" action="/ui/subgroups">
+        <input type="hidden" name="parent" value="{{.Current}}">
+        <label>
+          Subgroup name
+          <input name="name" placeholder="backend" required>
+        </label>
+        <button type="submit">Create subgroup</button>
+      </form>
+    </section>
+
+    <section>
+      <h3>Create repository</h3>
+      <form method="post" action="/ui/repositories">
+        <input type="hidden" name="group" value="{{.Current}}">
+        <label>
+          Repository name
+          <input name="name" placeholder="api" required>
+        </label>
+        <button type="submit">Create repository</button>
+      </form>
+    </section>
+    {{end}}
+  </main>
+</body>
+</html>

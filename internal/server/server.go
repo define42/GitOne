@@ -8,6 +8,7 @@ import (
 	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
+	"github.com/define42/GitOne/internal/webui"
 	"net/http"
 )
 
@@ -57,6 +58,12 @@ func New(c Config) http.Handler {
 	api := httpapi.API{Storage: st, Authorize: authorizeGroup}
 	mux.Handle("/api/", api.Routes())
 	mux.Handle("/healthz", api.Routes())
+	ui := webui.Handler{Storage: st, Authorize: authorizeGroup}
+	mux.Handle("GET /{$}", ui)
+	mux.Handle("GET /groups/{path...}", ui)
+	mux.Handle("POST /ui/groups", ui)
+	mux.Handle("POST /ui/subgroups", ui)
+	mux.Handle("POST /ui/repositories", ui)
 	lh := lfs.Handler{Storage: st, PublicURL: c.PublicURL, Authorize: authorizeRepo}
 	gh := githttp.Handler{Storage: st, Authorize: authorizeRepo}
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
