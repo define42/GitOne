@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -387,6 +389,188 @@ func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("out-of-scope repository creation returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestLFSBatchUploadAndDownloadOverHTTP(t *testing.T) {
+	root := t.TempDir()
+	var handler http.Handler
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	handler = New(Config{
+		Root:      root,
+		PublicURL: server.URL,
+		Directory: testLDAPDirectory(),
+	})
+
+	doRequest := func(
+		method, target string,
+		body []byte,
+		contentType string,
+		authenticated bool,
+	) (*http.Response, []byte) {
+		t.Helper()
+		request, err := http.NewRequest(method, target, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if authenticated {
+			request.SetBasicAuth("alice", "secret")
+		}
+		if contentType != "" {
+			request.Header.Set("Content-Type", contentType)
+		}
+		if contentType == "application/vnd.git-lfs+json" {
+			request.Header.Set("Accept", contentType)
+		}
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		responseBody, readErr := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		return response, responseBody
+	}
+
+	for _, path := range []string{
+		"/api/groups/engineering",
+		"/api/repositories/engineering%2Fassets",
+	} {
+		response, body := doRequest(http.MethodPost, server.URL+path, nil, "", true)
+		if response.StatusCode != http.StatusCreated {
+			t.Fatalf("create %s: status %d: %s", path, response.StatusCode, body)
+		}
+	}
+
+	content := []byte(strings.Repeat("GitOne LFS integration payload.\n", 128))
+	sum := sha256.Sum256(content)
+	oid := hex.EncodeToString(sum[:])
+	batchURL := server.URL + "/engineering/assets.git/info/lfs/objects/batch"
+
+	type lfsAction struct {
+		Href   string            `json:"href"`
+		Header map[string]string `json:"header"`
+	}
+	type lfsBatchObject struct {
+		OID     string               `json:"oid"`
+		Size    int64                `json:"size"`
+		Actions map[string]lfsAction `json:"actions"`
+		Error   *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	type lfsBatchResponse struct {
+		Transfer string           `json:"transfer"`
+		Objects  []lfsBatchObject `json:"objects"`
+	}
+
+	batch := func(operation string, authenticated bool) (*http.Response, lfsBatchResponse) {
+		t.Helper()
+		requestBody, err := json.Marshal(map[string]any{
+			"operation": operation,
+			"transfers": []string{"basic"},
+			"objects": []map[string]any{{
+				"oid":  oid,
+				"size": len(content),
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, responseBody := doRequest(
+			http.MethodPost,
+			batchURL,
+			requestBody,
+			"application/vnd.git-lfs+json",
+			authenticated,
+		)
+		var decoded lfsBatchResponse
+		if response.StatusCode == http.StatusOK {
+			if err = json.Unmarshal(responseBody, &decoded); err != nil {
+				t.Fatalf("decode %s batch response: %v: %s", operation, err, responseBody)
+			}
+		}
+		return response, decoded
+	}
+
+	unauthenticated, _ := batch("upload", false)
+	if unauthenticated.StatusCode != http.StatusUnauthorized ||
+		unauthenticated.Header.Get("WWW-Authenticate") != `Basic realm="GitOne"` {
+		t.Fatalf(
+			"unauthenticated batch returned %d with challenge %q",
+			unauthenticated.StatusCode,
+			unauthenticated.Header.Get("WWW-Authenticate"),
+		)
+	}
+
+	uploadResponse, uploadBatch := batch("upload", true)
+	if uploadResponse.StatusCode != http.StatusOK {
+		t.Fatalf("upload batch returned %d", uploadResponse.StatusCode)
+	}
+	if uploadResponse.Header.Get("Content-Type") != "application/vnd.git-lfs+json" {
+		t.Fatalf("unexpected upload batch content type: %q", uploadResponse.Header.Get("Content-Type"))
+	}
+	if uploadBatch.Transfer != "basic" ||
+		len(uploadBatch.Objects) != 1 ||
+		uploadBatch.Objects[0].OID != oid ||
+		uploadBatch.Objects[0].Size != int64(len(content)) ||
+		uploadBatch.Objects[0].Error != nil {
+		t.Fatalf("unexpected upload batch response: %#v", uploadBatch)
+	}
+	uploadAction, ok := uploadBatch.Objects[0].Actions["upload"]
+	expectedObjectURL := server.URL + "/engineering/assets.git/info/lfs/objects/" + oid
+	if !ok || uploadAction.Href != expectedObjectURL {
+		t.Fatalf("unexpected upload action: %#v", uploadBatch.Objects[0].Actions)
+	}
+
+	response, responseBody := doRequest(
+		http.MethodPut,
+		uploadAction.Href,
+		content,
+		"application/octet-stream",
+		true,
+	)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("LFS upload returned %d: %s", response.StatusCode, responseBody)
+	}
+
+	_, repeatedUpload := batch("upload", true)
+	if len(repeatedUpload.Objects) != 1 ||
+		repeatedUpload.Objects[0].Error != nil ||
+		len(repeatedUpload.Objects[0].Actions) != 0 {
+		t.Fatalf("stored object was offered for upload again: %#v", repeatedUpload)
+	}
+
+	downloadResponse, downloadBatch := batch("download", true)
+	if downloadResponse.StatusCode != http.StatusOK ||
+		downloadBatch.Transfer != "basic" ||
+		len(downloadBatch.Objects) != 1 ||
+		downloadBatch.Objects[0].Error != nil {
+		t.Fatalf("unexpected download batch response: %#v", downloadBatch)
+	}
+	downloadAction, ok := downloadBatch.Objects[0].Actions["download"]
+	if !ok || downloadAction.Href != expectedObjectURL {
+		t.Fatalf("unexpected download action: %#v", downloadBatch.Objects[0].Actions)
+	}
+
+	response, downloaded := doRequest(http.MethodGet, downloadAction.Href, nil, "", true)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("LFS download returned %d: %s", response.StatusCode, downloaded)
+	}
+	if !bytes.Equal(downloaded, content) {
+		t.Fatalf("downloaded LFS object differs: got %d bytes, want %d", len(downloaded), len(content))
+	}
+	if response.Header.Get("ETag") != `"`+oid+`"` {
+		t.Fatalf("unexpected LFS object ETag: %q", response.Header.Get("ETag"))
 	}
 }
 
