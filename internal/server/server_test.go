@@ -878,6 +878,7 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 
 	var commits struct {
 		Ref     string `json:"ref"`
+		Total   int    `json:"total"`
 		Commits []struct {
 			Message string `json:"message"`
 		} `json:"commits"`
@@ -886,6 +887,7 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if commits.Ref != "feature/docs" ||
+		commits.Total != 2 ||
 		len(commits.Commits) != 2 ||
 		commits.Commits[0].Message != "Add guide" {
 		t.Fatalf("unexpected repository commits: %#v", commits)

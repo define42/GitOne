@@ -114,6 +114,7 @@ interface RepositoryCommit {
 interface RepositoryCommits {
   repository: string;
   ref: string;
+  total: number;
   commits: RepositoryCommit[];
 }
 
@@ -1551,7 +1552,7 @@ function repositoryHistory(
 ): HTMLElement {
   const section = element("section");
   section.className = "repository-history content-section";
-  section.append(sectionHeading(`History for ${data.ref}`, data.commits.length));
+  section.append(sectionHeading(`History for ${data.ref}`, data.total));
   if (data.commits.length === 0) {
     section.append(emptyState("No commits yet."));
     return section;
@@ -2573,6 +2574,12 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     const commit = element("div");
     commit.className = "current-commit";
     commit.append(element("span", "Commit"), element("code", commitHash.slice(0, 12)));
+    const total = element(
+      "span",
+      `${commits.total} ${commits.total === 1 ? "commit" : "commits"}`,
+    );
+    total.className = "current-commit-total";
+    commit.append(total);
     branchControl.append(commit);
   }
   const repositoryActions = element("div");

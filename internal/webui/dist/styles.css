@@ -1571,16 +1571,26 @@ textarea:focus {
 }
 
 .current-commit {
+  align-items: center;
   color: var(--muted);
-  display: grid;
+  display: flex;
   font-size: 0.75rem;
-  gap: 0.15rem;
+  gap: 0.5rem;
   padding-bottom: 0.35rem;
 }
 
 .current-commit code {
   color: var(--text);
   font-size: 0.8rem;
+}
+
+.current-commit-total::before {
+  content: "·";
+  margin-right: 0.5rem;
+}
+
+.current-commit-total {
+  white-space: nowrap;
 }
 
 .repository-navigation {

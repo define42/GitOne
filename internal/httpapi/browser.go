@@ -191,6 +191,7 @@ type repositoryCommitsOutput struct {
 	Body struct {
 		Repository string                 `json:"repository"`
 		Ref        string                 `json:"ref"`
+		Total      int                    `json:"total" doc:"Total commits reachable from the selected reference"`
 		Commits    []repositoryCommitInfo `json:"commits"`
 	}
 }
@@ -630,10 +631,11 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 		limit = 20
 	}
 	commits := make([]repositoryCommitInfo, 0, limit)
-	stop := errors.New("commit limit reached")
+	total := 0
 	err = iterator.ForEach(func(current *object.Commit) error {
+		total++
 		if len(commits) >= limit {
-			return stop
+			return nil
 		}
 		commits = append(commits, repositoryCommitInfo{
 			Hash:      current.Hash.String(),
@@ -646,13 +648,14 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 		})
 		return nil
 	})
-	if err != nil && !errors.Is(err, stop) {
+	if err != nil {
 		return nil, huma.Error500InternalServerError("could not iterate over commits", err)
 	}
 
 	output := &repositoryCommitsOutput{}
 	output.Body.Repository = parsed.Full()
 	output.Body.Ref = input.Ref
+	output.Body.Total = total
 	output.Body.Commits = commits
 	return output, nil
 }
