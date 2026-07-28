@@ -29,6 +29,9 @@ func (d fakeDirectory) Authenticate(
 }
 
 func TestHashSecretUsesArgon2id(t *testing.T) {
+	if _, err := auth.HashSecret(""); err == nil {
+		t.Fatal("empty secret was hashed")
+	}
 	hash, err := auth.HashSecret("correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +47,21 @@ func TestHashSecretUsesArgon2id(t *testing.T) {
 	}
 	if auth.VerifySecret("sha256:deadbeef", "anything") {
 		t.Fatal("legacy unsalted SHA-256 hash verified")
+	}
+	parts := strings.Split(hash, "$")
+	malformed := []string{
+		strings.Join([]string{"", "argon2id", "v=16", parts[3], parts[4], parts[5]}, "$"),
+		strings.Join([]string{"", "argon2id", parts[2], "m=65536,t=3", parts[4], parts[5]}, "$"),
+		strings.Join([]string{"", "argon2id", parts[2], "m=1,t=3,p=2", parts[4], parts[5]}, "$"),
+		strings.Join([]string{"", "argon2id", parts[2], "m=65536,t=0,p=2", parts[4], parts[5]}, "$"),
+		strings.Join([]string{"", "argon2id", parts[2], "m=65536,t=3,p=0", parts[4], parts[5]}, "$"),
+		strings.Join([]string{"", "argon2id", parts[2], parts[3], "bad!", parts[5]}, "$"),
+		strings.Join([]string{"", "argon2id", parts[2], parts[3], parts[4], "bad!"}, "$"),
+	}
+	for _, encoded := range malformed {
+		if auth.VerifySecret(encoded, "correct horse battery staple") {
+			t.Fatalf("malformed hash verified: %q", encoded)
+		}
 	}
 }
 

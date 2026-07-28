@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/define42/GitOne/internal/control"
@@ -202,5 +204,44 @@ func TestProtocolRoutesAndFailures(t *testing.T) {
 	response = request(failedPolicy, http.MethodPost, "/g/r.git/info/lfs/objects/verify")
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("failed policy returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestOpenObjectValidatesAndReadsStoredObject(t *testing.T) {
+	store := storage.Store{Root: t.TempDir()}
+	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "docs"}
+	content := []byte("stored LFS object")
+	sum := sha256.Sum256(content)
+	oid := hex.EncodeToString(sum[:])
+
+	if _, err := OpenObject(store, repository, "invalid"); err == nil {
+		t.Fatal("invalid object ID was accepted")
+	}
+	if _, err := OpenObject(store, repository, oid); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing object returned %v", err)
+	}
+	path, err := objectPath(store, repository, oid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, content, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	file, err := OpenObject(store, repository, oid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	got, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("OpenObject() read %q, want %q", got, content)
 	}
 }

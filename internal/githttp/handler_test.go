@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
@@ -32,6 +33,115 @@ func TestControlRejectsTags(t *testing.T) {
 	req.Commands = []*packp.Command{{Name: plumbing.NewTagReferenceName("v1"), Old: plumbing.NewHash("1111111111111111111111111111111111111111"), New: plumbing.NewHash("2222222222222222222222222222222222222222")}}
 	if e := validateControlRefs(req); e == nil {
 		t.Fatal("expected rejection")
+	}
+}
+
+func TestControlRefValidationRejectsUnsafeMainChanges(t *testing.T) {
+	hash := plumbing.NewHash("1111111111111111111111111111111111111111")
+	for _, test := range []struct {
+		name     string
+		commands []*packp.Command
+	}{
+		{name: "no commands"},
+		{
+			name: "multiple commands",
+			commands: []*packp.Command{
+				{Name: plumbing.NewBranchReferenceName("main"), Old: hash, New: hash},
+				{Name: plumbing.NewBranchReferenceName("other"), Old: hash, New: hash},
+			},
+		},
+		{
+			name: "delete main",
+			commands: []*packp.Command{{
+				Name: plumbing.NewBranchReferenceName("main"),
+				Old:  hash,
+				New:  plumbing.ZeroHash,
+			}},
+		},
+		{
+			name: "create main",
+			commands: []*packp.Command{{
+				Name: plumbing.NewBranchReferenceName("main"),
+				Old:  plumbing.ZeroHash,
+				New:  hash,
+			}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := packp.NewReferenceUpdateRequest()
+			request.Commands = test.commands
+			if err := validateControlRefs(request); err == nil {
+				t.Fatal("unsafe control reference update was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateControlUpdateWithStoredHistory(t *testing.T) {
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", "initial"); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "control"}
+	path, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := head.Hash()
+	controls := control.NewStore(store.Root)
+	document, err := controls.Load(t.Context(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Description = "updated"
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	head, err = repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := head.Hash()
+	command := &packp.Command{
+		Name: plumbing.NewBranchReferenceName("main"),
+		Old:  initial,
+		New:  updated,
+	}
+	if err = validateControlUpdate(repository, "engineering", command); err != nil {
+		t.Fatalf("valid fast-forward control update: %v", err)
+	}
+
+	missing := plumbing.NewHash("4444444444444444444444444444444444444444")
+	command.Old = missing
+	if err = validateControlUpdate(repository, "engineering", command); err == nil ||
+		!strings.Contains(err.Error(), "load current control commit") {
+		t.Fatalf("missing old commit returned %v", err)
+	}
+	command.Old = initial
+	command.New = missing
+	if err = validateControlUpdate(repository, "engineering", command); err == nil ||
+		!strings.Contains(err.Error(), "new control revision") {
+		t.Fatalf("missing new commit returned %v", err)
+	}
+	command.Old = updated
+	command.New = initial
+	if err = validateControlUpdate(repository, "engineering", command); err == nil ||
+		!strings.Contains(err.Error(), "fast-forward") {
+		t.Fatalf("non-fast-forward update returned %v", err)
+	}
+	command.Old = initial
+	command.New = updated
+	if err = validateControlUpdate(repository, "other-group", command); err == nil ||
+		!strings.Contains(err.Error(), "invalid control.json") {
+		t.Fatalf("mismatched control document returned %v", err)
 	}
 }
 
@@ -77,6 +187,132 @@ func TestAuthenticatedUserWithoutPermissionIsForbidden(t *testing.T) {
 
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d", http.StatusForbidden, response.Code)
+	}
+}
+
+func TestSmartHTTPRoutesAndMalformedRequests(t *testing.T) {
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "docs"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := Handler{Storage: store}
+
+	for _, test := range []struct {
+		name, method, path, body string
+		status                   int
+		contentType              string
+	}{
+		{
+			name:   "invalid repository path",
+			method: http.MethodGet,
+			path:   "/docs.git/info/refs?service=git-upload-pack",
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "unknown route",
+			method: http.MethodGet,
+			path:   "/engineering/docs.git",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "unsupported advertised service",
+			method: http.MethodGet,
+			path:   "/engineering/docs.git/info/refs?service=git-archive",
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "missing advertised repository",
+			method: http.MethodGet,
+			path:   "/engineering/missing.git/info/refs?service=git-upload-pack",
+			status: http.StatusNotFound,
+		},
+		{
+			name:        "advertise upload pack",
+			method:      http.MethodGet,
+			path:        "/engineering/docs.git/info/refs?service=git-upload-pack",
+			status:      http.StatusOK,
+			contentType: "application/x-git-upload-pack-advertisement",
+		},
+		{
+			name:        "advertise receive pack",
+			method:      http.MethodGet,
+			path:        "/engineering/docs.git/info/refs?service=git-receive-pack",
+			status:      http.StatusOK,
+			contentType: "application/x-git-receive-pack-advertisement",
+		},
+		{
+			name:   "upload pack wrong method",
+			method: http.MethodGet,
+			path:   "/engineering/docs.git/git-upload-pack",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "receive pack wrong method",
+			method: http.MethodGet,
+			path:   "/engineering/docs.git/git-receive-pack",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "malformed upload pack",
+			method: http.MethodPost,
+			path:   "/engineering/docs.git/git-upload-pack",
+			body:   "not a packet line",
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "malformed receive pack",
+			method: http.MethodPost,
+			path:   "/engineering/docs.git/git-receive-pack",
+			body:   "not a packet line",
+			status: http.StatusBadRequest,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.status, response.Body.String())
+			}
+			if test.contentType != "" && response.Header().Get("Content-Type") != test.contentType {
+				t.Fatalf("content type = %q, want %q", response.Header().Get("Content-Type"), test.contentType)
+			}
+		})
+	}
+}
+
+func TestReceiveStatusErrorFormats(t *testing.T) {
+	handler := Handler{}
+	request := packp.NewReferenceUpdateRequest()
+	response := httptest.NewRecorder()
+	handler.writeReceiveError(response, request, "ok", errors.New("rejected"))
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "rejected") {
+		t.Fatalf("plain receive error = %d %q", response.Code, response.Body.String())
+	}
+
+	if err := request.Capabilities.Set(capability.ReportStatus); err != nil {
+		t.Fatal(err)
+	}
+	request.Commands = []*packp.Command{{
+		Name: plumbing.NewBranchReferenceName("main"),
+		Old:  plumbing.NewHash("1111111111111111111111111111111111111111"),
+		New:  plumbing.NewHash("2222222222222222222222222222222222222222"),
+	}}
+	response = httptest.NewRecorder()
+	handler.writeReceiveError(response, request, "unpack failed", errors.New("rejected"))
+	if response.Code != http.StatusOK ||
+		response.Header().Get("Content-Type") != "application/x-git-receive-pack-result" ||
+		!strings.Contains(response.Body.String(), "unpack failed") ||
+		!strings.Contains(response.Body.String(), "rejected") {
+		t.Fatalf("report-status receive error = %d %q", response.Code, response.Body.String())
 	}
 }
 

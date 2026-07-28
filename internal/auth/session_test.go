@@ -46,6 +46,12 @@ func TestSessionManagerSignsAndEncryptsCookie(t *testing.T) {
 	if _, err = manager.Username(tampered); err == nil {
 		t.Fatal("tampered session cookie was accepted")
 	}
+	if _, err = manager.CookieHeader(" "); err == nil {
+		t.Fatal("empty session username was accepted")
+	}
+	if _, err = manager.Username(""); err == nil {
+		t.Fatal("missing session cookie was accepted")
+	}
 	if header := manager.ClearCookieHeader(); !strings.Contains(header, "Max-Age=0") {
 		t.Fatalf("logout did not clear the session cookie: %s", header)
 	}
@@ -100,6 +106,8 @@ func TestSessionConfigurationRejectsInvalidValues(t *testing.T) {
 		{name: "hash without block", hash: validHash},
 		{name: "block without hash", block: validBlock},
 		{name: "invalid hash encoding", hash: "not base64!", block: validBlock},
+		{name: "invalid block encoding", hash: validHash, block: "not base64!"},
+		{name: "invalid maximum age", hash: validHash, block: validBlock, maxAge: "tomorrow"},
 		{name: "maximum age too short", hash: validHash, block: validBlock, maxAge: "500ms"},
 		{name: "invalid secure flag", hash: validHash, block: validBlock, secure: "sometimes"},
 	} {
@@ -146,5 +154,18 @@ func TestSessionConfigurationRejectsInvalidValues(t *testing.T) {
 				t.Fatal("invalid session manager configuration was accepted")
 			}
 		})
+	}
+}
+
+func TestSessionManagerUsesDefaultMaximumAge(t *testing.T) {
+	manager, err := NewSessionManager(SessionConfig{
+		HashKey:  []byte(strings.Repeat("h", 64)),
+		BlockKey: []byte(strings.Repeat("b", 16)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.maxAge != defaultSessionDuration {
+		t.Fatalf("default maximum age = %s, want %s", manager.maxAge, defaultSessionDuration)
 	}
 }

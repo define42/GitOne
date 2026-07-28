@@ -44,9 +44,51 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			},
 		},
 		{
+			name: "invalid member role",
+			mutate: func(document *Document) {
+				document.Members["bob"] = Role("superuser")
+			},
+		},
+		{
+			name: "token without name",
+			mutate: func(document *Document) {
+				document.Tokens = []Token{{Key: "deploy", Hash: "hash", Role: RoleWrite}}
+			},
+		},
+		{
+			name: "token without key",
+			mutate: func(document *Document) {
+				document.Tokens = []Token{{Name: "ci", Hash: "hash", Role: RoleWrite}}
+			},
+		},
+		{
 			name: "token without hash",
 			mutate: func(document *Document) {
 				document.Tokens = []Token{{Name: "ci", Key: "deploy", Role: RoleWrite}}
+			},
+		},
+		{
+			name: "invalid token role",
+			mutate: func(document *Document) {
+				document.Tokens = []Token{{Name: "ci", Key: "deploy", Hash: "hash", Role: Role("superuser")}}
+			},
+		},
+		{
+			name: "invalid repository scope",
+			mutate: func(document *Document) {
+				document.Tokens = []Token{{
+					Name: "ci", Key: "deploy", Hash: "hash", Role: RoleWrite,
+					Repositories: []string{"nested/api"},
+				}}
+			},
+		},
+		{
+			name: "duplicate token name",
+			mutate: func(document *Document) {
+				document.Tokens = []Token{
+					{Name: "ci", Key: "deploy", Hash: "sha256:a", Role: RoleWrite},
+					{Name: "ci", Key: "release", Hash: "sha256:b", Role: RoleWrite},
+				}
 			},
 		},
 		{
@@ -56,6 +98,12 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 					{Name: "ci", Key: "deploy", Hash: "sha256:a", Role: RoleWrite},
 					{Name: "release", Key: "deploy", Hash: "sha256:b", Role: RoleWrite},
 				}
+			},
+		},
+		{
+			name: "invalid repository visibility",
+			mutate: func(document *Document) {
+				document.Repositories["api"] = RepositoryPolicy{Visibility: "secret"}
 			},
 		},
 		{

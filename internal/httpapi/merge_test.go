@@ -1,14 +1,98 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
+	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+func storeTestBlob(t *testing.T, repository *git.Repository, content []byte) plumbing.Hash {
+	t.Helper()
+	encoded := &plumbing.MemoryObject{}
+	encoded.SetType(plumbing.BlobObject)
+	encoded.SetSize(int64(len(content)))
+	writer, err := encoded.Writer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = writer.Write(content); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := repository.Storer.SetEncodedObject(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
+func storeTestTree(
+	t *testing.T,
+	repository *git.Repository,
+	entries ...object.TreeEntry,
+) *object.Tree {
+	t.Helper()
+	sort.Sort(object.TreeEntrySorter(entries))
+	tree := &object.Tree{Entries: entries}
+	encoded := &plumbing.MemoryObject{}
+	if err := tree.Encode(encoded); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := repository.Storer.SetEncodedObject(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := repository.TreeObject(hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stored
+}
+
+func storeTestCommit(
+	t *testing.T,
+	repository *git.Repository,
+	tree *object.Tree,
+	parents ...plumbing.Hash,
+) *object.Commit {
+	t.Helper()
+	signature := object.Signature{
+		Name:  "alice",
+		Email: "alice@example.com",
+		When:  time.Unix(1, 0).UTC(),
+	}
+	commit := &object.Commit{
+		Author:       signature,
+		Committer:    signature,
+		Message:      "test commit",
+		TreeHash:     tree.Hash,
+		ParentHashes: parents,
+	}
+	encoded := &plumbing.MemoryObject{}
+	if err := commit.Encode(encoded); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := repository.Storer.SetEncodedObject(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := repository.CommitObject(hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stored
+}
 
 func TestMergeTextLines(t *testing.T) {
 	base := "one\ntwo\nthree\nfour\n"
@@ -201,5 +285,330 @@ func TestMergeFileEntriesWithStoredGitBlobs(t *testing.T) {
 		true,
 	); err == nil || errors.Is(err, errUnmergeableBlob) {
 		t.Fatalf("missing base blob returned %v", err)
+	}
+}
+
+func TestMergeTreesWithStoredGitObjects(t *testing.T) {
+	repository, err := git.PlainInit(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeBlob := func(content string) plumbing.Hash {
+		t.Helper()
+		encoded := &plumbing.MemoryObject{}
+		encoded.SetType(plumbing.BlobObject)
+		encoded.SetSize(int64(len(content)))
+		writer, writerErr := encoded.Writer()
+		if writerErr != nil {
+			t.Fatal(writerErr)
+		}
+		if _, writerErr = writer.Write([]byte(content)); writerErr != nil {
+			_ = writer.Close()
+			t.Fatal(writerErr)
+		}
+		if writerErr = writer.Close(); writerErr != nil {
+			t.Fatal(writerErr)
+		}
+		hash, storeErr := repository.Storer.SetEncodedObject(encoded)
+		if storeErr != nil {
+			t.Fatal(storeErr)
+		}
+		return hash
+	}
+	storeTree := func(entries []object.TreeEntry) *object.Tree {
+		t.Helper()
+		sort.Sort(object.TreeEntrySorter(entries))
+		tree := &object.Tree{Entries: entries}
+		encoded := &plumbing.MemoryObject{}
+		if encodeErr := tree.Encode(encoded); encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		hash, storeErr := repository.Storer.SetEncodedObject(encoded)
+		if storeErr != nil {
+			t.Fatal(storeErr)
+		}
+		stored, loadErr := repository.TreeObject(hash)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		return stored
+	}
+	fileEntry := func(name string, hash plumbing.Hash) object.TreeEntry {
+		return object.TreeEntry{Name: name, Mode: filemode.Regular, Hash: hash}
+	}
+	dirEntry := func(name string, tree *object.Tree) object.TreeEntry {
+		return object.TreeEntry{Name: name, Mode: filemode.Dir, Hash: tree.Hash}
+	}
+
+	baseHash := storeBlob("one\ntwo\nthree\n")
+	targetHash := storeBlob("ONE\ntwo\nthree\n")
+	sourceHash := storeBlob("one\ntwo\nTHREE\n")
+	targetNewHash := storeBlob("target addition\n")
+	sourceNewHash := storeBlob("source addition\n")
+	baseNested := storeTree([]object.TreeEntry{fileEntry("note.txt", baseHash)})
+	targetNested := storeTree([]object.TreeEntry{fileEntry("note.txt", targetHash)})
+	sourceNested := storeTree([]object.TreeEntry{fileEntry("note.txt", sourceHash)})
+
+	base := storeTree([]object.TreeEntry{
+		dirEntry("docs", baseNested),
+		fileEntry("same.txt", baseHash),
+		fileEntry("source-change.txt", baseHash),
+		fileEntry("source-delete.txt", baseHash),
+		fileEntry("target-change.txt", baseHash),
+		fileEntry("target-delete.txt", baseHash),
+	})
+	target := storeTree([]object.TreeEntry{
+		dirEntry("docs", targetNested),
+		fileEntry("same.txt", baseHash),
+		fileEntry("source-change.txt", baseHash),
+		fileEntry("source-delete.txt", baseHash),
+		fileEntry("target-change.txt", targetHash),
+		fileEntry("target-new.txt", targetNewHash),
+	})
+	source := storeTree([]object.TreeEntry{
+		dirEntry("docs", sourceNested),
+		fileEntry("same.txt", baseHash),
+		fileEntry("source-change.txt", sourceHash),
+		fileEntry("source-new.txt", sourceNewHash),
+		fileEntry("target-change.txt", baseHash),
+		fileEntry("target-delete.txt", baseHash),
+	})
+
+	previewHash, conflicts, err := mergeTrees(repository, base, target, source, "", false)
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("preview merge: conflicts=%v err=%v", conflicts, err)
+	}
+	if _, err = repository.TreeObject(previewHash); err == nil {
+		t.Fatal("preview merge persisted its tree")
+	}
+
+	mergedHash, conflicts, err := mergeTrees(repository, base, target, source, "", true)
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("persist merge: conflicts=%v err=%v", conflicts, err)
+	}
+	merged, err := repository.TreeObject(mergedHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedEntries := treeEntries(merged)
+	for name, wantHash := range map[string]plumbing.Hash{
+		"same.txt":          baseHash,
+		"source-change.txt": sourceHash,
+		"source-new.txt":    sourceNewHash,
+		"target-change.txt": targetHash,
+		"target-new.txt":    targetNewHash,
+	} {
+		entry := mergedEntries[name]
+		if entry == nil || entry.Hash != wantHash {
+			t.Fatalf("merged entry %q = %#v, want hash %s", name, entry, wantHash)
+		}
+	}
+	for _, name := range []string{"source-delete.txt", "target-delete.txt"} {
+		if mergedEntries[name] != nil {
+			t.Fatalf("deleted entry %q remains in merged tree", name)
+		}
+	}
+	docs, err := repository.TreeObject(mergedEntries["docs"].Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := treeEntries(docs)["note.txt"]
+	noteContent, err := readMergeBlob(repository, note.Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(noteContent) != "ONE\ntwo\nTHREE\n" {
+		t.Fatalf("nested merge content = %q", noteContent)
+	}
+
+	conflictingSourceHash := storeBlob("SOURCE\ntwo\nthree\n")
+	conflictingSourceTree := storeTree([]object.TreeEntry{
+		fileEntry("note.txt", conflictingSourceHash),
+	})
+	fileKindHash := storeBlob("plain file\n")
+	dirKindTree := storeTree([]object.TreeEntry{fileEntry("nested.txt", baseHash)})
+	conflictBase := storeTree([]object.TreeEntry{
+		dirEntry("docs", baseNested),
+	})
+	conflictTarget := storeTree([]object.TreeEntry{
+		dirEntry("docs", targetNested),
+		fileEntry("kind", fileKindHash),
+	})
+	conflictSource := storeTree([]object.TreeEntry{
+		dirEntry("docs", conflictingSourceTree),
+		dirEntry("kind", dirKindTree),
+	})
+	conflictHash, conflicts, err := mergeTrees(
+		repository,
+		conflictBase,
+		conflictTarget,
+		conflictSource,
+		"",
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 2 ||
+		conflicts[0] != "docs/note.txt" ||
+		conflicts[1] != "kind" {
+		t.Fatalf("unexpected tree conflicts: %v", conflicts)
+	}
+	if _, err = repository.TreeObject(conflictHash); err == nil {
+		t.Fatal("conflicting merge persisted its tree")
+	}
+}
+
+func TestAssessBranchMergeWithStoredCommitGraphs(t *testing.T) {
+	repository, err := git.PlainInit(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := storeTestTree(t, repository)
+	root := storeTestCommit(t, repository, empty)
+	target := storeTestCommit(t, repository, empty, root.Hash)
+	branchBlob := storeTestBlob(t, repository, []byte("source branch\n"))
+	sourceTreeOnly := storeTestTree(t, repository, object.TreeEntry{
+		Name: "source.txt", Mode: filemode.Regular, Hash: branchBlob,
+	})
+	source := storeTestCommit(t, repository, sourceTreeOnly, root.Hash)
+
+	base, clean, conflicts, err := assessBranchMerge(repository, root, root)
+	if err != nil || !clean || base.Hash != root.Hash || len(conflicts) != 0 {
+		t.Fatalf("same commit assessment = %v, %v, %v, %v", base, clean, conflicts, err)
+	}
+	base, clean, conflicts, err = assessBranchMerge(repository, target, root)
+	if err != nil || !clean || base.Hash != root.Hash || len(conflicts) != 0 {
+		t.Fatalf("source ancestor assessment = %v, %v, %v, %v", base, clean, conflicts, err)
+	}
+	base, clean, conflicts, err = assessBranchMerge(repository, root, source)
+	if err != nil || !clean || base.Hash != root.Hash || len(conflicts) != 0 {
+		t.Fatalf("target ancestor assessment = %v, %v, %v, %v", base, clean, conflicts, err)
+	}
+	base, clean, conflicts, err = assessBranchMerge(repository, target, source)
+	if err != nil || !clean || base.Hash != root.Hash || len(conflicts) != 0 {
+		t.Fatalf("clean divergence assessment = %v, %v, %v, %v", base, clean, conflicts, err)
+	}
+
+	unrelated := storeTestCommit(t, repository, sourceTreeOnly)
+	base, clean, conflicts, err = assessBranchMerge(repository, target, unrelated)
+	if err != nil || clean || base != nil ||
+		len(conflicts) != 1 || conflicts[0] != "No single merge base" {
+		t.Fatalf("unrelated history assessment = %v, %v, %v, %v", base, clean, conflicts, err)
+	}
+
+	baseBlob := storeTestBlob(t, repository, []byte("base\n"))
+	targetBlob := storeTestBlob(t, repository, []byte("target\n"))
+	sourceBlob := storeTestBlob(t, repository, []byte("source\n"))
+	baseTree := storeTestTree(t, repository, object.TreeEntry{
+		Name: "notes.txt", Mode: filemode.Regular, Hash: baseBlob,
+	})
+	targetTree := storeTestTree(t, repository, object.TreeEntry{
+		Name: "notes.txt", Mode: filemode.Regular, Hash: targetBlob,
+	})
+	sourceTree := storeTestTree(t, repository, object.TreeEntry{
+		Name: "notes.txt", Mode: filemode.Regular, Hash: sourceBlob,
+	})
+	conflictRoot := storeTestCommit(t, repository, baseTree)
+	conflictTarget := storeTestCommit(t, repository, targetTree, conflictRoot.Hash)
+	conflictSource := storeTestCommit(t, repository, sourceTree, conflictRoot.Hash)
+	base, clean, conflicts, err = assessBranchMerge(
+		repository,
+		conflictTarget,
+		conflictSource,
+	)
+	if err != nil || clean || base.Hash != conflictRoot.Hash ||
+		len(conflicts) != 1 || conflicts[0] != "notes.txt" {
+		t.Fatalf("conflict assessment = %v, %v, %v, %v", base, clean, conflicts, err)
+	}
+}
+
+func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
+	repository, err := git.PlainInit(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := storeTestBlob(t, repository, []byte("one\ntwo\n"))
+	modified := storeTestBlob(t, repository, []byte("one\nchanged\nthree"))
+	added := storeTestBlob(t, repository, []byte("new\n"))
+	binaryBefore := storeTestBlob(t, repository, []byte{'a', 0, 'b'})
+	binaryAfter := storeTestBlob(t, repository, []byte{'c', 0, 'd'})
+	from := storeTestTree(
+		t,
+		repository,
+		object.TreeEntry{Name: "deleted.txt", Mode: filemode.Regular, Hash: original},
+		object.TreeEntry{Name: "modified.txt", Mode: filemode.Regular, Hash: original},
+		object.TreeEntry{Name: "binary.dat", Mode: filemode.Regular, Hash: binaryBefore},
+	)
+	to := storeTestTree(
+		t,
+		repository,
+		object.TreeEntry{Name: "added.txt", Mode: filemode.Regular, Hash: added},
+		object.TreeEntry{Name: "modified.txt", Mode: filemode.Regular, Hash: modified},
+		object.TreeEntry{Name: "binary.dat", Mode: filemode.Regular, Hash: binaryAfter},
+	)
+	files, err := compareTrees(context.Background(), from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := make(map[string]repositoryComparisonFile, len(files))
+	for _, file := range files {
+		byPath[file.Path] = file
+	}
+	if byPath["added.txt"].Status != "added" ||
+		byPath["deleted.txt"].Status != "deleted" {
+		t.Fatalf("missing add/delete statuses: %#v", byPath)
+	}
+	modification := byPath["modified.txt"]
+	if modification.Status != "modified" ||
+		modification.Additions != 2 ||
+		modification.Deletions != 1 ||
+		!strings.Contains(modification.Patch, "changed") {
+		t.Fatalf("unexpected text modification: %#v", modification)
+	}
+	if !byPath["binary.dat"].Binary || byPath["binary.dat"].Patch != "" {
+		t.Fatalf("unexpected binary modification: %#v", byPath["binary.dat"])
+	}
+}
+
+func TestMergeLineHelpers(t *testing.T) {
+	for content, want := range map[string]int{
+		"":       0,
+		"one":    1,
+		"one\n":  1,
+		"a\nb\n": 2,
+	} {
+		if got := diffLineCount(content); got != want {
+			t.Fatalf("diffLineCount(%q) = %d, want %d", content, got, want)
+		}
+	}
+	if got := splitTextLines(""); got != nil {
+		t.Fatalf("splitTextLines(empty) = %#v", got)
+	}
+	if got := splitTextLines("one\ntwo"); len(got) != 2 ||
+		got[0] != "one\n" || got[1] != "two" {
+		t.Fatalf("splitTextLines() = %#v", got)
+	}
+
+	base := lineEdit{start: 1, end: 2, replacement: []string{"changed\n"}}
+	if !editsEqual(base, base) ||
+		editsEqual(base, lineEdit{start: 0, end: 2, replacement: base.replacement}) ||
+		editsEqual(base, lineEdit{start: 1, end: 2}) ||
+		editsEqual(base, lineEdit{start: 1, end: 2, replacement: []string{"other\n"}}) {
+		t.Fatal("edit equality produced an incorrect result")
+	}
+	for _, test := range []struct {
+		left, right lineEdit
+		want        bool
+	}{
+		{left: lineEdit{start: 1, end: 1}, right: lineEdit{start: 1, end: 1}, want: true},
+		{left: lineEdit{start: 1, end: 1}, right: lineEdit{start: 0, end: 2}, want: true},
+		{left: lineEdit{start: 0, end: 2}, right: lineEdit{start: 1, end: 1}, want: true},
+		{left: lineEdit{start: 0, end: 2}, right: lineEdit{start: 1, end: 3}, want: true},
+		{left: lineEdit{start: 0, end: 1}, right: lineEdit{start: 1, end: 2}, want: false},
+	} {
+		if got := editsOverlap(test.left, test.right); got != test.want {
+			t.Fatalf("editsOverlap(%#v, %#v) = %v", test.left, test.right, got)
+		}
 	}
 }

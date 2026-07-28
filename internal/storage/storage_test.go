@@ -5,12 +5,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func assertMainDefaultWithoutMaster(t *testing.T, repository *git.Repository, mainExists bool) {
@@ -512,5 +515,188 @@ func TestRenameGroupMovesNestedRepositoriesAndRejectsInvalidDestinations(t *test
 	}
 	if _, err := git.PlainOpen(filepath.Join(root, "platform", "backend", "api.git")); err != nil {
 		t.Fatalf("failed group rename moved nested repository: %v", err)
+	}
+}
+
+func TestRepositoryDescriptionHandlesMissingInvalidAndBrokenMetadata(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	readmePath := repopath.Repository{Groups: []string{"engineering"}, Name: "readme"}
+	if err := store.CreateRepository(readmePath, CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if description, err := store.RepositoryDescription(readmePath); err != nil || description != "" {
+		t.Fatalf("README-only description = %q, %v", description, err)
+	}
+
+	invalidPath := repopath.Repository{Groups: []string{"engineering"}, Name: "invalid"}
+	if err := store.CreateRepository(invalidPath, CreateRepositoryOptions{
+		Description: "valid initially",
+		Author:      "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitPath, err := store.GitPath(invalidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(t.TempDir(), "invalid")
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(checkout, ".gitone.json"), []byte("{invalid"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repository.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Add(".gitone.json"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Commit("Break metadata", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "alice",
+			Email: "alice@localhost",
+			When:  time.Now().UTC(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.Push(&git.PushOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.RepositoryDescription(invalidPath); err == nil ||
+		!strings.Contains(err.Error(), "read .gitone.json") {
+		t.Fatalf("invalid metadata error = %v", err)
+	}
+
+	bare, err := git.PlainOpen(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = bare.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("main"),
+		plumbing.NewHash("4444444444444444444444444444444444444444"),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.RepositoryDescription(invalidPath); err == nil {
+		t.Fatal("description accepted a branch pointing to a missing commit")
+	}
+}
+
+func TestUpdateGroupControlRejectsInvalidStateAndUsesDefaultAuthor(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	controls := control.NewStore(root)
+	document, err := controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := document
+	invalid.Members = map[string]control.Role{"alice": control.RoleRead}
+	if err = store.UpdateGroupControl("engineering", invalid, "alice"); err == nil {
+		t.Fatal("invalid control document was committed")
+	}
+	if err = store.UpdateGroupControl("missing", document, "alice"); err == nil {
+		t.Fatal("control document was written to a missing group")
+	}
+
+	document.Description = "Updated without an explicit author"
+	if err = store.UpdateGroupControl("engineering", document, ""); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(filepath.Join(root, "engineering", "control.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commit.Author.Name != "GitOne" {
+		t.Fatalf("default control author = %q", commit.Author.Name)
+	}
+
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("main"),
+		plumbing.NewHash("5555555555555555555555555555555555555555"),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err == nil {
+		t.Fatal("control update accepted a missing parent commit")
+	}
+}
+
+func TestStorageLifecycleErrorBranches(t *testing.T) {
+	missingRoot := filepath.Join(t.TempDir(), "missing")
+	if groups, err := (Store{Root: missingRoot}).ListGroups(); err != nil || len(groups) != 0 {
+		t.Fatalf("missing root groups = %#v, %v", groups, err)
+	}
+	fileRoot := filepath.Join(t.TempDir(), "root-file")
+	if err := os.WriteFile(fileRoot, []byte("not a directory"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Store{Root: fileRoot}).ListGroups(); err == nil {
+		t.Fatal("file storage root was accepted")
+	}
+
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateGroup("engineering", "alice", ""); err == nil {
+		t.Fatal("duplicate group was created")
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, CreateRepositoryOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteGroup("engineering"); err == nil {
+		t.Fatal("non-empty group was deleted")
+	}
+	for _, name := range []string{"", "control", "../outside"} {
+		if err := store.RenameRepository(repositoryPath, name); err == nil {
+			t.Fatalf("repository was renamed to invalid name %q", name)
+		}
+	}
+
+	lfsPath, err := store.LFSPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.RemoveAll(lfsPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.RenameRepository(repositoryPath, "service"); err != nil {
+		t.Fatalf("rename Git-only repository: %v", err)
+	}
+	renamed := repopath.Repository{Groups: []string{"engineering"}, Name: "service"}
+	if err = store.DeleteRepository(renamed); err != nil {
+		t.Fatalf("delete Git-only repository: %v", err)
+	}
+	if err = store.DeleteRepository(renamed); err == nil {
+		t.Fatal("missing repository was deleted twice")
+	}
+	if err = store.DeleteGroup("missing"); err == nil {
+		t.Fatal("missing group was deleted")
 	}
 }

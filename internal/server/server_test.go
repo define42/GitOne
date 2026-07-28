@@ -1903,6 +1903,123 @@ func TestCompareAndMergeRepositoryBranches(t *testing.T) {
 	if conflictTargetReference.Hash() != conflictTarget {
 		t.Fatalf("conflicting merge moved target from %s to %s", conflictTarget, conflictTargetReference.Hash())
 	}
+
+	fastForwardBase := mainReference.Hash()
+	if err = bareRepository.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("ff-target"),
+		fastForwardBase,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	fastForwardSource := commitBranchFile(
+		t,
+		barePath,
+		"ff-source",
+		"fast-forward.txt",
+		"Fast forward\n",
+		"Add fast-forward commit",
+	)
+	fastForwardResponse := do(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/merges",
+		`{"target":"ff-target","source":"ff-source","message":"ignored for fast-forward"}`,
+	)
+	if fastForwardResponse.Code != http.StatusOK {
+		t.Fatalf("fast-forward merge returned %d: %s", fastForwardResponse.Code, fastForwardResponse.Body.String())
+	}
+	var fastForward struct {
+		Commit   string `json:"commit"`
+		Strategy string `json:"strategy"`
+	}
+	if err = json.Unmarshal(fastForwardResponse.Body.Bytes(), &fastForward); err != nil {
+		t.Fatal(err)
+	}
+	if fastForward.Strategy != "fast-forward" ||
+		fastForward.Commit != fastForwardSource.String() {
+		t.Fatalf("unexpected fast-forward result: %#v", fastForward)
+	}
+	fastForwardTarget, err := bareRepository.Reference(
+		plumbing.NewBranchReferenceName("ff-target"),
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fastForwardTarget.Hash() != fastForwardSource {
+		t.Fatalf("fast-forward target = %s, want %s", fastForwardTarget.Hash(), fastForwardSource)
+	}
+
+	upToDateResponse := do(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/merges",
+		`{"target":"ff-target","source":"ff-source"}`,
+	)
+	if upToDateResponse.Code != http.StatusOK {
+		t.Fatalf("up-to-date merge returned %d: %s", upToDateResponse.Code, upToDateResponse.Body.String())
+	}
+	var upToDate struct {
+		Commit   string `json:"commit"`
+		Strategy string `json:"strategy"`
+	}
+	if err = json.Unmarshal(upToDateResponse.Body.Bytes(), &upToDate); err != nil {
+		t.Fatal(err)
+	}
+	if upToDate.Strategy != "already-up-to-date" ||
+		upToDate.Commit != fastForwardSource.String() {
+		t.Fatalf("unexpected up-to-date result: %#v", upToDate)
+	}
+
+	for _, test := range []struct {
+		name, method, path, body string
+		status                   int
+	}{
+		{
+			name:   "compare same branch",
+			method: http.MethodGet,
+			path:   "/api/repositories/engineering%2Fapi/compare?base=main&head=main",
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "compare missing base",
+			method: http.MethodGet,
+			path:   "/api/repositories/engineering%2Fapi/compare?base=missing&head=main",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "compare missing head",
+			method: http.MethodGet,
+			path:   "/api/repositories/engineering%2Fapi/compare?base=main&head=missing",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "merge same branch",
+			method: http.MethodPost,
+			path:   "/api/repositories/engineering%2Fapi/merges",
+			body:   `{"target":"main","source":"main"}`,
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "merge missing target",
+			method: http.MethodPost,
+			path:   "/api/repositories/engineering%2Fapi/merges",
+			body:   `{"target":"missing","source":"main"}`,
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "merge missing source",
+			method: http.MethodPost,
+			path:   "/api/repositories/engineering%2Fapi/merges",
+			body:   `{"target":"main","source":"missing"}`,
+			status: http.StatusNotFound,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := do(test.method, test.path, test.body)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.status, response.Body.String())
+			}
+		})
+	}
 }
 
 func commitBranchFile(
