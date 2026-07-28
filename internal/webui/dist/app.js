@@ -1138,6 +1138,9 @@ function formatFileSize(size) {
     }
     return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
 }
+function shortCommitHash(hash) {
+    return hash.slice(0, 12);
+}
 function relativeTime(value) {
     const date = new Date(value);
     const seconds = Math.round((date.getTime() - Date.now()) / 1000);
@@ -1236,7 +1239,7 @@ function repositoryCommitDiff(data) {
     const summary = element("div");
     summary.className = "history-diff-summary";
     const parent = element("span", data.parent
-        ? `Compared with parent ${data.parent.slice(0, 12)}`
+        ? `Compared with parent ${shortCommitHash(data.parent)}`
         : "Initial commit");
     parent.className = "history-diff-parent";
     const stats = element("div");
@@ -1513,7 +1516,7 @@ function branchComparisonResult(route, comparison, dialog) {
                         : merged.strategy === "already-up-to-date"
                             ? "was already up to date"
                             : "merged";
-                    showStatus(`${comparison.head} ${action} into ${comparison.base} at ${merged.commit.slice(0, 8)}.`);
+                    showStatus(`${comparison.head} ${action} into ${comparison.base} at ${shortCommitHash(merged.commit)}.`);
                 }
                 catch (reason) {
                     showStatus(reason instanceof Error ? reason.message : "Could not merge the branches.", true);
@@ -1694,7 +1697,7 @@ function latestCommitBar(data) {
     detail.className = "latest-commit-detail";
     detail.append(element("strong", commit.message.split("\n")[0] || "(no message)"), element("span", `${commit.author} committed ${relativeTime(commit.committed)}`));
     detail.lastElementChild?.setAttribute("title", new Date(commit.committed).toLocaleString());
-    const hash = element("code", commit.hash.slice(0, 8));
+    const hash = element("code", shortCommitHash(commit.hash));
     bar.append(identity, detail, hash);
     return bar;
 }
@@ -1920,7 +1923,7 @@ async function repositoryBlobSection(route, content) {
                     }),
                 });
                 await renderRepositoryBrowser(route);
-                showStatus(`${updated.path} committed to ${updated.branch} at ${updated.commit.slice(0, 8)}.`);
+                showStatus(`${updated.path} committed to ${updated.branch} at ${shortCommitHash(updated.commit)}.`);
             }
             catch (reason) {
                 showStatus(reason instanceof Error ? reason.message : "Could not commit file changes.", true);
@@ -2020,7 +2023,7 @@ async function renderRepositoryBrowser(route) {
     if (commitHash) {
         const commit = element("div");
         commit.className = "current-commit";
-        commit.append(element("span", "Commit"), element("code", commitHash.slice(0, 12)));
+        commit.append(element("span", "Commit"), element("code", shortCommitHash(commitHash)));
         const total = element("span", `${commits.total} ${commits.total === 1 ? "commit" : "commits"}`);
         total.className = "current-commit-total";
         commit.append(total);
