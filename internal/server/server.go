@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"net/http"
 	"sync"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/define42/GitOne/internal/httpapi"
 	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/runner"
 	"github.com/define42/GitOne/internal/storage"
 	"github.com/define42/GitOne/internal/webui"
 )
@@ -18,6 +20,7 @@ type Config struct {
 	Root, PublicURL string
 	Directory       auth.IdentityProvider
 	Sessions        *auth.SessionManager
+	Runner          *runner.Runner
 }
 
 func New(c Config) http.Handler {
@@ -70,7 +73,13 @@ func New(c Config) http.Handler {
 		return true, pr.Role.Allows(need) && pr.AllowsRepository(repo.Name)
 	}
 	mux := http.NewServeMux()
-	httpapi.Register(mux, httpapi.API{Storage: st, Resolver: ar, Sessions: sessions})
+	buildStore := runner.Store{Root: runner.DefaultStateRoot(c.Root)}
+	if c.Runner != nil {
+		buildStore = c.Runner.Store()
+	}
+	httpapi.Register(mux, httpapi.API{
+		Storage: st, Resolver: ar, Sessions: sessions, Builds: &buildStore, Runner: c.Runner,
+	})
 	ui := webui.Handler{}
 	mux.Handle("GET /{$}", ui)
 	mux.Handle("GET /groups/{path...}", ui)
@@ -98,6 +107,23 @@ func New(c Config) http.Handler {
 		Authorize:      authorizeRepo,
 		ReceiveMu:      &sync.Mutex{},
 		ControlUpdated: cs.Invalidate,
+	}
+	if c.Runner != nil {
+		gh.RepositoryUpdated = func(
+			repository repopath.Repository,
+			updates []githttp.ReferenceUpdate,
+		) {
+			for _, update := range updates {
+				if _, err := c.Runner.Schedule(repository, update.Branch, update.Commit); err != nil {
+					log.Printf(
+						"could not schedule build for %s@%s: %v",
+						repository.Full(),
+						update.Commit,
+						err,
+					)
+				}
+			}
+		}
 	}
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if containsLFS(r.URL.Path) {

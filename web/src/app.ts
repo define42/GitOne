@@ -159,12 +159,37 @@ interface RepositoryMerge {
   strategy: "already-up-to-date" | "fast-forward" | "merge-commit";
 }
 
+type RepositoryBuildStatus = "queued" | "running" | "succeeded" | "failed";
+
+interface RepositoryBuild {
+  id: string;
+  repository: string;
+  branch: string;
+  commit: string;
+  image?: string;
+  status: RepositoryBuildStatus;
+  createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+}
+
+interface RepositoryBuilds {
+  repository: string;
+  builds: RepositoryBuild[];
+}
+
+interface RepositoryBuildDetail {
+  build: RepositoryBuild;
+  log: string;
+}
+
 interface RepositoryBrowserRoute {
   repository: string;
   ref: string;
   path: string;
   file: string | null;
-  view: "files" | "history";
+  view: "files" | "history" | "builds";
 }
 
 interface Problem {
@@ -240,6 +265,7 @@ const sessionControls: HTMLElement = sessionControlsRoot;
 const sessionUsername: HTMLElement = sessionUsernameRoot;
 const logoutButton: HTMLButtonElement = logoutRoot;
 let browserSession: BrowserSession | null = null;
+let repositoryBuildPollingStop: (() => void) | null = null;
 
 const colorThemes = [
   "light",
@@ -314,7 +340,9 @@ type IconName =
   | "git-merge"
   | "log-out"
   | "pencil"
+  | "play"
   | "plus"
+  | "refresh"
   | "repository"
   | "settings"
   | "trash";
@@ -361,7 +389,12 @@ const iconPaths: Record<IconName, string[]> = {
     "M21.2 6.8a1 1 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8L2 21.4a.5.5 0 0 0 .6.6L7 20.7a2 2 0 0 0 .8-.5Z",
     "m15 5 4 4",
   ],
+  play: ["m6 3 14 9-14 9Z"],
   plus: ["M5 12h14", "M12 5v14"],
+  refresh: [
+    "M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5",
+    "M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5",
+  ],
   repository: [
     "M15 4h3a2 2 0 0 1 2 2v13a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8v18",
     "M8 7h4",
@@ -431,7 +464,7 @@ function repositoryBrowserURL(
     ref?: string;
     path?: string;
     file?: string;
-    view?: "files" | "history";
+    view?: "files" | "history" | "builds";
   } = {},
 ): string {
   const encodedRepository = repository.split("/").map(encodeURIComponent).join("/");
@@ -445,8 +478,8 @@ function repositoryBrowserURL(
   if (options.file) {
     url.searchParams.set("file", options.file);
   }
-  if (options.view === "history") {
-    url.searchParams.set("view", "history");
+  if (options.view && options.view !== "files") {
+    url.searchParams.set("view", options.view);
   }
   return `${url.pathname}${url.search}`;
 }
@@ -474,6 +507,14 @@ function repositoryMergesAPIURL(repository: string): string {
 
 function repositoryCommitDiffAPIURL(repository: string, commit: string): string {
   return `/api/repositories/${encodeURIComponent(repository)}/commits/${encodeURIComponent(commit)}/diff`;
+}
+
+function repositoryBuildsAPIURL(repository: string): string {
+  return `/api/repositories/${encodeURIComponent(repository)}/builds`;
+}
+
+function repositoryBuildAPIURL(repository: string, id: string): string {
+  return `${repositoryBuildsAPIURL(repository)}/${encodeURIComponent(id)}`;
 }
 
 function repositoryFileAPIURL(
@@ -508,12 +549,15 @@ function currentRepository(): RepositoryBrowserRoute | null {
     return null;
   }
   const parameters = new URLSearchParams(window.location.search);
+  const requestedView = parameters.get("view");
   return {
     repository,
     ref: parameters.get("ref") || "main",
     path: parameters.get("path") || "",
     file: parameters.get("file"),
-    view: parameters.get("view") === "history" ? "history" : "files",
+    view: requestedView === "history" || requestedView === "builds"
+      ? requestedView
+      : "files",
   };
 }
 
@@ -1525,6 +1569,10 @@ function repositoryBreadcrumbs(route: RepositoryBrowserRoute): HTMLElement {
     const historyItem = element("li");
     historyItem.append(element("span", "History"));
     list.append(historyItem);
+  } else if (route.view === "builds") {
+    const buildsItem = element("li");
+    buildsItem.append(element("span", "Builds"));
+    list.append(buildsItem);
   }
 
   const selectedPath = route.view === "files" ? route.file ?? route.path : "";
@@ -1584,6 +1632,413 @@ function relativeTime(value: string): string {
     }
   }
   return formatter.format(seconds, "second");
+}
+
+function stopRepositoryBuildPolling(): void {
+  repositoryBuildPollingStop?.();
+  repositoryBuildPollingStop = null;
+}
+
+function buildDuration(build: RepositoryBuild): string {
+  if (!build.startedAt) {
+    return "Waiting to start";
+  }
+  const end = build.finishedAt ? new Date(build.finishedAt).getTime() : Date.now();
+  const seconds = Math.max(
+    0,
+    Math.floor((end - new Date(build.startedAt).getTime()) / 1000),
+  );
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ${seconds % 60}s`;
+  }
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function buildStatusBadge(status: RepositoryBuildStatus): HTMLElement {
+  const badge = element("span");
+  badge.className = `build-status build-status-${status}`;
+  const statusIcon = status === "succeeded"
+    ? "check"
+    : status === "failed" ? "close" : "clock";
+  const label = status[0].toUpperCase() + status.slice(1);
+  badge.append(icon(statusIcon), document.createTextNode(label));
+  badge.setAttribute("aria-label", `Build status: ${label}`);
+  return badge;
+}
+
+function latestBranchBuildIndicator(
+  route: RepositoryBrowserRoute,
+  initial: RepositoryBuilds,
+): HTMLElement {
+  const link = element("a");
+  link.className = "latest-build-status";
+  link.href = repositoryBrowserURL(route.repository, {
+    ref: route.ref,
+    view: "builds",
+  });
+  let data = initial;
+  let canceled = false;
+  let refreshing = false;
+  let timer: number | undefined;
+
+  const latestBuild = (): RepositoryBuild | undefined =>
+    data.builds.find((build) => build.branch === route.ref);
+
+  const render = (): void => {
+    const label = element("span", "Latest build");
+    label.className = "latest-build-label";
+    const build = latestBuild();
+    if (!build) {
+      const badge = element("span");
+      badge.className = "build-status build-status-none";
+      badge.append(icon("clock"), document.createTextNode("None"));
+      link.replaceChildren(label, badge);
+      link.title = `No builds have run on ${route.ref}`;
+      link.setAttribute("aria-label", `Latest build on ${route.ref}: none`);
+      return;
+    }
+    const badge = buildStatusBadge(build.status);
+    link.replaceChildren(label, badge);
+    link.title = [
+      `Latest build on ${route.ref}: ${build.status}`,
+      shortCommitHash(build.commit),
+      relativeTime(build.createdAt),
+    ].join(" · ");
+    link.setAttribute(
+      "aria-label",
+      `Latest build on ${route.ref}: ${build.status} at ${shortCommitHash(build.commit)}`,
+    );
+  };
+
+  const scheduleRefresh = (): void => {
+    if (canceled) {
+      return;
+    }
+    const build = latestBuild();
+    const active = build?.status === "queued" || build?.status === "running";
+    timer = window.setTimeout(
+      () => void refresh(),
+      document.hidden ? 15_000 : active ? 3_000 : 10_000,
+    );
+  };
+
+  async function refresh(): Promise<void> {
+    if (refreshing || canceled) {
+      return;
+    }
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      timer = undefined;
+    }
+    refreshing = true;
+    try {
+      data = await request<RepositoryBuilds>(
+        repositoryBuildsAPIURL(route.repository),
+      );
+      if (!canceled) {
+        render();
+      }
+    } catch {
+      if (!canceled) {
+        link.title = `Could not refresh the latest build on ${route.ref}`;
+      }
+    } finally {
+      refreshing = false;
+      scheduleRefresh();
+    }
+  }
+
+  const visibilityHandler = (): void => {
+    if (!document.hidden) {
+      void refresh();
+    }
+  };
+  document.addEventListener("visibilitychange", visibilityHandler);
+  repositoryBuildPollingStop = () => {
+    canceled = true;
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+    }
+    document.removeEventListener("visibilitychange", visibilityHandler);
+  };
+
+  render();
+  scheduleRefresh();
+  return link;
+}
+
+function repositoryBuildsView(
+  route: RepositoryBrowserRoute,
+  initial: RepositoryBuilds,
+): HTMLElement {
+  const section = element("section");
+  section.className = "repository-builds content-section";
+  const refreshState = element("span", "Updated just now");
+  refreshState.className = "build-refresh-state";
+  const refreshButton = actionButton("Refresh", "refresh", "secondary build-refresh");
+  const heading = sectionHeading("Builds", initial.builds.length, [
+    refreshState,
+    refreshButton,
+  ]);
+  const listRoot = element("div");
+  listRoot.className = "build-list-root";
+  section.append(heading, listRoot);
+
+  let data = initial;
+  let canceled = false;
+  let refreshing = false;
+  let timer: number | undefined;
+  const expanded = new Set<string>();
+  const logs = new Map<string, string>();
+  const loadingLogs = new Set<string>();
+
+  const renderBuilds = (): void => {
+    const scrollPositions = new Map<string, {top: number; pinned: boolean}>();
+    for (const log of listRoot.querySelectorAll<HTMLPreElement>(".build-log")) {
+      const id = log.dataset.buildId;
+      if (id) {
+        scrollPositions.set(id, {
+          top: log.scrollTop,
+          pinned: log.scrollHeight - log.scrollTop - log.clientHeight < 24,
+        });
+      }
+    }
+    const count = heading.querySelector<HTMLElement>(".count-badge");
+    if (count) {
+      count.textContent = String(data.builds.length);
+    }
+    if (data.builds.length === 0) {
+      listRoot.replaceChildren(
+        emptyState("No builds yet. Push a branch containing a .gitone.json build definition."),
+      );
+      return;
+    }
+
+    const list = element("ol");
+    list.className = "build-list";
+    for (const build of data.builds) {
+      const item = element("li");
+      item.className = `build-item build-item-${build.status}`;
+
+      const summary = element("div");
+      summary.className = "build-summary";
+      const identity = element("div");
+      identity.className = "build-identity";
+      const title = element("div");
+      title.className = "build-title";
+      title.append(
+        element("strong", build.branch),
+        element("code", shortCommitHash(build.commit)),
+      );
+      const metadata = element("div");
+      metadata.className = "build-metadata";
+      const created = element("span", `Queued ${relativeTime(build.createdAt)}`);
+      created.title = new Date(build.createdAt).toLocaleString();
+      const duration = element("span", buildDuration(build));
+      const image = element("span", build.image ? `Image ${build.image}` : "No image");
+      metadata.append(created, duration, image);
+      identity.append(title, metadata);
+
+      const controls = element("div");
+      controls.className = "build-controls";
+      const logButton = actionButton(
+        expanded.has(build.id) ? "Hide log" : "View log",
+        undefined,
+        "secondary build-log-toggle",
+      );
+      logButton.setAttribute("aria-expanded", String(expanded.has(build.id)));
+      logButton.addEventListener("click", () => {
+        if (expanded.has(build.id)) {
+          expanded.delete(build.id);
+          renderBuilds();
+          return;
+        }
+        expanded.add(build.id);
+        renderBuilds();
+        void loadLog(build.id);
+      });
+      controls.append(buildStatusBadge(build.status), logButton);
+      summary.append(identity, controls);
+      item.append(summary);
+
+      if (build.error) {
+        const error = element("p", build.error);
+        error.className = "build-error";
+        error.setAttribute("role", "alert");
+        item.append(error);
+      }
+      if (expanded.has(build.id)) {
+        const panel = element("div");
+        panel.className = "build-log-panel";
+        const logHeader = element("div");
+        logHeader.className = "build-log-header";
+        const label = element("strong", "Build log");
+        const refreshLog = actionButton("Refresh log", "refresh", "secondary");
+        refreshLog.disabled = loadingLogs.has(build.id);
+        refreshLog.addEventListener("click", () => void loadLog(build.id));
+        logHeader.append(label, refreshLog);
+        const log = element(
+          "pre",
+          loadingLogs.has(build.id)
+            ? "Loading build log…"
+            : logs.get(build.id) ?? "No log output yet.",
+        );
+        log.className = "build-log";
+        log.dataset.buildId = build.id;
+        log.tabIndex = 0;
+        panel.append(logHeader, log);
+        item.append(panel);
+      }
+      list.append(item);
+    }
+    listRoot.replaceChildren(list);
+    for (const log of listRoot.querySelectorAll<HTMLPreElement>(".build-log")) {
+      const position = log.dataset.buildId
+        ? scrollPositions.get(log.dataset.buildId)
+        : undefined;
+      if (position) {
+        log.scrollTop = position.pinned ? log.scrollHeight : position.top;
+      }
+    }
+  };
+
+  const updateBuild = (updated: RepositoryBuild): void => {
+    const index = data.builds.findIndex((build) => build.id === updated.id);
+    if (index >= 0) {
+      data.builds[index] = updated;
+    }
+  };
+
+  async function loadLog(id: string): Promise<void> {
+    if (loadingLogs.has(id) || canceled) {
+      return;
+    }
+    loadingLogs.add(id);
+    renderBuilds();
+    try {
+      const detail = await request<RepositoryBuildDetail>(
+        repositoryBuildAPIURL(route.repository, id),
+      );
+      if (canceled) {
+        return;
+      }
+      logs.set(id, detail.log || "No log output yet.");
+      updateBuild(detail.build);
+    } catch (reason) {
+      if (!canceled) {
+        logs.set(
+          id,
+          reason instanceof Error ? `Could not load build log: ${reason.message}` : "Could not load build log.",
+        );
+      }
+    } finally {
+      loadingLogs.delete(id);
+      if (!canceled) {
+        renderBuilds();
+      }
+    }
+  }
+
+  const scheduleRefresh = (): void => {
+    if (canceled) {
+      return;
+    }
+    const active = data.builds.some(
+      (build) => build.status === "queued" || build.status === "running",
+    );
+    const delay = document.hidden ? 15_000 : active ? 3_000 : 10_000;
+    timer = window.setTimeout(() => void refreshBuilds(), delay);
+  };
+
+  async function refreshBuilds(): Promise<void> {
+    if (refreshing || canceled) {
+      return;
+    }
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      timer = undefined;
+    }
+    refreshing = true;
+    refreshButton.disabled = true;
+    refreshState.textContent = "Refreshing…";
+    try {
+      const previouslyActive = new Set(data.builds.filter(
+        (build) =>
+          expanded.has(build.id) &&
+          (build.status === "queued" || build.status === "running"),
+      ).map((build) => build.id));
+      const refreshed = await request<RepositoryBuilds>(
+        repositoryBuildsAPIURL(route.repository),
+      );
+      const liveLogs = refreshed.builds.filter(
+        (build) =>
+          expanded.has(build.id) &&
+          (
+            build.status === "queued" ||
+            build.status === "running" ||
+            previouslyActive.has(build.id) ||
+            !logs.has(build.id)
+          ),
+      );
+      data = refreshed;
+      const details = await Promise.all(liveLogs.map(async (build) => {
+        try {
+          return await request<RepositoryBuildDetail>(
+            repositoryBuildAPIURL(route.repository, build.id),
+          );
+        } catch {
+          return null;
+        }
+      }));
+      for (const detail of details) {
+        if (detail) {
+          logs.set(detail.build.id, detail.log || "No log output yet.");
+          updateBuild(detail.build);
+        }
+      }
+      if (!canceled) {
+        const updated = new Date();
+        refreshState.textContent = "Updated just now";
+        refreshState.title = updated.toLocaleString();
+        refreshState.removeAttribute("role");
+        renderBuilds();
+      }
+    } catch (reason) {
+      if (!canceled) {
+        refreshState.textContent = reason instanceof Error
+          ? `Refresh failed: ${reason.message}`
+          : "Refresh failed";
+        refreshState.setAttribute("role", "alert");
+      }
+    } finally {
+      refreshing = false;
+      refreshButton.disabled = false;
+      scheduleRefresh();
+    }
+  }
+
+  refreshButton.addEventListener("click", () => void refreshBuilds());
+  const visibilityHandler = (): void => {
+    if (!document.hidden) {
+      void refreshBuilds();
+    }
+  };
+  document.addEventListener("visibilitychange", visibilityHandler);
+  repositoryBuildPollingStop = () => {
+    canceled = true;
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+    }
+    document.removeEventListener("visibilitychange", visibilityHandler);
+  };
+
+  renderBuilds();
+  scheduleRefresh();
+  return section;
 }
 
 function repositoryHistory(
@@ -1733,12 +2188,20 @@ function repositoryNavigation(route: RepositoryBrowserRoute): HTMLElement {
     ref: route.ref,
     view: "history",
   });
+  const builds = element("a");
+  builds.append(icon("play"), document.createTextNode("Builds"));
+  builds.href = repositoryBrowserURL(route.repository, {
+    ref: route.ref,
+    view: "builds",
+  });
   if (route.view === "history") {
     history.setAttribute("aria-current", "page");
+  } else if (route.view === "builds") {
+    builds.setAttribute("aria-current", "page");
   } else {
     files.setAttribute("aria-current", "page");
   }
-  nav.append(files, history);
+  nav.append(files, history, builds);
   return nav;
 }
 
@@ -2213,7 +2676,11 @@ function cloneControl(
   return {trigger, dialog};
 }
 
-function latestCommitBar(data: RepositoryCommits): HTMLElement | null {
+function latestCommitBar(
+  data: RepositoryCommits,
+  route: RepositoryBrowserRoute,
+  builds: RepositoryBuilds,
+): HTMLElement | null {
   const commit = data.commits[0];
   if (!commit) {
     return null;
@@ -2230,7 +2697,10 @@ function latestCommitBar(data: RepositoryCommits): HTMLElement | null {
   );
   detail.lastElementChild?.setAttribute("title", new Date(commit.committed).toLocaleString());
   const hash = element("code", shortCommitHash(commit.hash));
-  bar.append(identity, detail, hash);
+  const metadata = element("div");
+  metadata.className = "latest-commit-metadata";
+  metadata.append(latestBranchBuildIndicator(route, builds), hash);
+  bar.append(identity, detail, metadata);
   return bar;
 }
 
@@ -2537,6 +3007,7 @@ async function repositoryReadme(
 }
 
 async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<void> {
+  stopRepositoryBuildPolling();
   const repositoryParts = route.repository.split("/");
   const repositoryName = repositoryParts.at(-1) ?? route.repository;
   const groupPath = repositoryParts.slice(0, -1).join("/");
@@ -2547,11 +3018,15 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     `${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=${route.view === "history" ? 100 : 1}`,
   );
   const contentRequest: Promise<RepositoryTree | RepositoryBlob | null> =
-    route.view === "history"
+    route.view !== "files"
       ? Promise.resolve(null)
       : route.file === null
         ? request<RepositoryTree>(repositoryAPIURL(route.repository, "tree", route.ref, route.path))
         : request<RepositoryBlob>(repositoryAPIURL(route.repository, "blob", route.ref, route.file));
+  const buildsRequest: Promise<RepositoryBuilds | null> =
+    route.view === "builds" || (route.view === "files" && route.file === null)
+    ? request<RepositoryBuilds>(repositoryBuildsAPIURL(route.repository))
+    : Promise.resolve(null);
   const groupRequest = request<GroupDetail>(apiGroupURL(groupPath)).catch(() => ({
     path: groupPath,
     description: "",
@@ -2559,11 +3034,12 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     subgroups: [],
     repositories: [{name: repositoryName, description: ""}],
   }));
-  const [branches, commits, content, group] = await Promise.all([
+  const [branches, commits, content, group, builds] = await Promise.all([
     branchesRequest,
     commitsRequest,
     contentRequest,
     groupRequest,
+    buildsRequest,
   ]);
   const repository = group.repositories.find((candidate) => candidate.name === repositoryName);
 
@@ -2645,6 +3121,13 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     app.append(repositoryHistory(route, commits));
     return;
   }
+  if (route.view === "builds") {
+    if (builds === null) {
+      throw new Error("Repository builds are unavailable.");
+    }
+    app.append(repositoryBuildsView(route, builds));
+    return;
+  }
   if (content === null) {
     throw new Error("Repository contents are unavailable.");
   }
@@ -2652,7 +3135,10 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   if ("entries" in content) {
     const section = element("section");
     section.className = "content-section";
-    const latestCommit = latestCommitBar(commits);
+    if (builds === null) {
+      throw new Error("Repository builds are unavailable.");
+    }
+    const latestCommit = latestCommitBar(commits, route, builds);
     if (latestCommit) {
       section.append(latestCommit);
     }
@@ -2723,6 +3209,7 @@ function setBrowserSession(session: BrowserSession | null): void {
 }
 
 function renderLogin(message = ""): void {
+  stopRepositoryBuildPolling();
   setBrowserSession(null);
   document.title = "Sign in · GitOne";
   notifications.replaceChildren();
@@ -2795,6 +3282,7 @@ function renderLogin(message = ""): void {
 }
 
 async function renderRoot(message?: string): Promise<void> {
+  stopRepositoryBuildPolling();
   const data = await request<GroupList>("/api/groups");
   document.title = "GitOne";
   app.replaceChildren();
@@ -2837,6 +3325,7 @@ async function renderRoot(message?: string): Promise<void> {
 }
 
 async function renderGroup(path: string, message?: string): Promise<void> {
+  stopRepositoryBuildPolling();
   const [data, controlSettings] = await Promise.all([
     request<GroupDetail>(apiGroupURL(path)),
     request<GroupControlSettings>(groupSettingsAPIURL(path)).catch(() => null),

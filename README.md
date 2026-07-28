@@ -39,13 +39,59 @@ docker compose up --build
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and sign in with LDAP credentials. After LDAP validation, GitOne stores only the username in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner; creating a subgroup still requires admin access inherited from its parent. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser. The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files with server-side Chroma syntax highlighting, show the latest 100 commits in the selected branch’s history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Users with write access can edit UTF-8 files up to 1 MiB directly on a named branch and review their uncommitted changes as a unified diff; each save creates a commit and rejects the update if the branch changed after the editor was opened. They can also merge a clean comparison after confirmation. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
+Open [http://localhost:8080](http://localhost:8080) and sign in with LDAP credentials. After LDAP validation, GitOne stores only the username in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner; creating a subgroup still requires admin access inherited from its parent. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser. The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files with server-side Chroma syntax highlighting, show the latest 100 commits in the selected branch’s history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Its Builds tab shows queued, running, successful, and failed jobs, polls active jobs automatically, and exposes expandable live logs. Users with write access can edit UTF-8 files up to 1 MiB directly on a named branch and review their uncommitted changes as a unified diff; each save creates a commit and rejects the update if the branch changed after the editor was opened. They can also merge a clean comparison after confirmation. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
 Build the UI separately with:
 
 ```bash
 make ui
 ```
+
+## Repository builds
+
+GitOne includes an opt-in container runner. After a successful branch update, it reads the build definition from `.gitone.json` at the exact new commit, checks out that commit, and runs the script in an ephemeral Docker-compatible container. Branches created, edited, or merged through the API trigger builds too.
+
+```json
+{
+  "description": "Backend API",
+  "build": {
+    "image": "golang:1.25",
+    "script": [
+      "go test ./...",
+      "go build ./..."
+    ],
+    "branches": [
+      "main",
+      "release/*"
+    ],
+    "environment": {
+      "CGO_ENABLED": "0"
+    },
+    "timeoutSeconds": 1200
+  }
+}
+```
+
+`image` and at least one non-empty `script` command are required. Commands run in order through `/bin/sh -ec` with the repository at `/workspace`. `branches` contains path-style glob patterns and defaults to every branch. `timeoutSeconds` defaults to 900 and is capped at 3600. Repository variables cannot replace reserved `CI_*` or `GITONE_*` variables; GitOne provides `CI_COMMIT_SHA`, `CI_COMMIT_BRANCH`, `CI_PROJECT_PATH`, `GITONE_BUILD_ID`, and equivalent GitOne commit variables.
+
+The runner is disabled by default because it executes repository-controlled code. Enable one worker with:
+
+```bash
+make run RUN_ARGS="-root ./data -runner -runner-workers 1"
+```
+
+The default runner command is `docker`; use `-runner-command podman` for a Docker-compatible alternative. The process needs access to that command and its daemon. When GitOne itself runs in Docker, mount the Docker socket and mount the storage root at the same absolute host/container path so build workspaces can be bind-mounted:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e LDAP_URL=ldaps://directory.example:636 \
+  -e LDAP_BASE_DN=dc=example,dc=com \
+  -v /srv/gitone:/srv/gitone \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  gitone -root /srv/gitone -listen :8080 -runner
+```
+
+The Docker socket is a privileged host capability; expose it only to a trusted GitOne deployment. Build containers do not receive that socket. Build state and logs are retained under `<root>/.gitone/builds`; stored logs are capped at 10 MiB and API log responses at 1 MiB.
 
 ## Endpoint reference
 
@@ -94,6 +140,15 @@ make ui
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.json`. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |
+
+### Repository builds
+
+Build endpoints require repository read access. Existing build history remains readable while the runner is disabled.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/repositories/{repository}/builds` | List builds newest-first with queued, running, succeeded, or failed status. |
+| `GET` | `/api/repositories/{repository}/builds/{id}` | Get one build and its captured log. |
 
 ### Repository browser API
 

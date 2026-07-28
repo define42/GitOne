@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/auth"
+	"github.com/define42/GitOne/internal/runner"
 	app "github.com/define42/GitOne/internal/server"
+	"github.com/define42/GitOne/internal/storage"
 )
 
 func main() {
@@ -30,6 +32,9 @@ func newServer(args []string) (*http.Server, bool, error) {
 	root := flags.String("root", "./data", "storage root")
 	listen := flags.String("listen", ":8080", "listen address")
 	publicURL := flags.String("public-url", "http://localhost:8080", "public base URL")
+	runnerEnabled := flags.Bool("runner", false, "enable container builds from .gitone.json")
+	runnerCommand := flags.String("runner-command", "docker", "Docker-compatible runner command")
+	runnerWorkers := flags.Int("runner-workers", 1, "number of concurrent builds")
 	if err := flags.Parse(args); err != nil {
 		return nil, false, err
 	}
@@ -58,16 +63,35 @@ func newServer(args []string) (*http.Server, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	var buildRunner *runner.Runner
+	if *runnerEnabled {
+		buildRunner, err = runner.New(runner.Config{
+			Storage: storage.Store{Root: *root},
+			State: runner.Store{
+				Root: runner.DefaultStateRoot(*root),
+			},
+			Executor: runner.ContainerExecutor{Command: *runnerCommand},
+			Workers:  *runnerWorkers,
+		})
+		if err != nil {
+			return nil, false, err
+		}
+	}
 	h := app.New(app.Config{
 		Root:      *root,
 		PublicURL: *publicURL,
 		Directory: directory,
 		Sessions:  sessions,
+		Runner:    buildRunner,
 	})
-	return &http.Server{
+	server := &http.Server{
 		Addr:              *listen,
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
-	}, ephemeralSessions, nil
+	}
+	if buildRunner != nil {
+		server.RegisterOnShutdown(buildRunner.Close)
+	}
+	return server, ephemeralSessions, nil
 }

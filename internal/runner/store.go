@@ -1,0 +1,192 @@
+package runner
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/define42/GitOne/internal/repopath"
+)
+
+type Status string
+
+const (
+	StatusQueued    Status = "queued"
+	StatusRunning   Status = "running"
+	StatusSucceeded Status = "succeeded"
+	StatusFailed    Status = "failed"
+)
+
+type Job struct {
+	ID         string     `json:"id"`
+	Repository string     `json:"repository"`
+	Branch     string     `json:"branch"`
+	Commit     string     `json:"commit"`
+	Image      string     `json:"image,omitempty"`
+	Status     Status     `json:"status"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Error      string     `json:"error,omitempty"`
+}
+
+type Store struct {
+	Root string
+}
+
+const maximumLogBytes = 1 << 20
+
+func (s Store) List(repository repopath.Repository) ([]Job, error) {
+	directory, err := s.repositoryDirectory(repository)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Job{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	jobs := make([]Job, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		job, readErr := s.Get(repository, strings.TrimSuffix(entry.Name(), ".json"))
+		if readErr != nil {
+			return nil, readErr
+		}
+		jobs = append(jobs, job)
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
+	})
+	return jobs, nil
+}
+
+func (s Store) Get(repository repopath.Repository, id string) (Job, error) {
+	path, err := s.jobPath(repository, id, ".json")
+	if err != nil {
+		return Job{}, err
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return Job{}, err
+	}
+	var job Job
+	if err = json.Unmarshal(contents, &job); err != nil {
+		return Job{}, fmt.Errorf("read build %q: %w", id, err)
+	}
+	return job, nil
+}
+
+func (s Store) Log(repository repopath.Repository, id string) (string, error) {
+	path, err := s.jobPath(repository, id, ".log")
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	contents, err := io.ReadAll(io.LimitReader(file, maximumLogBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(contents) > maximumLogBytes {
+		contents = append(contents[:maximumLogBytes], []byte("\n[log truncated by GitOne]\n")...)
+	}
+	return string(contents), nil
+}
+
+func (s Store) save(repository repopath.Repository, job Job) error {
+	path, err := s.jobPath(repository, job.ID, ".json")
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	contents, err := json.MarshalIndent(job, "", "  ")
+	if err != nil {
+		return err
+	}
+	contents = append(contents, '\n')
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".build-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() {
+		_ = os.Remove(temporaryPath)
+	}()
+	if err = temporary.Chmod(0o640); err == nil {
+		_, err = temporary.Write(contents)
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
+}
+
+func (s Store) createLog(repository repopath.Repository, id string) (*os.File, error) {
+	path, err := s.jobPath(repository, id, ".log")
+	if err != nil {
+		return nil, err
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+}
+
+func (s Store) workRoot() (string, error) {
+	return repopath.SafeJoin(s.Root, ".work")
+}
+
+func (s Store) repositoryDirectory(repository repopath.Repository) (string, error) {
+	parts := append(append([]string(nil), repository.Groups...), repository.Name)
+	return repopath.SafeJoin(s.Root, parts...)
+}
+
+func (s Store) jobPath(repository repopath.Repository, id, suffix string) (string, error) {
+	if !validJobID(id) {
+		return "", errors.New("invalid build ID")
+	}
+	directory, err := s.repositoryDirectory(repository)
+	if err != nil {
+		return "", err
+	}
+	return repopath.SafeJoin(directory, id+suffix)
+}
+
+func validJobID(id string) bool {
+	if id == "" || len(id) > 100 {
+		return false
+	}
+	for _, character := range id {
+		if !((character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '-' || character == '_') {
+			return false
+		}
+	}
+	return true
+}

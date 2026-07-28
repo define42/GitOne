@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -24,10 +25,6 @@ type CreateRepositoryOptions struct {
 	InitializeReadme bool
 	Author           string
 	Description      string
-}
-
-type repositoryMetadata struct {
-	Description string `json:"description"`
 }
 
 type GroupInfo struct {
@@ -168,24 +165,12 @@ func (s Store) RepositoryDescription(r repopath.Repository) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	commit, err := repository.CommitObject(head.Hash())
+	metadata, found, err := repoconfig.Read(repository, head.Hash())
 	if err != nil {
 		return "", err
 	}
-	file, err := commit.File(".gitone.json")
-	if errors.Is(err, object.ErrFileNotFound) {
+	if !found {
 		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	contents, err := file.Contents()
-	if err != nil {
-		return "", err
-	}
-	var metadata repositoryMetadata
-	if err = json.Unmarshal([]byte(contents), &metadata); err != nil {
-		return "", fmt.Errorf("read .gitone.json: %w", err)
 	}
 	return metadata.Description, nil
 }
@@ -223,7 +208,7 @@ func (s Store) createInitializedRepository(destination, name string, options Cre
 		}
 	}
 	if options.Description != "" {
-		metadata, marshalErr := json.MarshalIndent(repositoryMetadata{Description: options.Description}, "", "  ")
+		metadata, marshalErr := json.MarshalIndent(repoconfig.Config{Description: options.Description}, "", "  ")
 		if marshalErr != nil {
 			return marshalErr
 		}

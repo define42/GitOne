@@ -2,6 +2,10 @@ services:
   gitone:
     build:
       context: ./
+    command:
+      - -runner
+      - -runner-workers
+      - "1"
     environment:
       - BASE_IMAGE_DIR=/data/baseimages
       - LDAP_URL=ldaps://ldap:389
@@ -15,6 +19,7 @@ services:
       - "8080:8080"
     volumes:
       - /data/:/data/
+      - /var/run/docker.sock:/var/run/docker.sock
   ldap:
     image: glauth/glauth
     container_name: ldap

@@ -112,6 +112,7 @@ func (a API) updateRepositoryFile(
 	if err = repository.Storer.CheckAndSetReference(updated, branchRef); err != nil {
 		return nil, huma.Error409Conflict("branch changed while the file was being saved", err)
 	}
+	a.scheduleBuild(parsed, branchName, commitHash)
 
 	output := &updateRepositoryFileOutput{}
 	output.Body.Repository = parsed.Full()

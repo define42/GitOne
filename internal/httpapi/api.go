@@ -13,6 +13,7 @@ import (
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/runner"
 	"github.com/define42/GitOne/internal/storage"
 )
 
@@ -20,6 +21,8 @@ type API struct {
 	Storage  storage.Store
 	Resolver *auth.Resolver
 	Sessions *auth.SessionManager
+	Builds   *runner.Store
+	Runner   *runner.Runner
 }
 
 type AuthInput struct {
@@ -268,6 +271,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 	}), service.deleteRepository)
 
 	registerRepositoryBrowser(api, service)
+	registerBuildAPI(api, service)
 
 	return api
 }

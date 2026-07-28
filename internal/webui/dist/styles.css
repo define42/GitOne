@@ -32,6 +32,12 @@
   --warning-bg: #2d2819;
   --warning-border: #6f653e;
   --warning-text: #e2c968;
+  --build-failed: color-mix(in srgb, #cf222e 72%, var(--text));
+  --build-failed-soft: color-mix(in srgb, var(--build-failed) 14%, var(--surface));
+  --build-running: color-mix(in srgb, #0969da 72%, var(--text));
+  --build-running-soft: color-mix(in srgb, var(--build-running) 14%, var(--surface));
+  --build-succeeded: color-mix(in srgb, #1a7f37 72%, var(--text));
+  --build-succeeded-soft: color-mix(in srgb, var(--build-succeeded) 14%, var(--surface));
   --code-bg: #0d0f0d;
   --code-border: #2c322c;
   --code-text: #eef4f6;
@@ -1743,6 +1749,35 @@ textarea:focus {
   font-size: 0.75rem;
 }
 
+.latest-commit-metadata {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+}
+
+.latest-build-status {
+  align-items: center;
+  display: flex;
+  gap: 0.45rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.latest-build-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.latest-build-status:hover .build-status {
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.build-status-none {
+  background: var(--surface);
+  color: var(--muted);
+}
+
 code {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
@@ -2056,6 +2091,216 @@ table {
   padding-left: 1rem;
 }
 
+.repository-builds .section-heading {
+  justify-content: flex-start;
+}
+
+.build-refresh-state {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin-left: auto;
+  max-width: min(24rem, 40vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.build-list {
+  display: grid;
+  gap: 0.65rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.build-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border-strong);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.build-item-queued {
+  border-left-color: var(--warning-border);
+}
+
+.build-item-running {
+  border-left-color: var(--build-running);
+}
+
+.build-item-succeeded {
+  border-left-color: var(--build-succeeded);
+}
+
+.build-item-failed {
+  border-left-color: var(--build-failed);
+}
+
+.build-summary {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  min-height: 4.6rem;
+  padding: 0.75rem 0.9rem;
+}
+
+.build-identity {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.build-title {
+  align-items: center;
+  display: flex;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.build-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.build-title code {
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.18rem 0.35rem;
+}
+
+.build-metadata {
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.75rem;
+  gap: 0.3rem 0.8rem;
+}
+
+.build-metadata span + span::before {
+  content: "·";
+  margin-right: 0.8rem;
+}
+
+.build-controls {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.65rem;
+}
+
+.build-status {
+  align-items: center;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 0.75rem;
+  font-weight: 750;
+  gap: 0.35rem;
+  min-height: 1.75rem;
+  padding: 0.15rem 0.55rem;
+}
+
+.build-status .icon {
+  height: 0.9rem;
+  width: 0.9rem;
+}
+
+.build-status-queued {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.build-status-running {
+  background: var(--build-running-soft);
+  color: var(--build-running);
+}
+
+.build-status-succeeded {
+  background: var(--build-succeeded-soft);
+  color: var(--build-succeeded);
+}
+
+.build-status-failed {
+  background: var(--build-failed-soft);
+  color: var(--build-failed);
+}
+
+.build-status-running .icon {
+  animation: build-status-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes build-status-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .build-status-running .icon {
+    animation: none;
+  }
+}
+
+.build-error {
+  background: var(--danger-soft);
+  border-top: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  color: var(--danger);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding: 0.65rem 0.9rem;
+}
+
+.build-log-panel {
+  border-top: 1px solid var(--border);
+}
+
+.build-log-header {
+  align-items: center;
+  background: var(--surface-subtle);
+  display: flex;
+  justify-content: space-between;
+  min-height: 3rem;
+  padding: 0.45rem 0.75rem;
+}
+
+.build-log-header strong {
+  font-size: 0.85rem;
+}
+
+.build-log-header .button {
+  min-height: 2.1rem;
+}
+
+.build-log {
+  background: var(--code-bg);
+  border: 0;
+  border-radius: 0;
+  color: var(--code-text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  margin: 0;
+  max-height: 36rem;
+  min-height: 5rem;
+  overflow: auto;
+  padding: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.build-log:focus {
+  outline: 3px solid color-mix(in srgb, var(--focus) 35%, transparent);
+  outline-offset: -3px;
+}
+
 .history-list {
   display: grid;
   gap: 0.55rem;
@@ -2364,6 +2609,19 @@ table {
     padding: 0;
   }
 
+  .build-summary {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .build-controls {
+    justify-content: space-between;
+  }
+
+  .build-log {
+    max-height: 28rem;
+  }
+
   .resource-description {
     white-space: normal;
   }
@@ -2372,7 +2630,12 @@ table {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .latest-commit > code {
+  .latest-commit-metadata {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
+  .latest-commit-metadata > code {
     display: none;
   }
 
@@ -2557,6 +2820,10 @@ table {
   .repository-navigation a {
     flex: 1;
     justify-content: center;
+  }
+
+  .build-refresh-state {
+    display: none;
   }
 
   .markdown-body {

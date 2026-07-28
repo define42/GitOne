@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
@@ -634,12 +635,71 @@ func TestNativeGitPushUsesSelfContainedPack(t *testing.T) {
 	runGit(t, checkout, "push", "origin", "main")
 }
 
+func TestNativeGitPushNotifiesRepositoryUpdate(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is not available")
+	}
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	notifications := make(chan []ReferenceUpdate, 1)
+	server := httptest.NewServer(Handler{
+		Storage: store,
+		RepositoryUpdated: func(repository repopath.Repository, updates []ReferenceUpdate) {
+			if repository.Full() != repositoryPath.Full() {
+				t.Errorf("notification repository = %q", repository.Full())
+			}
+			notifications <- updates
+		},
+	})
+	defer server.Close()
+
+	checkout := filepath.Join(t.TempDir(), "api")
+	runGit(t, "", "clone", server.URL+"/engineering/api.git", checkout)
+	runGit(t, checkout, "config", "user.name", "alice")
+	runGit(t, checkout, "config", "user.email", "alice@localhost")
+	if err := os.WriteFile(filepath.Join(checkout, "api.go"), []byte("package api\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, checkout, "add", "api.go")
+	runGit(t, checkout, "commit", "-m", "Add API")
+	expected := strings.TrimSpace(runGitOutput(t, checkout, "rev-parse", "HEAD"))
+	runGit(t, checkout, "push", "origin", "main")
+
+	select {
+	case updates := <-notifications:
+		if len(updates) != 1 ||
+			updates[0].Branch != "main" ||
+			updates[0].Commit.String() != expected {
+			t.Fatalf("unexpected repository updates: %#v", updates)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("repository update notification was not received")
+	}
+}
+
 func runGit(t *testing.T, directory string, args ...string) {
+	t.Helper()
+	_ = runGitOutput(t, directory, args...)
+}
+
+func runGitOutput(t *testing.T, directory string, args ...string) string {
 	t.Helper()
 	command := exec.Command("git", args...)
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
+	} else {
+		return string(output)
 	}
+	return ""
 }

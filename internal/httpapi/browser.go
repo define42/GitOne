@@ -391,6 +391,7 @@ func (a API) createRepositoryBranch(ctx context.Context, input *createRepository
 	if err = repository.Storer.SetReference(plumbing.NewHashReference(branchName, source.Hash())); err != nil {
 		return nil, huma.Error409Conflict("could not create branch", err)
 	}
+	a.scheduleBuild(parsed, input.Branch, source.Hash())
 
 	output := &createRepositoryBranchOutput{}
 	output.Body.Repository = parsed.Full()

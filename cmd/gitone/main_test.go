@@ -80,4 +80,15 @@ func TestNewServerRejectsInvalidConfiguration(t *testing.T) {
 			t.Fatal("short session hash key was accepted")
 		}
 	})
+
+	t.Run("invalid runner workers", func(t *testing.T) {
+		setValidEnvironment(t)
+		if _, _, err := newServer([]string{
+			"-root", t.TempDir(),
+			"-runner",
+			"-runner-workers", "-1",
+		}); err == nil || !strings.Contains(err.Error(), "workers") {
+			t.Fatalf("invalid runner workers error = %v", err)
+		}
+	})
 }

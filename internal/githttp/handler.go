@@ -29,11 +29,17 @@ var fallbackReceiveMu sync.Mutex
 
 type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 
+type ReferenceUpdate struct {
+	Branch string
+	Commit plumbing.Hash
+}
+
 type Handler struct {
-	Storage        storage.Store
-	Authorize      Authorizer
-	ReceiveMu      *sync.Mutex
-	ControlUpdated func(string)
+	Storage           storage.Store
+	Authorize         Authorizer
+	ReceiveMu         *sync.Mutex
+	ControlUpdated    func(string)
+	RepositoryUpdated func(repopath.Repository, []ReferenceUpdate)
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -230,6 +236,7 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 	status := packp.NewReportStatus()
 	status.UnpackStatus = "ok"
 	allApplied := true
+	updates := make([]ReferenceUpdate, 0, len(req.Commands))
 	for _, command := range req.Commands {
 		err = applyReferenceCommand(repository, command)
 		commandStatus := &packp.CommandStatus{
@@ -239,12 +246,22 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		if err != nil {
 			commandStatus.Status = err.Error()
 			allApplied = false
+		} else if repo.Name != "control" &&
+			command.New != plumbing.ZeroHash &&
+			command.Name.IsBranch() {
+			updates = append(updates, ReferenceUpdate{
+				Branch: command.Name.Short(),
+				Commit: command.New,
+			})
 		}
 		status.CommandStatuses = append(status.CommandStatuses, commandStatus)
 	}
 	h.writeReceiveStatus(w, req, status)
 	if allApplied && repo.Name == "control" && h.ControlUpdated != nil {
 		h.ControlUpdated(repo.Group())
+	}
+	if allApplied && len(updates) > 0 && h.RepositoryUpdated != nil {
+		h.RepositoryUpdated(repo, updates)
 	}
 }
 

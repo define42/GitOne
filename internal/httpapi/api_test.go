@@ -2,14 +2,103 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/runner"
 	"github.com/define42/GitOne/internal/storage"
 )
+
+func TestRepositoryBuildEndpoints(t *testing.T) {
+	service, credentials, commit := repositoryAPIFixture(t)
+	buildStore := runner.Store{Root: filepath.Join(t.TempDir(), "builds")}
+	service.Builds = &buildStore
+	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	build := runner.Job{
+		ID:         "build-1",
+		Repository: repository.Full(),
+		Branch:     "main",
+		Commit:     commit,
+		Image:      "golang:1.25",
+		Status:     runner.StatusSucceeded,
+		CreatedAt:  time.Now().UTC(),
+	}
+	directory := filepath.Join(buildStore.Root, "engineering", "api")
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := json.Marshal(build)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(directory, build.ID+".json"), contents, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(directory, build.ID+".log"), []byte("tests passed\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := service.listRepositoryBuilds(context.Background(), &repositoryBuildsInput{
+		AuthInput: credentials, Repository: repository.Full(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Body.Repository != repository.Full() ||
+		len(list.Body.Builds) != 1 ||
+		list.Body.Builds[0].ID != build.ID {
+		t.Fatalf("unexpected build list: %#v", list.Body)
+	}
+	detail, err := service.getRepositoryBuild(context.Background(), &repositoryBuildInput{
+		AuthInput:  credentials,
+		Repository: repository.Full(),
+		ID:         build.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Body.Build.ID != build.ID || detail.Body.Log != "tests passed\n" {
+		t.Fatalf("unexpected build detail: %#v", detail.Body)
+	}
+
+	mux := http.NewServeMux()
+	Register(mux, service)
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/repositories/engineering%2Fapi/builds/"+build.ID,
+		nil,
+	)
+	request.SetBasicAuth("alice", "secret")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"build detail HTTP status: expected %d, got %d: %s",
+			http.StatusOK,
+			response.Code,
+			response.Body.String(),
+		)
+	}
+	var responseBody struct {
+		Build runner.Job `json:"build"`
+		Log   string     `json:"log"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &responseBody); err != nil {
+		t.Fatal(err)
+	}
+	if responseBody.Build.ID != build.ID || responseBody.Log != "tests passed\n" {
+		t.Fatalf("unexpected HTTP build detail: %#v", responseBody)
+	}
+}
 
 func TestRenameGroupControlsRejectsMissingAndExistingDestination(t *testing.T) {
 	root := t.TempDir()

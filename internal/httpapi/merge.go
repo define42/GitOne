@@ -133,6 +133,7 @@ func (a API) mergeRepositoryBranches(
 		if err = repository.Storer.CheckAndSetReference(updated, targetRef); err != nil {
 			return nil, huma.Error409Conflict("target branch changed while it was being merged", err)
 		}
+		a.scheduleBuild(parsed, targetName, sourceRef.Hash())
 		output.Body.Commit = sourceRef.Hash().String()
 		output.Body.Strategy = "fast-forward"
 		return output, nil
@@ -205,6 +206,7 @@ func (a API) mergeRepositoryBranches(
 	if err = repository.Storer.CheckAndSetReference(updated, targetRef); err != nil {
 		return nil, huma.Error409Conflict("target branch changed while it was being merged", err)
 	}
+	a.scheduleBuild(parsed, targetName, commitHash)
 
 	output.Body.Commit = commitHash.String()
 	output.Body.Strategy = "merge-commit"
