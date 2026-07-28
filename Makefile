@@ -15,6 +15,5 @@ run: ui
 	$(GO) run ./cmd/gitone $(RUN_ARGS)
 docker:
 	docker compose stop
-	killall -9 gitone -q
 	docker compose build
 	docker compose up
