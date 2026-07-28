@@ -1,5 +1,7 @@
 # GitOne Server
 
+[![codecov](https://codecov.io/gh/define42/GitOne/graph/badge.svg?token=QQLLp3t2wD)](https://codecov.io/gh/define42/GitOne)
+
 Initial pure-Go Git Smart HTTP and Git LFS server with a Huma administration API and a small TypeScript UI. There is no SSH, database, native `git` binary, or CGO.
 
 ## Storage
