@@ -197,7 +197,22 @@ func (h Handler) upload(r *http.Request, p, oid string) error {
 	return os.Rename(name, p)
 }
 func (h Handler) objectPath(repo repopath.Repository, oid string) (string, error) {
-	root, e := h.Storage.LFSPath(repo)
+	return objectPath(h.Storage, repo, oid)
+}
+
+func OpenObject(store storage.Store, repo repopath.Repository, oid string) (*os.File, error) {
+	if !validOID(oid) {
+		return nil, errors.New("invalid oid")
+	}
+	path, err := objectPath(store, repo, oid)
+	if err != nil {
+		return nil, err
+	}
+	return os.Open(path)
+}
+
+func objectPath(store storage.Store, repo repopath.Repository, oid string) (string, error) {
+	root, e := store.LFSPath(repo)
 	if e != nil {
 		return "", e
 	}

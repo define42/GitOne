@@ -892,6 +892,145 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 }
 
+func TestRepositoryBrowserResolvesLFSContent(t *testing.T) {
+	const (
+		oid     = "f7895326610712feb431767ef21f7e7eaec2bee6d99db789a212ed3a872b8f2a"
+		content = "hello from inside LFS\n"
+		pointer = "version https://git-lfs.github.com/spec/v1\n" +
+			"oid sha256:" + oid + "\n" +
+			"size 22\n"
+	)
+
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lfsPath, err := store.LFSPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objectPath := filepath.Join(lfsPath, "objects", oid[:2], oid[2:4], oid)
+	if err = os.MkdirAll(filepath.Dir(objectPath), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(objectPath, []byte(content), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	gitPath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(t.TempDir(), "api")
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(checkout, "notes.txt"), []byte(pointer), 0644); err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := repository.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Add("notes.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = worktree.Commit("Add LFS notes", &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "alice",
+			Email: "alice@localhost",
+			When:  time.Now().UTC(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.Push(&git.PushOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := New(Config{
+		Root:           root,
+		BootstrapUser:  "alice",
+		BootstrapToken: "secret",
+	})
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/repositories/engineering%2Fapi/blob/main/notes.txt",
+		nil,
+	)
+	request.SetBasicAuth("alice", "secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("read LFS file: expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	var blob struct {
+		Size     int64  `json:"size"`
+		Encoding string `json:"encoding"`
+		Content  string `json:"content"`
+		CanEdit  bool   `json:"canEdit"`
+		LFS      bool   `json:"lfs"`
+		LFSOID   string `json:"lfsOid"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &blob); err != nil {
+		t.Fatal(err)
+	}
+	if blob.Size != int64(len(content)) ||
+		blob.Encoding != "utf-8" ||
+		blob.Content != content ||
+		blob.CanEdit ||
+		!blob.LFS ||
+		blob.LFSOID != oid {
+		t.Fatalf("unexpected resolved LFS blob: %#v", blob)
+	}
+
+	treeRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/api/repositories/engineering%2Fapi/tree/main",
+		nil,
+	)
+	treeRequest.SetBasicAuth("alice", "secret")
+	treeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(treeResponse, treeRequest)
+	if treeResponse.Code != http.StatusOK {
+		t.Fatalf("list LFS file: expected status %d, got %d: %s", http.StatusOK, treeResponse.Code, treeResponse.Body.String())
+	}
+	var tree struct {
+		Entries []struct {
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+			LFS  bool   `json:"lfs"`
+		} `json:"entries"`
+	}
+	if err = json.Unmarshal(treeResponse.Body.Bytes(), &tree); err != nil {
+		t.Fatal(err)
+	}
+	var lfsEntry *struct {
+		Name string `json:"name"`
+		Size int64  `json:"size"`
+		LFS  bool   `json:"lfs"`
+	}
+	for index := range tree.Entries {
+		if tree.Entries[index].Name == "notes.txt" {
+			lfsEntry = &tree.Entries[index]
+			break
+		}
+	}
+	if lfsEntry == nil || !lfsEntry.LFS || lfsEntry.Size != int64(len(content)) {
+		t.Fatalf("unexpected LFS tree entry: %#v", lfsEntry)
+	}
+}
+
 func TestCompareAndMergeRepositoryBranches(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}

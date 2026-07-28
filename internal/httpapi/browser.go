@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	pathpkg "path"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -111,6 +113,7 @@ type repositoryTreeEntry struct {
 	Mode string `json:"mode" doc:"Git file mode"`
 	Hash string `json:"hash" doc:"Git object hash"`
 	Size int64  `json:"size,omitempty" doc:"File size in bytes"`
+	LFS  bool   `json:"lfs,omitempty" doc:"Whether the file is stored with Git LFS"`
 }
 
 type repositoryBranch struct {
@@ -158,6 +161,8 @@ type repositoryBlobOutput struct {
 		Language        string `json:"language,omitempty"`
 		HighlightedHTML string `json:"highlightedHtml,omitempty"`
 		CanEdit         bool   `json:"canEdit" doc:"Whether this file and reference can be edited by the authenticated user"`
+		LFS             bool   `json:"lfs,omitempty" doc:"Whether content was resolved from Git LFS storage"`
+		LFSOID          string `json:"lfsOid,omitempty" doc:"SHA-256 object ID for resolved Git LFS content"`
 	}
 }
 
@@ -441,6 +446,10 @@ func (a API) listRepositoryTree(ctx context.Context, authorization, repositoryPa
 		if item.Type == "file" {
 			if blob, blobErr := repository.BlobObject(entry.Hash); blobErr == nil {
 				item.Size = blob.Size
+				if pointer, ok := repositoryLFSPointer(blob); ok {
+					item.LFS = true
+					item.Size = pointer.Size
+				}
 			}
 		}
 		entries = append(entries, item)
@@ -453,6 +462,22 @@ func (a API) listRepositoryTree(ctx context.Context, authorization, repositoryPa
 	output.Body.Path = cleanPath
 	output.Body.Entries = entries
 	return output, nil
+}
+
+func repositoryLFSPointer(blob *object.Blob) (lfs.Pointer, bool) {
+	if blob.Size > lfs.MaxPointerSize {
+		return lfs.Pointer{}, false
+	}
+	reader, err := blob.Reader()
+	if err != nil {
+		return lfs.Pointer{}, false
+	}
+	defer reader.Close()
+	content, err := io.ReadAll(io.LimitReader(reader, lfs.MaxPointerSize+1))
+	if err != nil {
+		return lfs.Pointer{}, false
+	}
+	return lfs.ParsePointer(content)
 }
 
 func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPathInput) (*repositoryBlobOutput, error) {
@@ -487,6 +512,39 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 		return nil, huma.Error500InternalServerError("could not read Git blob", err)
 	}
 
+	pointer, isLFS := lfs.ParsePointer(content)
+	contentSize := file.Blob.Size
+	if isLFS {
+		if pointer.Size > maxBrowsableBlobSize {
+			return nil, huma.Error413RequestEntityTooLarge(
+				fmt.Sprintf("LFS object exceeds the %d-byte browsing limit", maxBrowsableBlobSize),
+			)
+		}
+		lfsObject, openErr := lfs.OpenObject(a.Storage, parsed, pointer.OID)
+		if errors.Is(openErr, os.ErrNotExist) {
+			return nil, huma.Error404NotFound("LFS object not found", openErr)
+		}
+		if openErr != nil {
+			return nil, huma.Error500InternalServerError("could not open LFS object", openErr)
+		}
+		defer lfsObject.Close()
+		info, statErr := lfsObject.Stat()
+		if statErr != nil {
+			return nil, huma.Error500InternalServerError("could not inspect LFS object", statErr)
+		}
+		if info.Size() != pointer.Size {
+			return nil, huma.Error500InternalServerError(
+				"LFS object size does not match its pointer",
+				fmt.Errorf("expected %d bytes, found %d", pointer.Size, info.Size()),
+			)
+		}
+		content, err = io.ReadAll(io.LimitReader(lfsObject, maxBrowsableBlobSize+1))
+		if err != nil {
+			return nil, huma.Error500InternalServerError("could not read LFS object", err)
+		}
+		contentSize = pointer.Size
+	}
+
 	encoding := "utf-8"
 	encodedContent := string(content)
 	if !utf8.Valid(content) || containsBinaryData(content) {
@@ -500,9 +558,13 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 	output.Body.Commit = commit.Hash.String()
 	output.Body.Path = cleanPath
 	output.Body.Hash = file.Blob.Hash.String()
-	output.Body.Size = file.Blob.Size
+	output.Body.Size = contentSize
 	output.Body.Encoding = encoding
 	output.Body.Content = encodedContent
+	output.Body.LFS = isLFS
+	if isLFS {
+		output.Body.LFSOID = pointer.OID
+	}
 	if encoding == "utf-8" {
 		output.Body.HighlightedHTML, output.Body.Language = highlightRepositoryBlob(
 			cleanPath,
@@ -511,6 +573,7 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 		branchName, branchRef, _, branchErr := resolveBranch(repository, input.Ref)
 		_, writeErr := a.authorize(ctx, input.Authorization, parsed.Group(), control.RoleWrite)
 		output.Body.CanEdit = branchErr == nil &&
+			!isLFS &&
 			branchName == input.Ref &&
 			branchRef.Hash() == commit.Hash &&
 			writeErr == nil &&

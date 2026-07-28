@@ -1731,9 +1731,10 @@ async function repositoryBlobSection(route, content) {
     const heading = sectionHeading(content.path, undefined, editButton ? [editButton] : []);
     const metadata = element("p", [
         formatFileSize(content.size),
+        content.lfs ? "Git LFS" : undefined,
         content.language,
         content.encoding,
-        content.hash.slice(0, 12),
+        (content.lfsOid ?? content.hash).slice(0, 12),
     ].filter(Boolean).join(" · "));
     metadata.className = "file-metadata";
     const body = element("div");
@@ -2068,6 +2069,12 @@ async function renderRepositoryBrowser(route) {
                 else if (entry.type === "file") {
                     const link = element("a");
                     link.append(icon("file"), document.createTextNode(entry.name));
+                    if (entry.lfs) {
+                        const badge = element("span", "LFS");
+                        badge.className = "lfs-badge";
+                        badge.title = "Stored with Git LFS";
+                        link.append(badge);
+                    }
                     link.href = repositoryBrowserURL(route.repository, {
                         ref: route.ref,
                         file: entry.path,

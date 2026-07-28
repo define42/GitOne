@@ -65,6 +65,7 @@ interface RepositoryTreeEntry {
   mode: string;
   hash: string;
   size?: number;
+  lfs?: boolean;
 }
 
 interface RepositoryTree {
@@ -87,6 +88,8 @@ interface RepositoryBlob {
   language?: string;
   highlightedHtml?: string;
   canEdit: boolean;
+  lfs?: boolean;
+  lfsOid?: string;
 }
 
 interface RepositoryFileUpdate {
@@ -2234,9 +2237,10 @@ async function repositoryBlobSection(
     "p",
     [
       formatFileSize(content.size),
+      content.lfs ? "Git LFS" : undefined,
       content.language,
       content.encoding,
-      content.hash.slice(0, 12),
+      (content.lfsOid ?? content.hash).slice(0, 12),
     ].filter(Boolean).join(" · "),
   );
   metadata.className = "file-metadata";
@@ -2623,6 +2627,12 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
         } else if (entry.type === "file") {
           const link = element("a");
           link.append(icon("file"), document.createTextNode(entry.name));
+          if (entry.lfs) {
+            const badge = element("span", "LFS");
+            badge.className = "lfs-badge";
+            badge.title = "Stored with Git LFS";
+            link.append(badge);
+          }
           link.href = repositoryBrowserURL(route.repository, {
             ref: route.ref,
             file: entry.path,

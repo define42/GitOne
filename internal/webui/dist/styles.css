@@ -1719,6 +1719,21 @@ table {
   color: var(--muted);
 }
 
+.lfs-badge {
+  align-items: center;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 0.625rem;
+  font-weight: 750;
+  line-height: 1;
+  min-height: 1rem;
+  padding: 0 0.28rem;
+  text-decoration: none;
+}
+
 .file-metadata {
   color: var(--muted);
   font-size: 0.8rem;
