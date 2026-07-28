@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -62,5 +63,88 @@ func TestSessionConfigFromEnvironment(t *testing.T) {
 	if ephemeral || config.MaxAge != 2*time.Hour || config.Secure ||
 		len(config.HashKey) != 64 || len(config.BlockKey) != 32 {
 		t.Fatalf("unexpected session config: %#v ephemeral=%v", config, ephemeral)
+	}
+}
+
+func TestDecodeSessionKey(t *testing.T) {
+	want := []byte("session key material")
+	for _, test := range []struct {
+		name, value string
+		wantErr     bool
+	}{
+		{name: "standard Base64", value: base64.StdEncoding.EncodeToString(want)},
+		{name: "raw Base64", value: base64.RawStdEncoding.EncodeToString(want)},
+		{name: "invalid", value: "not base64!", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			key, err := decodeSessionKey(test.value)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("decodeSessionKey(%q) unexpectedly succeeded", test.value)
+				}
+				return
+			}
+			if err != nil || !bytes.Equal(key, want) {
+				t.Fatalf("decodeSessionKey() = %q, %v; want %q", key, err, want)
+			}
+		})
+	}
+}
+
+func TestSessionConfigurationRejectsInvalidValues(t *testing.T) {
+	validHash := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("h", 64)))
+	validBlock := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("b", 32)))
+	for _, test := range []struct {
+		name, hash, block, maxAge, secure string
+	}{
+		{name: "hash without block", hash: validHash},
+		{name: "block without hash", block: validBlock},
+		{name: "invalid hash encoding", hash: "not base64!", block: validBlock},
+		{name: "maximum age too short", hash: validHash, block: validBlock, maxAge: "500ms"},
+		{name: "invalid secure flag", hash: validHash, block: validBlock, secure: "sometimes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GITONE_SESSION_HASH_KEY", test.hash)
+			t.Setenv("GITONE_SESSION_BLOCK_KEY", test.block)
+			t.Setenv("GITONE_SESSION_MAX_AGE", test.maxAge)
+			t.Setenv("GITONE_SESSION_SECURE", test.secure)
+			if _, _, err := SessionConfigFromEnvironment(true); err == nil {
+				t.Fatal("invalid session configuration was accepted")
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		config SessionConfig
+	}{
+		{
+			name: "short hash key",
+			config: SessionConfig{
+				HashKey:  []byte(strings.Repeat("h", 31)),
+				BlockKey: []byte(strings.Repeat("b", 32)),
+			},
+		},
+		{
+			name: "invalid block key",
+			config: SessionConfig{
+				HashKey:  []byte(strings.Repeat("h", 64)),
+				BlockKey: []byte(strings.Repeat("b", 20)),
+			},
+		},
+		{
+			name: "maximum age too short",
+			config: SessionConfig{
+				HashKey:  []byte(strings.Repeat("h", 64)),
+				BlockKey: []byte(strings.Repeat("b", 32)),
+				MaxAge:   time.Millisecond,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewSessionManager(test.config); err == nil {
+				t.Fatal("invalid session manager configuration was accepted")
+			}
+		})
 	}
 }

@@ -236,6 +236,50 @@ func TestCreateRepositoryWithDescriptionOnly(t *testing.T) {
 	}
 }
 
+func TestCreateRepositoryRejectsInvalidStateAndCleansUpGit(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+
+	if err := store.CreateRepository(repositoryPath, CreateRepositoryOptions{}); err == nil {
+		t.Fatal("repository was created without its group")
+	}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRepository(
+		repopath.Repository{Groups: []string{"engineering"}, Name: "control"},
+		CreateRepositoryOptions{},
+	); err == nil {
+		t.Fatal("reserved control repository was created")
+	}
+
+	blockedLFS := filepath.Join(root, "engineering", "api.lfs")
+	if err := os.WriteFile(blockedLFS, []byte("not a directory"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRepository(repositoryPath, CreateRepositoryOptions{}); err == nil {
+		t.Fatal("repository was created with an unusable LFS path")
+	}
+	gitPath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(gitPath); !os.IsNotExist(err) {
+		t.Fatalf("failed repository creation left Git data behind: %v", err)
+	}
+	if err = os.Remove(blockedLFS); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = store.CreateRepository(repositoryPath, CreateRepositoryOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.CreateRepository(repositoryPath, CreateRepositoryOptions{}); err == nil {
+		t.Fatal("duplicate repository was created")
+	}
+}
+
 func TestSubgroupNeedsParent(t *testing.T) {
 	s := Store{Root: t.TempDir()}
 	if e := s.CreateGroup("a/b", "alice", ""); e == nil {
@@ -288,5 +332,185 @@ func TestListGroupsAndRepositories(t *testing.T) {
 		len(groups[1].Repositories) != 1 ||
 		groups[1].Repositories[0] != "api" {
 		t.Fatalf("unexpected subgroup: %#v", groups[1])
+	}
+}
+
+func TestRepositoryAndGroupDeletionPreservesDataInTrash(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lfsPath, err := store.LFSPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadPath := filepath.Join(lfsPath, "objects", "aa", "bb", "payload")
+	if err = os.MkdirAll(filepath.Dir(payloadPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("preserve this LFS object")
+	if err = os.WriteFile(payloadPath, payload, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = store.RenameRepository(repositoryPath, "service"); err != nil {
+		t.Fatal(err)
+	}
+	renamedPath := repopath.Repository{Groups: []string{"engineering"}, Name: "service"}
+	renamedGitPath, err := store.GitPath(renamedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = git.PlainOpen(renamedGitPath); err != nil {
+		t.Fatalf("open renamed repository: %v", err)
+	}
+	renamedLFSPath, err := store.LFSPath(renamedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contents, readErr := os.ReadFile(filepath.Join(renamedLFSPath, "objects", "aa", "bb", "payload")); readErr != nil ||
+		string(contents) != string(payload) {
+		t.Fatalf("renamed LFS payload = %q, %v", contents, readErr)
+	}
+
+	if err = store.DeleteRepository(renamedPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{renamedGitPath, renamedLFSPath} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("deleted repository path still exists: %s: %v", path, statErr)
+		}
+	}
+
+	var foundGit, foundPayload bool
+	err = filepath.Walk(filepath.Join(root, ".trash"), func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		switch info.Name() {
+		case "service.git":
+			if _, openErr := git.PlainOpen(path); openErr != nil {
+				t.Fatalf("trashed Git repository cannot be opened: %v", openErr)
+			}
+			foundGit = true
+		case "payload":
+			contents, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			if string(contents) != string(payload) {
+				t.Fatalf("trashed LFS payload = %q, want %q", contents, payload)
+			}
+			foundPayload = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !foundGit || !foundPayload {
+		t.Fatalf("trash is missing Git or LFS data: git=%v lfs=%v", foundGit, foundPayload)
+	}
+
+	if err = store.DeleteGroup("engineering"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(filepath.Join(root, "engineering")); !os.IsNotExist(err) {
+		t.Fatalf("deleted group still exists: %v", err)
+	}
+}
+
+func TestRenameRepositoryRollsBackGitWhenLFSMoveFails(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, CreateRepositoryOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	originalGit, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalLFS, err := store.LFSPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedLFS := filepath.Join(root, "engineering", "service.lfs")
+	if err = os.MkdirAll(blockedLFS, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(blockedLFS, "blocker"), []byte("occupied"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = store.RenameRepository(repositoryPath, "service"); err == nil {
+		t.Fatal("repository rename unexpectedly succeeded with an occupied LFS destination")
+	}
+	if _, err = git.PlainOpen(originalGit); err != nil {
+		t.Fatalf("Git repository was not rolled back: %v", err)
+	}
+	if _, err = os.Stat(originalLFS); err != nil {
+		t.Fatalf("LFS repository moved despite rollback: %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(root, "engineering", "service.git")); !os.IsNotExist(err) {
+		t.Fatalf("renamed Git repository remained after rollback: %v", err)
+	}
+	if contents, readErr := os.ReadFile(filepath.Join(blockedLFS, "blocker")); readErr != nil ||
+		string(contents) != "occupied" {
+		t.Fatalf("blocked destination changed: %q, %v", contents, readErr)
+	}
+}
+
+func TestRenameGroupMovesNestedRepositoriesAndRejectsInvalidDestinations(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateGroup("engineering/backend", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRepository(
+		repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "api"},
+		CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RenameGroup("engineering", "engineering/backend/moved"); err == nil {
+		t.Fatal("group moved into itself")
+	}
+	if err := store.RenameGroup("engineering", "missing/engineering"); err == nil {
+		t.Fatal("group moved below a missing parent")
+	}
+	if err := store.RenameGroup("engineering", "platform"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.PlainOpen(filepath.Join(root, "platform", "backend", "api.git")); err != nil {
+		t.Fatalf("nested repository did not move with group: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "engineering")); !os.IsNotExist(err) {
+		t.Fatalf("old group path still exists: %v", err)
+	}
+
+	if err := store.CreateGroup("destination", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RenameGroup("platform", "destination"); err == nil {
+		t.Fatal("group replaced an existing destination")
+	}
+	if _, err := git.PlainOpen(filepath.Join(root, "platform", "backend", "api.git")); err != nil {
+		t.Fatalf("failed group rename moved nested repository: %v", err)
 	}
 }

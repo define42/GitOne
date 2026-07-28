@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -113,5 +114,93 @@ func TestUploadEnforcesObjectAndStorageLimits(t *testing.T) {
 	}
 	if response := upload("7"); response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("storage overflow returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProtocolRoutesAndFailures(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(root+"/g/r.lfs/objects", 0o750); err != nil {
+		t.Fatal(err)
+	}
+	allowed := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+	}
+	request := func(handler Handler, method, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(method, path, nil))
+		return response
+	}
+	missingOID := string(bytes.Repeat([]byte{'0'}, 64))
+
+	for _, test := range []struct {
+		name, method, path string
+		status             int
+	}{
+		{
+			name:   "invalid repository path",
+			method: http.MethodGet,
+			path:   "/r.git/info/lfs/objects/" + missingOID,
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "unknown LFS route",
+			method: http.MethodGet,
+			path:   "/g/r.git",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "verify",
+			method: http.MethodPost,
+			path:   "/g/r.git/info/lfs/objects/verify",
+			status: http.StatusOK,
+		},
+		{
+			name:   "invalid object ID",
+			method: http.MethodGet,
+			path:   "/g/r.git/info/lfs/objects/invalid",
+			status: http.StatusBadRequest,
+		},
+		{
+			name:   "missing object",
+			method: http.MethodGet,
+			path:   "/g/r.git/info/lfs/objects/" + missingOID,
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "unsupported object method",
+			method: http.MethodPost,
+			path:   "/g/r.git/info/lfs/objects/" + missingOID,
+			status: http.StatusMethodNotAllowed,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := request(allowed, test.method, test.path)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.status, response.Body.String())
+			}
+		})
+	}
+
+	denied := allowed
+	denied.Authorize = func(*http.Request, repopath.Repository, bool) (bool, bool) {
+		return false, false
+	}
+	response := request(denied, http.MethodPost, "/g/r.git/info/lfs/objects/verify")
+	if response.Code != http.StatusUnauthorized ||
+		response.Header().Get("WWW-Authenticate") != `Basic realm="GitOne"` {
+		t.Fatalf("denied verify returned %d with challenge %q", response.Code, response.Header().Get("WWW-Authenticate"))
+	}
+
+	failedPolicy := allowed
+	failedPolicy.Policy = func(*http.Request, repopath.Repository) (control.RepositoryPolicy, error) {
+		return control.RepositoryPolicy{}, errors.New("control repository unavailable")
+	}
+	response = request(failedPolicy, http.MethodPost, "/g/r.git/info/lfs/objects/verify")
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("failed policy returned %d: %s", response.Code, response.Body.String())
 	}
 }

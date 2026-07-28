@@ -68,6 +68,20 @@ func TestLDAPAuthenticatorBuildsLoginIdentifier(t *testing.T) {
 	}
 }
 
+func TestParsedLDAPScheme(t *testing.T) {
+	for _, test := range []struct {
+		value, want string
+	}{
+		{value: "ldap://directory.example:389", want: "ldap"},
+		{value: "ldaps://directory.example:636", want: "ldaps"},
+		{value: "://invalid", want: ""},
+	} {
+		if got := parsedLDAPScheme(test.value); got != test.want {
+			t.Fatalf("parsedLDAPScheme(%q) = %q, want %q", test.value, got, test.want)
+		}
+	}
+}
+
 func TestLDAPAuthenticatorRejectsIncompleteConfiguration(t *testing.T) {
 	for _, config := range []LDAPConfig{
 		{},

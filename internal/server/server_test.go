@@ -572,6 +572,173 @@ func TestLFSBatchUploadAndDownloadOverHTTP(t *testing.T) {
 	if response.Header.Get("ETag") != `"`+oid+`"` {
 		t.Fatalf("unexpected LFS object ETag: %q", response.Header.Get("ETag"))
 	}
+
+	store := storage.Store{Root: root}
+	controls := control.NewStore(root)
+	document, err := controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Repositories["assets"] = control.RepositoryPolicy{
+		LFS: control.LFSPolicy{
+			Enabled:             true,
+			MaximumStorageBytes: int64(len(content) + 4),
+		},
+	}
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	handler = New(Config{
+		Root:      root,
+		PublicURL: server.URL,
+		Directory: testLDAPDirectory(),
+	})
+
+	pendingContent := []byte("more")
+	pendingSum := sha256.Sum256(pendingContent)
+	pendingOID := hex.EncodeToString(pendingSum[:])
+	overflowContent := []byte("x")
+	overflowSum := sha256.Sum256(overflowContent)
+	overflowOID := hex.EncodeToString(overflowSum[:])
+	quotaBody, err := json.Marshal(map[string]any{
+		"operation": "upload",
+		"objects": []map[string]any{
+			{"oid": pendingOID, "size": len(pendingContent)},
+			{"oid": pendingOID, "size": len(pendingContent)},
+			{"oid": overflowOID, "size": len(overflowContent)},
+			{"oid": "invalid", "size": -1},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quotaResponse, quotaResponseBody := doRequest(
+		http.MethodPost,
+		batchURL,
+		quotaBody,
+		"application/vnd.git-lfs+json",
+		true,
+	)
+	if quotaResponse.StatusCode != http.StatusOK {
+		t.Fatalf("quota batch returned %d: %s", quotaResponse.StatusCode, quotaResponseBody)
+	}
+	var quotaBatch lfsBatchResponse
+	if err = json.Unmarshal(quotaResponseBody, &quotaBatch); err != nil {
+		t.Fatal(err)
+	}
+	if len(quotaBatch.Objects) != 4 {
+		t.Fatalf("quota batch returned unexpected objects: %#v", quotaBatch)
+	}
+	for _, index := range []int{0, 1} {
+		if quotaBatch.Objects[index].Error != nil ||
+			quotaBatch.Objects[index].Actions["upload"].Href == "" {
+			t.Fatalf("pending object %d was not accepted: %#v", index, quotaBatch.Objects[index])
+		}
+	}
+	for _, index := range []int{2, 3} {
+		if quotaBatch.Objects[index].Error == nil ||
+			quotaBatch.Objects[index].Error.Code != http.StatusUnprocessableEntity ||
+			len(quotaBatch.Objects[index].Actions) != 0 {
+			t.Fatalf("invalid quota object %d was accepted: %#v", index, quotaBatch.Objects[index])
+		}
+	}
+
+	unsupportedBody := []byte(`{"operation":"prune","objects":[]}`)
+	unsupportedResponse, _ := doRequest(
+		http.MethodPost,
+		batchURL,
+		unsupportedBody,
+		"application/vnd.git-lfs+json",
+		true,
+	)
+	if unsupportedResponse.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("unsupported LFS operation returned %d", unsupportedResponse.StatusCode)
+	}
+}
+
+func TestInternalRepositoryBrowserRequiresLDAPIdentity(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"handbook", "private"} {
+		if err := store.CreateRepository(
+			repopath.Repository{Groups: []string{"engineering"}, Name: name},
+			storage.CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controls := control.NewStore(root)
+	document, err := controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Repositories["handbook"] = control.RepositoryPolicy{Visibility: "internal"}
+	document.Repositories["private"] = control.RepositoryPolicy{Visibility: "private"}
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(New(Config{
+		Root: root,
+		Directory: staticDirectory{
+			"alice": "alice-secret",
+			"bob":   "bob-secret",
+		},
+	}))
+	t.Cleanup(server.Close)
+
+	browse := func(repository, username, password string) (int, []byte) {
+		t.Helper()
+		request, requestErr := http.NewRequest(
+			http.MethodGet,
+			server.URL+"/api/repositories/engineering%2F"+repository+"/tree/main",
+			nil,
+		)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		if username != "" {
+			request.SetBasicAuth(username, password)
+		}
+		response, requestErr := server.Client().Do(request)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		return response.StatusCode, body
+	}
+
+	for _, attempt := range []struct {
+		name, repository, username, password string
+		status                               int
+	}{
+		{name: "anonymous internal", repository: "handbook", status: http.StatusUnauthorized},
+		{name: "invalid LDAP password", repository: "handbook", username: "bob", password: "wrong", status: http.StatusUnauthorized},
+		{name: "LDAP user internal", repository: "handbook", username: "bob", password: "bob-secret", status: http.StatusOK},
+		{name: "non-member private", repository: "private", username: "bob", password: "bob-secret", status: http.StatusUnauthorized},
+		{name: "owner private", repository: "private", username: "alice", password: "alice-secret", status: http.StatusOK},
+	} {
+		t.Run(attempt.name, func(t *testing.T) {
+			status, body := browse(
+				attempt.repository,
+				attempt.username,
+				attempt.password,
+			)
+			if status != attempt.status {
+				t.Fatalf("expected status %d, got %d: %s", attempt.status, status, body)
+			}
+		})
+	}
 }
 
 func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {

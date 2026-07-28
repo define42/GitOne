@@ -2,6 +2,7 @@ package githttp
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -112,6 +113,201 @@ func TestRejectsStaleReferenceUpdate(t *testing.T) {
 	if err = validateReferenceCommands(repository, request); err == nil ||
 		!strings.Contains(err.Error(), "stale reference") {
 		t.Fatalf("expected stale reference error, got %v", err)
+	}
+}
+
+func TestValidateReferenceCommands(t *testing.T) {
+	repository, err := git.PlainInit(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := plumbing.NewBranchReferenceName("main")
+	missing := plumbing.NewBranchReferenceName("feature")
+	current := plumbing.NewHash("1111111111111111111111111111111111111111")
+	next := plumbing.NewHash("2222222222222222222222222222222222222222")
+	stale := plumbing.NewHash("3333333333333333333333333333333333333333")
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(existing, current)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name    string
+		command *packp.Command
+		wantErr string
+	}{
+		{
+			name: "create missing",
+			command: &packp.Command{
+				Name: missing,
+				Old:  plumbing.ZeroHash,
+				New:  next,
+			},
+		},
+		{
+			name: "create existing",
+			command: &packp.Command{
+				Name: existing,
+				Old:  plumbing.ZeroHash,
+				New:  next,
+			},
+			wantErr: "already exists",
+		},
+		{
+			name: "update current",
+			command: &packp.Command{
+				Name: existing,
+				Old:  current,
+				New:  next,
+			},
+		},
+		{
+			name: "delete current",
+			command: &packp.Command{
+				Name: existing,
+				Old:  current,
+				New:  plumbing.ZeroHash,
+			},
+		},
+		{
+			name: "update missing",
+			command: &packp.Command{
+				Name: missing,
+				Old:  current,
+				New:  next,
+			},
+			wantErr: "does not exist",
+		},
+		{
+			name: "stale update",
+			command: &packp.Command{
+				Name: existing,
+				Old:  stale,
+				New:  next,
+			},
+			wantErr: "stale reference",
+		},
+		{
+			name: "invalid",
+			command: &packp.Command{
+				Name: missing,
+				Old:  plumbing.ZeroHash,
+				New:  plumbing.ZeroHash,
+			},
+			wantErr: "invalid update",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := packp.NewReferenceUpdateRequest()
+			request.Commands = []*packp.Command{test.command}
+			validationErr := validateReferenceCommands(repository, request)
+			switch {
+			case test.wantErr == "" && validationErr != nil:
+				t.Fatalf("unexpected validation error: %v", validationErr)
+			case test.wantErr != "" &&
+				(validationErr == nil || !strings.Contains(validationErr.Error(), test.wantErr)):
+				t.Fatalf("validation error = %v, want containing %q", validationErr, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestApplyReferenceCommand(t *testing.T) {
+	repository, err := git.PlainInit(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := plumbing.NewBranchReferenceName("feature")
+	first := plumbing.NewHash("1111111111111111111111111111111111111111")
+	second := plumbing.NewHash("2222222222222222222222222222222222222222")
+	third := plumbing.NewHash("3333333333333333333333333333333333333333")
+
+	assertReference := func(want plumbing.Hash) {
+		t.Helper()
+		reference, referenceErr := repository.Reference(name, false)
+		if referenceErr != nil {
+			t.Fatalf("read %s: %v", name, referenceErr)
+		}
+		if reference.Hash() != want {
+			t.Fatalf("%s points to %s, want %s", name, reference.Hash(), want)
+		}
+	}
+
+	create := &packp.Command{
+		Name: name,
+		Old:  plumbing.ZeroHash,
+		New:  first,
+	}
+	if err = applyReferenceCommand(repository, create); err != nil {
+		t.Fatalf("create reference: %v", err)
+	}
+	assertReference(first)
+
+	duplicateCreate := &packp.Command{
+		Name: name,
+		Old:  plumbing.ZeroHash,
+		New:  second,
+	}
+	if err = applyReferenceCommand(repository, duplicateCreate); err == nil ||
+		!strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate create returned %v", err)
+	}
+	assertReference(first)
+
+	update := &packp.Command{
+		Name: name,
+		Old:  first,
+		New:  second,
+	}
+	if err = applyReferenceCommand(repository, update); err != nil {
+		t.Fatalf("update reference: %v", err)
+	}
+	assertReference(second)
+
+	staleUpdate := &packp.Command{
+		Name: name,
+		Old:  first,
+		New:  third,
+	}
+	if err = applyReferenceCommand(repository, staleUpdate); err == nil {
+		t.Fatal("stale update succeeded")
+	}
+	assertReference(second)
+
+	staleDelete := &packp.Command{
+		Name: name,
+		Old:  first,
+		New:  plumbing.ZeroHash,
+	}
+	if err = applyReferenceCommand(repository, staleDelete); err == nil ||
+		!strings.Contains(err.Error(), "stale reference") {
+		t.Fatalf("stale delete returned %v", err)
+	}
+	assertReference(second)
+
+	deleteCommand := &packp.Command{
+		Name: name,
+		Old:  second,
+		New:  plumbing.ZeroHash,
+	}
+	if err = applyReferenceCommand(repository, deleteCommand); err != nil {
+		t.Fatalf("delete reference: %v", err)
+	}
+	if _, err = repository.Reference(name, false); !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		t.Fatalf("deleted reference still exists or returned unexpected error: %v", err)
+	}
+
+	if err = applyReferenceCommand(repository, deleteCommand); !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		t.Fatalf("delete missing reference returned %v", err)
+	}
+
+	invalid := &packp.Command{
+		Name: name,
+		Old:  plumbing.ZeroHash,
+		New:  plumbing.ZeroHash,
+	}
+	if err = applyReferenceCommand(repository, invalid); err == nil ||
+		!strings.Contains(err.Error(), "invalid update") {
+		t.Fatalf("invalid command returned %v", err)
 	}
 }
 

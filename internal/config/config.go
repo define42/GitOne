@@ -3,7 +3,9 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -22,6 +24,13 @@ func Load(path string) (Config, error) {
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if e = d.Decode(&c); e != nil {
+		return c, e
+	}
+	var trailing any
+	if e = d.Decode(&trailing); !errors.Is(e, io.EOF) {
+		if e == nil {
+			e = fmt.Errorf("configuration must contain one JSON document")
+		}
 		return c, e
 	}
 	if c.Listen == "" {
