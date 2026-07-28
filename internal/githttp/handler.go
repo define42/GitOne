@@ -10,9 +10,12 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
 )
+
+const noThinCapability capability.Capability = "no-thin"
 
 type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 
@@ -93,6 +96,10 @@ func (h Handler) advertise(w http.ResponseWriter, r *http.Request, repo repopath
 		}
 		defer s.Close()
 		adv, err = s.AdvertisedReferencesContext(r.Context())
+		if err == nil {
+			// The filesystem pack writer cannot resolve bases omitted by thin packs.
+			err = adv.Capabilities.Set(noThinCapability)
+		}
 	}
 	if err != nil {
 		http.Error(w, err.Error(), 500)
