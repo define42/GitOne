@@ -9,7 +9,7 @@ ui:
 	$(NPM) --prefix web run build
 
 test: ui
-	$(GO) test ./...
+	$(GO) test ./... -cover
 
 run: ui
 	$(GO) run ./cmd/gitone $(RUN_ARGS)
