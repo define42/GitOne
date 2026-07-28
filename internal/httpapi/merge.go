@@ -371,6 +371,8 @@ func compareTrees(
 					file.Additions += diffLineCount(chunk.Content())
 				case fdiff.Delete:
 					file.Deletions += diffLineCount(chunk.Content())
+				case fdiff.Equal:
+					continue
 				}
 			}
 		}
@@ -670,7 +672,9 @@ func readMergeBlob(repository *git.Repository, hash plumbing.Hash) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
+	defer func() {
+		_ = reader.Close()
+	}()
 	content, err := io.ReadAll(io.LimitReader(reader, maxAutomaticMergeBlobSize+1))
 	if err != nil {
 		return nil, err

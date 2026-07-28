@@ -46,6 +46,7 @@ func ParseGitRequestPath(p string) (Repository, string, error) {
 	}
 	return Repository{Groups: append([]string(nil), parts[:len(parts)-1]...), Name: parts[len(parts)-1]}, suffix, nil
 }
+
 func ParseGroup(p string) ([]string, error) {
 	p = strings.Trim(p, "/")
 	if p == "" || strings.Contains(p, "//") {
@@ -59,6 +60,7 @@ func ParseGroup(p string) ([]string, error) {
 	}
 	return parts, nil
 }
+
 func valid(s string) bool {
 	if s == "" || len(s) > 100 || s == "." || s == ".." || strings.HasPrefix(s, ".") {
 		return false
@@ -70,6 +72,7 @@ func valid(s string) bool {
 	}
 	return true
 }
+
 func SafeJoin(root string, parts ...string) (string, error) {
 	target := filepath.Join(append([]string{root}, parts...)...)
 	ar, e := filepath.Abs(root)

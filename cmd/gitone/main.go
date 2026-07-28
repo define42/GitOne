@@ -2,12 +2,13 @@ package main
 
 import (
 	"flag"
-	"github.com/define42/GitOne/internal/auth"
-	app "github.com/define42/GitOne/internal/server"
 	"log"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/define42/GitOne/internal/auth"
+	app "github.com/define42/GitOne/internal/server"
 )
 
 func main() {

@@ -28,7 +28,9 @@ import (
 
 type staticDirectory map[string]string
 
-var testLDAPDirectory = staticDirectory{"alice": "secret"}
+func testLDAPDirectory() staticDirectory {
+	return staticDirectory{"alice": "secret"}
+}
 
 func (d staticDirectory) Authenticate(
 	_ context.Context,
@@ -45,7 +47,7 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
 		Root:      root,
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 	request := httptest.NewRequest(http.MethodPost, "/api/groups/engineering?description=Engineering%20projects", nil)
 	request.SetBasicAuth("alice", "secret")
@@ -497,7 +499,7 @@ func TestLegacyCreateGroupEndpointIsRemoved(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
 		Root:      root,
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 	request := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -518,7 +520,7 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
 		Root:      root,
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 
 	createGroup := httptest.NewRequest(http.MethodPost, "/api/groups/engineering", nil)
@@ -632,7 +634,7 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 	handler := New(Config{
 		Root:      t.TempDir(),
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -706,8 +708,8 @@ func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 		t.Fatalf("unexpected cloned .gitone.json contents: %q", metadata)
 	}
 
-	updatedReadme := append(readme, []byte("Updated through Git Smart HTTP.\n")...)
-	if err = os.WriteFile(filepath.Join(checkout, "README.md"), updatedReadme, 0644); err != nil {
+	updatedReadme := []byte(string(readme) + "Updated through Git Smart HTTP.\n")
+	if err = os.WriteFile(filepath.Join(checkout, "README.md"), updatedReadme, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	worktree, err := clonedRepository.Worktree()
@@ -777,14 +779,14 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.MkdirAll(filepath.Join(checkout, "docs"), 0750); err != nil {
+	if err = os.MkdirAll(filepath.Join(checkout, "docs"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(checkout, "docs", "guide.txt"), []byte("Browse me\n"), 0640); err != nil {
+	if err = os.WriteFile(filepath.Join(checkout, "docs", "guide.txt"), []byte("Browse me\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	nodeSource := "const http = require(\"node:http\");\n\nhttp.createServer((_request, response) => response.end(\"ok\"));\n"
-	if err = os.WriteFile(filepath.Join(checkout, "server.js"), []byte(nodeSource), 0640); err != nil {
+	if err = os.WriteFile(filepath.Join(checkout, "server.js"), []byte(nodeSource), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	worktree, err := repository.Worktree()
@@ -816,7 +818,7 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 
 	handler := New(Config{
 		Root:      root,
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 	get := func(path string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -1242,10 +1244,10 @@ func TestRepositoryBrowserResolvesLFSContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	objectPath := filepath.Join(lfsPath, "objects", oid[:2], oid[2:4], oid)
-	if err = os.MkdirAll(filepath.Dir(objectPath), 0750); err != nil {
+	if err = os.MkdirAll(filepath.Dir(objectPath), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(objectPath, []byte(content), 0640); err != nil {
+	if err = os.WriteFile(objectPath, []byte(content), 0o640); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1258,7 +1260,7 @@ func TestRepositoryBrowserResolvesLFSContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(checkout, "notes.txt"), []byte(pointer), 0644); err != nil {
+	if err = os.WriteFile(filepath.Join(checkout, "notes.txt"), []byte(pointer), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	worktree, err := repository.Worktree()
@@ -1283,7 +1285,7 @@ func TestRepositoryBrowserResolvesLFSContent(t *testing.T) {
 
 	handler := New(Config{
 		Root:      root,
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 	request := httptest.NewRequest(
 		http.MethodGet,
@@ -1391,7 +1393,7 @@ func TestCompareAndMergeRepositoryBranches(t *testing.T) {
 
 	handler := New(Config{
 		Root:      root,
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 	do := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -1579,7 +1581,7 @@ func commitBranchFile(
 			t.Fatal(err)
 		}
 	}
-	if err = os.WriteFile(filepath.Join(checkout, fileName), []byte(content), 0644); err != nil {
+	if err = os.WriteFile(filepath.Join(checkout, fileName), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = worktree.Add(fileName); err != nil {
@@ -1625,7 +1627,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	}
 	handler := New(Config{
 		Root:      root,
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 
 	listRequest := httptest.NewRequest(http.MethodGet, "/api/groups", nil)
@@ -1724,7 +1726,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	handler := New(Config{
 		Root:      t.TempDir(),
-		Directory: testLDAPDirectory,
+		Directory: testLDAPDirectory(),
 	})
 
 	unauthenticated := httptest.NewRequest(http.MethodGet, "/", nil)

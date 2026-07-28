@@ -12,11 +12,10 @@ import (
 //go:embed dist/*
 var embedded embed.FS
 
-var public = mustSub(embedded, "dist")
-
 type Handler struct{}
 
 func (Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	public := mustSub(embedded, "dist")
 	if strings.HasPrefix(r.URL.Path, "/assets/") {
 		name := strings.TrimPrefix(r.URL.Path, "/assets/")
 		if name == "" || !fs.ValidPath(name) || strings.Contains(name, "/") {

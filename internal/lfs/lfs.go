@@ -5,10 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"github.com/define42/GitOne/internal/control"
-	"github.com/define42/GitOne/internal/repopath"
-	"github.com/define42/GitOne/internal/storage"
 	"io"
 	"net/http"
 	"os"
@@ -16,6 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/storage"
 )
 
 const maximumUploadBytes int64 = 100 << 30
@@ -81,6 +81,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
 func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
 	var q batchRequest
 	d := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
@@ -149,7 +150,7 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 		resp.Objects = append(resp.Objects, o)
 	}
 	w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func pendingBytes(objects map[string]int64) int64 {
@@ -217,11 +218,11 @@ func (h Handler) object(
 	case http.MethodPut:
 		if policy.LFS.MaximumObjectBytes > 0 &&
 			r.ContentLength > policy.LFS.MaximumObjectBytes {
-			http.Error(w, "object exceeds the repository LFS object limit", 422)
+			http.Error(w, "object exceeds the repository LFS object limit", http.StatusUnprocessableEntity)
 			return
 		}
 		if e = h.upload(r, repo, p, oid, policy.LFS); e != nil {
-			http.Error(w, e.Error(), 422)
+			http.Error(w, e.Error(), http.StatusUnprocessableEntity)
 			return
 		}
 		w.WriteHeader(200)
@@ -235,7 +236,9 @@ func (h Handler) object(
 			http.Error(w, "storage error", 500)
 			return
 		}
-		defer f.Close()
+		defer func() {
+			_ = f.Close()
+		}()
 		st, _ := f.Stat()
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
@@ -265,7 +268,7 @@ func (h Handler) upload(
 	if _, err := os.Stat(p); err == nil {
 		return nil
 	}
-	if e := os.MkdirAll(filepath.Dir(p), 0750); e != nil {
+	if e := os.MkdirAll(filepath.Dir(p), 0o750); e != nil {
 		return e
 	}
 	tmp, e := os.CreateTemp(filepath.Dir(p), ".upload-")
@@ -273,7 +276,9 @@ func (h Handler) upload(
 		return e
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() {
+		_ = os.Remove(name)
+	}()
 	hash := sha256.New()
 	limit := maximumUploadBytes
 	if policy.MaximumObjectBytes > 0 && policy.MaximumObjectBytes < limit {
@@ -281,15 +286,15 @@ func (h Handler) upload(
 	}
 	n, e := io.Copy(io.MultiWriter(tmp, hash), io.LimitReader(r.Body, limit+1))
 	if e != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return e
 	}
 	if n > limit {
-		tmp.Close()
+		_ = tmp.Close()
 		return errors.New("object exceeds the repository LFS object limit")
 	}
 	if e = tmp.Sync(); e != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return e
 	}
 	if e = tmp.Close(); e != nil {
@@ -319,7 +324,7 @@ func (h Handler) storageUsage(repo repopath.Repository) (int64, error) {
 		return 0, err
 	}
 	var total int64
-	err = filepath.WalkDir(filepath.Join(root, "objects"), func(path string, entry os.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(filepath.Join(root, "objects"), func(_ string, entry os.DirEntry, walkErr error) error {
 		if errors.Is(walkErr, os.ErrNotExist) {
 			return nil
 		}
@@ -341,6 +346,7 @@ func (h Handler) storageUsage(repo repopath.Repository) (int64, error) {
 	}
 	return total, err
 }
+
 func (h Handler) objectPath(repo repopath.Repository, oid string) (string, error) {
 	return objectPath(h.Storage, repo, oid)
 }
@@ -363,6 +369,7 @@ func objectPath(store storage.Store, repo repopath.Repository, oid string) (stri
 	}
 	return repopath.SafeJoin(root, "objects", oid[:2], oid[2:4], oid)
 }
+
 func validOID(s string) bool {
 	if len(s) != 64 {
 		return false
@@ -371,6 +378,5 @@ func validOID(s string) bool {
 	return e == nil && strings.ToLower(s) == s
 }
 
-var _ = fmt.Sprintf
-
+//nolint:gochecknoglobals // The fallback must serialize uploads across all handler instances.
 var fallbackUploadMu sync.Mutex

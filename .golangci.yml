@@ -1,0 +1,42 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - errorlint
+    - exhaustive
+    - gochecknoglobals
+    - gocritic
+    - govet
+    - ineffassign
+    - interfacebloat
+    - misspell
+    - nolintlint
+    - recvcheck
+    - revive
+    - staticcheck
+    - unused
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    staticcheck:
+      checks:
+        - all
+        - -QF*
+        - -ST1000
+  exclusions:
+    rules:
+      - path: (^|.*/)config\.go$
+        linters:
+          - revive
+        text: "don't use ALL_CAPS in Go names; use CamelCase"
+      - linters:
+          - revive
+        text: "^(exported|package-comments):"
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+    - goimports

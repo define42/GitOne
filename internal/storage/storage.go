@@ -4,17 +4,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
-	"time"
 )
 
 type Store struct{ Root string }
@@ -37,9 +38,11 @@ type GroupInfo struct {
 func (s Store) GitPath(r repopath.Repository) (string, error) {
 	return repopath.SafeJoin(s.Root, append(r.Groups, r.Name+".git")...)
 }
+
 func (s Store) LFSPath(r repopath.Repository) (string, error) {
 	return repopath.SafeJoin(s.Root, append(r.Groups, r.Name+".lfs")...)
 }
+
 func (s Store) GroupPath(group string) (string, error) {
 	parts, e := repopath.ParseGroup(group)
 	if e != nil {
@@ -125,7 +128,7 @@ func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryO
 	if _, e = os.Stat(gitp); e == nil {
 		return errors.New("repository exists")
 	}
-	if e = os.MkdirAll(gp, 0750); e != nil {
+	if e = os.MkdirAll(gp, 0o750); e != nil {
 		return e
 	}
 	if options.InitializeReadme || options.Description != "" {
@@ -142,7 +145,7 @@ func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryO
 			return e
 		}
 	}
-	if e = os.MkdirAll(filepath.Join(lfsp, "objects"), 0750); e != nil {
+	if e = os.MkdirAll(filepath.Join(lfsp, "objects"), 0o750); e != nil {
 		_ = os.RemoveAll(gitp)
 		return e
 	}
@@ -196,7 +199,9 @@ func (s Store) createInitializedRepository(destination, name string, options Cre
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(temporary)
+	defer func() {
+		_ = os.RemoveAll(temporary)
+	}()
 
 	repository, err := git.PlainInit(temporary, false)
 	if err != nil {
@@ -210,7 +215,7 @@ func (s Store) createInitializedRepository(destination, name string, options Cre
 		return err
 	}
 	if options.InitializeReadme {
-		if err = os.WriteFile(filepath.Join(temporary, "README.md"), []byte(name+"\n"), 0640); err != nil {
+		if err = os.WriteFile(filepath.Join(temporary, "README.md"), []byte(name+"\n"), 0o640); err != nil {
 			return err
 		}
 		if _, err = worktree.Add("README.md"); err != nil {
@@ -223,7 +228,7 @@ func (s Store) createInitializedRepository(destination, name string, options Cre
 			return marshalErr
 		}
 		metadata = append(metadata, '\n')
-		if err = os.WriteFile(filepath.Join(temporary, ".gitone.json"), metadata, 0640); err != nil {
+		if err = os.WriteFile(filepath.Join(temporary, ".gitone.json"), metadata, 0o640); err != nil {
 			return err
 		}
 		if _, err = worktree.Add(".gitone.json"); err != nil {
@@ -267,6 +272,7 @@ func (s Store) createInitializedRepository(destination, name string, options Cre
 func plumbingSymbolicMain() *plumbing.Reference {
 	return plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main"))
 }
+
 func (s Store) CreateGroup(group, owner, description string) error {
 	gp, e := s.GroupPath(group)
 	if e != nil {
@@ -284,14 +290,16 @@ func (s Store) CreateGroup(group, owner, description string) error {
 			return errors.New("parent group does not exist")
 		}
 	}
-	if e = os.MkdirAll(gp, 0750); e != nil {
+	if e = os.MkdirAll(gp, 0o750); e != nil {
 		return e
 	}
 	tmp, e := os.MkdirTemp(root, ".gitone-control-")
 	if e != nil {
 		return e
 	}
-	defer os.RemoveAll(tmp)
+	defer func() {
+		_ = os.RemoveAll(tmp)
+	}()
 	r, e := git.PlainInit(tmp, false)
 	if e != nil {
 		return e
@@ -314,7 +322,7 @@ func (s Store) CreateGroup(group, owner, description string) error {
 	}
 	b, _ := json.MarshalIndent(doc, "", "  ")
 	b = append(b, '\n')
-	if e = os.WriteFile(filepath.Join(tmp, "control.json"), b, 0640); e != nil {
+	if e = os.WriteFile(filepath.Join(tmp, "control.json"), b, 0o640); e != nil {
 		return e
 	}
 	if _, e = wt.Add("control.json"); e != nil {
@@ -465,7 +473,7 @@ func (s Store) DeleteRepository(r repopath.Repository) error {
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(trash, 0750); err != nil {
+	if err = os.MkdirAll(trash, 0o750); err != nil {
 		return err
 	}
 	if err = os.Rename(gitp, filepath.Join(trash, r.Name+".git")); err != nil {
@@ -527,7 +535,7 @@ func (s Store) DeleteGroup(group string) error {
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(trash, 0750); err != nil {
+	if err = os.MkdirAll(trash, 0o750); err != nil {
 		return err
 	}
 	return os.Rename(gp, filepath.Join(trash, strings.ReplaceAll(group, "/", "__")))
@@ -558,7 +566,7 @@ func (s Store) RenameGroup(group, newPath string) error {
 			return errors.New("destination parent group does not exist")
 		}
 	}
-	if err = os.MkdirAll(filepath.Dir(dst), 0750); err != nil {
+	if err = os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 		return err
 	}
 	return os.Rename(src, dst)

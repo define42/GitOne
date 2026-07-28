@@ -1,6 +1,9 @@
 package server
 
 import (
+	"net/http"
+	"sync"
+
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/githttp"
@@ -9,8 +12,6 @@ import (
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	"github.com/define42/GitOne/internal/webui"
-	"net/http"
-	"sync"
 )
 
 type Config struct {
@@ -107,6 +108,7 @@ func New(c Config) http.Handler {
 	}))
 	return mux
 }
+
 func containsLFS(p string) bool {
 	for i := 0; i+9 <= len(p); i++ {
 		if p[i:i+9] == "/info/lfs" {

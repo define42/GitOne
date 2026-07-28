@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
 	"io"
 	"path/filepath"
 	"sync"
+
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 type Store struct {
@@ -63,7 +64,9 @@ func ReadDocument(repository *git.Repository, hash plumbing.Hash, group string) 
 	if err != nil {
 		return Document{}, err
 	}
-	defer reader.Close()
+	defer func() {
+		_ = reader.Close()
+	}()
 	decoder := json.NewDecoder(io.LimitReader(reader, 1<<20))
 	decoder.DisallowUnknownFields()
 	var document Document
@@ -82,6 +85,7 @@ func ReadDocument(repository *git.Repository, hash plumbing.Hash, group string) 
 	}
 	return document, nil
 }
+
 func Validate(group string, d Document) error {
 	if d.Version != 1 {
 		return fmt.Errorf("unsupported version")
@@ -108,6 +112,7 @@ func Validate(group string, d Document) error {
 	}
 	return ValidateSettings(d)
 }
+
 func validRole(r Role) bool {
 	return r == RoleRead || r == RoleWrite || r == RoleAdmin || r == RoleOwner
 }

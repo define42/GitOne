@@ -4,19 +4,20 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/define42/GitOne/internal/control"
-	"github.com/define42/GitOne/internal/repopath"
-	"github.com/define42/GitOne/internal/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/storage"
 )
 
 func TestUploadAndDownload(t *testing.T) {
 	root := t.TempDir()
 	st := storage.Store{Root: root}
-	if e := os.MkdirAll(root+"/g/r.lfs/objects", 0750); e != nil {
+	if e := os.MkdirAll(root+"/g/r.lfs/objects", 0o750); e != nil {
 		t.Fatal(e)
 	}
 	data := []byte("large object")
@@ -36,9 +37,10 @@ func TestUploadAndDownload(t *testing.T) {
 		t.Fatalf("get=%d %q", gw.Code, gw.Body.Bytes())
 	}
 }
+
 func TestRejectWrongHash(t *testing.T) {
 	root := t.TempDir()
-	_ = os.MkdirAll(root+"/g/r.lfs/objects", 0750)
+	_ = os.MkdirAll(root+"/g/r.lfs/objects", 0o750)
 	h := Handler{Storage: storage.Store{Root: root}, Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) { return true, true }}
 	oid := string(bytes.Repeat([]byte{'0'}, 64))
 	r := httptest.NewRequest(http.MethodPut, "/g/r.git/info/lfs/objects/"+oid, bytes.NewBufferString("wrong"))

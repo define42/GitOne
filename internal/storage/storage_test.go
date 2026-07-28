@@ -3,13 +3,14 @@ package storage
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
-	"os"
-	"path/filepath"
-	"testing"
 )
 
 func assertMainDefaultWithoutMaster(t *testing.T, repository *git.Repository, mainExists bool) {

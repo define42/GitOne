@@ -480,7 +480,9 @@ func repositoryLFSPointer(blob *object.Blob) (lfs.Pointer, bool) {
 	if err != nil {
 		return lfs.Pointer{}, false
 	}
-	defer reader.Close()
+	defer func() {
+		_ = reader.Close()
+	}()
 	content, err := io.ReadAll(io.LimitReader(reader, lfs.MaxPointerSize+1))
 	if err != nil {
 		return lfs.Pointer{}, false
@@ -505,23 +507,25 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 	if err != nil {
 		return nil, huma.Error404NotFound("file not found", err)
 	}
-	if file.Blob.Size > maxBrowsableBlobSize {
+	if file.Size > maxBrowsableBlobSize {
 		return nil, huma.Error413RequestEntityTooLarge(
 			fmt.Sprintf("file exceeds the %d-byte browsing limit", maxBrowsableBlobSize),
 		)
 	}
-	reader, err := file.Blob.Reader()
+	reader, err := file.Reader()
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not open Git blob", err)
 	}
-	defer reader.Close()
+	defer func() {
+		_ = reader.Close()
+	}()
 	content, err := io.ReadAll(io.LimitReader(reader, maxBrowsableBlobSize+1))
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not read Git blob", err)
 	}
 
 	pointer, isLFS := lfs.ParsePointer(content)
-	contentSize := file.Blob.Size
+	contentSize := file.Size
 	if isLFS {
 		if pointer.Size > maxBrowsableBlobSize {
 			return nil, huma.Error413RequestEntityTooLarge(
@@ -535,7 +539,9 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 		if openErr != nil {
 			return nil, huma.Error500InternalServerError("could not open LFS object", openErr)
 		}
-		defer lfsObject.Close()
+		defer func() {
+			_ = lfsObject.Close()
+		}()
 		info, statErr := lfsObject.Stat()
 		if statErr != nil {
 			return nil, huma.Error500InternalServerError("could not inspect LFS object", statErr)

@@ -347,7 +347,7 @@ func requireStatus(t *testing.T, response *http.Response, expected int) {
 	t.Helper()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		response.Body.Close()
+		_ = response.Body.Close()
 		t.Fatalf("read HTTP %d response: %v", response.StatusCode, err)
 	}
 	if err = response.Body.Close(); err != nil {
@@ -361,7 +361,11 @@ func requireStatus(t *testing.T, response *http.Response, expected int) {
 
 func decodeJSON(t *testing.T, response *http.Response, destination any) {
 	t.Helper()
-	defer response.Body.Close()
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close HTTP %d response: %v", response.StatusCode, err)
+		}
+	}()
 	if err := json.NewDecoder(response.Body).Decode(destination); err != nil {
 		t.Fatalf("decode HTTP %d response: %v", response.StatusCode, err)
 	}

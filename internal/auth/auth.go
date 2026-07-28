@@ -7,11 +7,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/define42/GitOne/internal/control"
-	"golang.org/x/crypto/argon2"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/define42/GitOne/internal/control"
+	"golang.org/x/crypto/argon2"
 )
 
 const (

@@ -45,8 +45,8 @@ func TestSessionManagerSignsAndEncryptsCookie(t *testing.T) {
 	if _, err = manager.Username(tampered); err == nil {
 		t.Fatal("tampered session cookie was accepted")
 	}
-	if clear := manager.ClearCookieHeader(); !strings.Contains(clear, "Max-Age=0") {
-		t.Fatalf("logout did not clear the session cookie: %s", clear)
+	if header := manager.ClearCookieHeader(); !strings.Contains(header, "Max-Age=0") {
+		t.Fatalf("logout did not clear the session cookie: %s", header)
 	}
 }
 

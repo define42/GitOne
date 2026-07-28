@@ -24,6 +24,7 @@ import (
 
 const noThinCapability capability.Capability = "no-thin"
 
+//nolint:gochecknoglobals // The fallback must serialize receives across all handler instances.
 var fallbackReceiveMu sync.Mutex
 
 type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
@@ -97,7 +98,9 @@ func (h Handler) advertise(w http.ResponseWriter, r *http.Request, repo repopath
 			http.Error(w, e.Error(), 404)
 			return
 		}
-		defer s.Close()
+		defer func() {
+			_ = s.Close()
+		}()
 		adv, err = s.AdvertisedReferencesContext(r.Context())
 	} else {
 		s, e := t.NewReceivePackSession(ep, nil)
@@ -105,7 +108,9 @@ func (h Handler) advertise(w http.ResponseWriter, r *http.Request, repo repopath
 			http.Error(w, e.Error(), 404)
 			return
 		}
-		defer s.Close()
+		defer func() {
+			_ = s.Close()
+		}()
 		adv, err = s.AdvertisedReferencesContext(r.Context())
 		if err == nil {
 			// The filesystem pack writer cannot resolve bases omitted by thin packs.
@@ -141,7 +146,9 @@ func (h Handler) uploadPack(w http.ResponseWriter, r *http.Request, repo repopat
 		http.Error(w, err.Error(), 404)
 		return
 	}
-	defer s.Close()
+	defer func() {
+		_ = s.Close()
+	}()
 	req := packp.NewUploadPackRequest()
 	if err = req.Decode(r.Body); err != nil {
 		http.Error(w, "bad upload-pack request", 400)
@@ -152,7 +159,9 @@ func (h Handler) uploadPack(w http.ResponseWriter, r *http.Request, repo repopat
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	defer resp.Close()
+	defer func() {
+		_ = resp.Close()
+	}()
 	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
 	w.Header().Set("Cache-Control", "no-cache")
 	_ = resp.Encode(w)
@@ -174,7 +183,9 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		http.Error(w, "bad receive-pack request", 400)
 		return
 	}
-	defer req.Packfile.Close()
+	defer func() {
+		_ = req.Packfile.Close()
+	}()
 	if err = validateReceiveCapabilities(req.Capabilities); err != nil {
 		h.writeReceiveError(w, req, "ok", err)
 		return

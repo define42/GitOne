@@ -2,12 +2,6 @@ package githttp
 
 import (
 	"encoding/json"
-	"github.com/define42/GitOne/internal/repopath"
-	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
-	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/storage"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 )
 
 func TestControlRefValidation(t *testing.T) {
@@ -24,6 +25,7 @@ func TestControlRefValidation(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
 func TestControlRejectsTags(t *testing.T) {
 	req := packp.NewReferenceUpdateRequest()
 	req.Commands = []*packp.Command{{Name: plumbing.NewTagReferenceName("v1"), Old: plumbing.NewHash("1111111111111111111111111111111111111111"), New: plumbing.NewHash("2222222222222222222222222222222222222222")}}
@@ -142,7 +144,7 @@ func TestNativeGitRejectsInvalidControlDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(controlPath, append(contents, '\n'), 0644); err != nil {
+	if err = os.WriteFile(controlPath, append(contents, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, checkout, "add", "control.json")
@@ -184,7 +186,7 @@ func TestNativeGitPushUsesSelfContainedPack(t *testing.T) {
 	runGit(t, checkout, "config", "user.name", "alice")
 	runGit(t, checkout, "config", "user.email", "alice@localhost")
 	manualPath := filepath.Join(checkout, "manual.md")
-	if err := os.WriteFile(manualPath, []byte(strings.Repeat("GitOne documentation line\n", 4096)), 0644); err != nil {
+	if err := os.WriteFile(manualPath, []byte(strings.Repeat("GitOne documentation line\n", 4096)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, checkout, "add", "manual.md")
@@ -192,7 +194,7 @@ func TestNativeGitPushUsesSelfContainedPack(t *testing.T) {
 	runGit(t, checkout, "push", "origin", "main")
 
 	manual := strings.Repeat("GitOne documentation line\n", 4095) + "Updated documentation line\n"
-	if err := os.WriteFile(manualPath, []byte(manual), 0644); err != nil {
+	if err := os.WriteFile(manualPath, []byte(manual), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, checkout, "add", "manual.md")

@@ -146,7 +146,9 @@ func (a *LDAPAuthenticator) Authenticate(
 	if err != nil {
 		return "", fmt.Errorf("connect to LDAP: %w", err)
 	}
-	defer connection.Close()
+	defer func() {
+		_ = connection.Close()
+	}()
 	connection.SetTimeout(timeout)
 
 	if a.config.StartTLS && parsedLDAPScheme(a.config.URL) == "ldap" {

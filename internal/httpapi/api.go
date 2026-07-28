@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -553,7 +554,7 @@ func (a API) renameGroupControls(
 			}
 			a.invalidateGroupRenames(renames)
 			if rollbackErr != nil {
-				return fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+				return errors.Join(err, fmt.Errorf("rollback failed: %w", rollbackErr))
 			}
 			return err
 		}
