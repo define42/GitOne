@@ -11,7 +11,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=ui /src/internal/webui/dist/app.js ./internal/webui/dist/app.js
-RUN CGO_ENABLED=0 go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /gitone ./cmd/gitone
+RUN CGO_ENABLED=0 go test ./... 
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /gitone ./cmd/gitone
 FROM scratch
 COPY --from=build /gitone /gitone
 VOLUME ["/data"]

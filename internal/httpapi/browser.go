@@ -20,6 +20,7 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
@@ -327,7 +328,7 @@ func registerRepositoryBrowser(api huma.API, service API) {
 }
 
 func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranchesInput) (*repositoryBranchesOutput, error) {
-	repository, parsed, err := a.openBrowsableRepository(ctx, input.Authorization, input.Repository)
+	repository, parsed, err := a.openBrowsableRepository(ctx, input.AuthInput, input.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +361,7 @@ func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranch
 }
 
 func (a API) createRepositoryBranch(ctx context.Context, input *createRepositoryBranchInput) (*createRepositoryBranchOutput, error) {
-	repository, parsed, err := a.openRepository(ctx, input.Authorization, input.Repository, control.RoleWrite)
+	repository, parsed, err := a.openRepository(ctx, input.AuthInput, input.Repository, control.RoleWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -400,15 +401,21 @@ func (a API) createRepositoryBranch(ctx context.Context, input *createRepository
 }
 
 func (a API) listRepositoryRoot(ctx context.Context, input *repositoryBrowserRefInput) (*repositoryTreeOutput, error) {
-	return a.listRepositoryTree(ctx, input.Authorization, input.Repository, input.Ref, "")
+	return a.listRepositoryTree(ctx, input.AuthInput, input.Repository, input.Ref, "")
 }
 
 func (a API) listRepositoryDirectory(ctx context.Context, input *repositoryBrowserPathInput) (*repositoryTreeOutput, error) {
-	return a.listRepositoryTree(ctx, input.Authorization, input.Repository, input.Ref, input.Path)
+	return a.listRepositoryTree(ctx, input.AuthInput, input.Repository, input.Ref, input.Path)
 }
 
-func (a API) listRepositoryTree(ctx context.Context, authorization, repositoryPath, ref, treePath string) (*repositoryTreeOutput, error) {
-	repository, parsed, err := a.openBrowsableRepository(ctx, authorization, repositoryPath)
+func (a API) listRepositoryTree(
+	ctx context.Context,
+	credentials AuthInput,
+	repositoryPath string,
+	ref string,
+	treePath string,
+) (*repositoryTreeOutput, error) {
+	repository, parsed, err := a.openBrowsableRepository(ctx, credentials, repositoryPath)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +489,7 @@ func repositoryLFSPointer(blob *object.Blob) (lfs.Pointer, bool) {
 }
 
 func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPathInput) (*repositoryBlobOutput, error) {
-	repository, parsed, err := a.openBrowsableRepository(ctx, input.Authorization, input.Repository)
+	repository, parsed, err := a.openBrowsableRepository(ctx, input.AuthInput, input.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -572,7 +579,7 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 			encodedContent,
 		)
 		branchName, branchRef, _, branchErr := resolveBranch(repository, input.Ref)
-		_, writeErr := a.authorize(ctx, input.Authorization, parsed.Group(), control.RoleWrite)
+		_, writeErr := a.authorize(ctx, input.AuthInput, parsed.Group(), control.RoleWrite)
 		output.Body.CanEdit = branchErr == nil &&
 			!isLFS &&
 			branchName == input.Ref &&
@@ -612,7 +619,7 @@ func highlightRepositoryBlob(path, content string) (string, string) {
 }
 
 func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommitsInput) (*repositoryCommitsOutput, error) {
-	repository, parsed, err := a.openBrowsableRepository(ctx, input.Authorization, input.Repository)
+	repository, parsed, err := a.openBrowsableRepository(ctx, input.AuthInput, input.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -660,17 +667,43 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 	return output, nil
 }
 
-func (a API) openBrowsableRepository(ctx context.Context, authorization, value string) (*git.Repository, repopath.Repository, error) {
-	return a.openRepository(ctx, authorization, value, control.RoleRead)
+func (a API) openBrowsableRepository(
+	ctx context.Context,
+	credentials AuthInput,
+	value string,
+) (*git.Repository, repopath.Repository, error) {
+	return a.openRepository(ctx, credentials, value, control.RoleRead)
 }
 
-func (a API) openRepository(ctx context.Context, authorization, value string, role control.Role) (*git.Repository, repopath.Repository, error) {
+func (a API) openRepository(
+	ctx context.Context,
+	credentials AuthInput,
+	value string,
+	role control.Role,
+) (*git.Repository, repopath.Repository, error) {
 	parsed, err := parseRepositoryPath(value)
 	if err != nil {
 		return nil, repopath.Repository{}, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, authorization, parsed.Group(), role); err != nil {
-		return nil, repopath.Repository{}, err
+	visibility := ""
+	if role == control.RoleRead {
+		if document, loadErr := a.Resolver.Controls.Load(ctx, parsed.Group()); loadErr == nil {
+			visibility = document.Repositories[parsed.Name].Visibility
+		}
+	}
+	switch visibility {
+	case "public":
+	case "internal":
+		if _, authErr := a.authorizeInternal(ctx, credentials); authErr != nil {
+			if _, repositoryAuthErr := a.authorizeRepository(ctx, credentials, parsed, role); repositoryAuthErr != nil {
+				return nil, repopath.Repository{}, authErr
+			}
+		}
+	default:
+		_, authErr := a.authorizeRepository(ctx, credentials, parsed, role)
+		if authErr != nil {
+			return nil, repopath.Repository{}, authErr
+		}
 	}
 	repositoryPath, err := a.Storage.GitPath(parsed)
 	if err != nil {
@@ -681,6 +714,10 @@ func (a API) openRepository(ctx context.Context, authorization, value string, ro
 		return nil, repopath.Repository{}, huma.Error404NotFound("repository not found", err)
 	}
 	return repository, parsed, nil
+}
+
+func (a API) authorizeInternal(ctx context.Context, credentials AuthInput) (auth.Principal, error) {
+	return a.authenticateIdentity(ctx, credentials)
 }
 
 func validatedBranchReference(value string) (plumbing.ReferenceName, error) {

@@ -3,12 +3,27 @@ import { marked } from "marked";
 const appRoot = document.querySelector("#app");
 const notificationRoot = document.querySelector("#notifications");
 const colorThemeSelect = document.querySelector("#color-theme");
-if (!appRoot || !notificationRoot || !colorThemeSelect) {
+const globalNavigationRoot = document.querySelector("#global-navigation");
+const sessionControlsRoot = document.querySelector("#session-controls");
+const sessionUsernameRoot = document.querySelector("#session-username");
+const logoutRoot = document.querySelector("#logout");
+if (!appRoot ||
+    !notificationRoot ||
+    !colorThemeSelect ||
+    !globalNavigationRoot ||
+    !sessionControlsRoot ||
+    !sessionUsernameRoot ||
+    !logoutRoot) {
     throw new Error("missing application shell");
 }
 const app = appRoot;
 const notifications = notificationRoot;
 const themeSelect = colorThemeSelect;
+const globalNavigation = globalNavigationRoot;
+const sessionControls = sessionControlsRoot;
+const sessionUsername = sessionUsernameRoot;
+const logoutButton = logoutRoot;
+let browserSession = null;
 const colorThemes = [
     "light",
     "dark",
@@ -93,6 +108,11 @@ const iconPaths = {
         "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
         "M6 9v9",
         "M18 15v-1a5 5 0 0 0-5-5h-2a5 5 0 0 1-5-5",
+    ],
+    "log-out": [
+        "M10 17l5-5-5-5",
+        "M15 12H3",
+        "M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4",
     ],
     pencil: [
         "M21.2 6.8a1 1 0 0 0-4-4L3.8 16.2a2 2 0 0 0-.5.8L2 21.4a.5.5 0 0 0 .6.6L7 20.7a2 2 0 0 0 .8-.5Z",
@@ -224,6 +244,13 @@ function currentGroup() {
         .map(decodeURIComponent)
         .join("/");
 }
+class RequestError extends Error {
+    status;
+    constructor(message, status) {
+        super(message);
+        this.status = status;
+    }
+}
 async function request(path, init) {
     const response = await fetch(path, {
         ...init,
@@ -242,7 +269,11 @@ async function request(path, init) {
         catch {
             // Keep the HTTP status if the response is not JSON.
         }
-        throw new Error(message);
+        if (response.status === 401 && path !== "/api/session" && browserSession) {
+            setBrowserSession(null);
+            renderLogin("Your session has expired.");
+        }
+        throw new RequestError(message, response.status);
     }
     if (response.status === 204) {
         return undefined;
@@ -610,12 +641,6 @@ function localDateTime(value) {
     const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
     return local.toISOString().slice(0, 16);
 }
-async function hashTokenSecret(secret) {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
-    return `sha256:${Array.from(new Uint8Array(digest))
-        .map((byte) => byte.toString(16).padStart(2, "0"))
-        .join("")}`;
-}
 function groupSettingsControl(path, detail, settings) {
     const trigger = actionButton("Settings", "settings", "secondary");
     const dialog = element("dialog");
@@ -748,9 +773,13 @@ function groupSettingsControl(path, detail, settings) {
         tokenRole.className = "token-role";
         const tokenHash = element("input");
         tokenHash.className = "token-hash";
+        tokenHash.readOnly = true;
         tokenHash.autocomplete = "off";
         tokenHash.spellcheck = false;
         tokenHash.value = token.hash;
+        tokenKey.addEventListener("input", () => {
+            tokenHash.value = tokenKey.value.trim() === token.key ? token.hash : "";
+        });
         const tokenSecret = element("input");
         tokenSecret.className = "token-secret";
         tokenSecret.type = "password";
@@ -770,7 +799,7 @@ function groupSettingsControl(path, detail, settings) {
         const disabledLabel = element("label");
         disabledLabel.className = "checkbox-label settings-checkbox";
         disabledLabel.append(tokenDisabled, document.createTextNode("Disabled"));
-        fields.append(fieldLabel("Token name", tokenName), fieldLabel("Key", tokenKey), fieldLabel("Role", tokenRole), fieldLabel("Token hash", tokenHash), fieldLabel("New secret", tokenSecret), fieldLabel("Repository scope", tokenRepositories), fieldLabel("Expires", tokenExpiry), disabledLabel);
+        fields.append(fieldLabel("Token name", tokenName), fieldLabel("Login key", tokenKey), fieldLabel("Role", tokenRole), fieldLabel("Stored hash", tokenHash), fieldLabel("New secret", tokenSecret), fieldLabel("Repository scope", tokenRepositories), fieldLabel("Expires", tokenExpiry), disabledLabel);
         row.append(legend, remove, fields);
         tokens.append(row);
         refreshTokenEmpty();
@@ -968,12 +997,12 @@ function groupSettingsControl(path, detail, settings) {
                 const tokenName = row.querySelector(".token-name")?.value.trim() ?? "";
                 const key = row.querySelector(".token-key")?.value.trim() ?? "";
                 const secret = row.querySelector(".token-secret")?.value ?? "";
-                let hash = row.querySelector(".token-hash")?.value.trim() ?? "";
-                if (secret) {
-                    hash = await hashTokenSecret(secret);
+                const hash = row.querySelector(".token-hash")?.value.trim() ?? "";
+                if (!tokenName || !key) {
+                    throw new Error("Every token needs a name and key.");
                 }
-                if (!tokenName || !key || !hash) {
-                    throw new Error("Every token needs a name, key, and hash or new secret.");
+                if (!hash && !secret) {
+                    throw new Error("Every new token needs a secret.");
                 }
                 const repositoryScope = row
                     .querySelector(".token-repositories")
@@ -985,6 +1014,7 @@ function groupSettingsControl(path, detail, settings) {
                     name: tokenName,
                     key,
                     hash,
+                    newSecret: secret || undefined,
                     role: row.querySelector(".token-role")?.value,
                     repositories: repositoryScope,
                     expiresAt: expiry ? new Date(expiry).toISOString() : undefined,
@@ -1969,7 +1999,13 @@ async function renderRepositoryBrowser(route) {
         : route.file === null
             ? request(repositoryAPIURL(route.repository, "tree", route.ref, route.path))
             : request(repositoryAPIURL(route.repository, "blob", route.ref, route.file));
-    const groupRequest = request(apiGroupURL(groupPath));
+    const groupRequest = request(apiGroupURL(groupPath)).catch(() => ({
+        path: groupPath,
+        description: "",
+        username: "",
+        subgroups: [],
+        repositories: [{ name: repositoryName, description: "" }],
+    }));
     const [branches, commits, content, group] = await Promise.all([
         branchesRequest,
         commitsRequest,
@@ -2106,6 +2142,78 @@ async function renderRepositoryBrowser(route) {
         app.append(await repositoryBlobSection(route, content));
     }
 }
+function setBrowserSession(session) {
+    browserSession = session;
+    globalNavigation.hidden = session === null;
+    sessionControls.hidden = session === null;
+    sessionUsername.textContent = session?.username ?? "";
+    app.classList.toggle("login-shell", session === null);
+}
+function renderLogin(message = "") {
+    setBrowserSession(null);
+    document.title = "Sign in · GitOne";
+    notifications.replaceChildren();
+    const view = element("section");
+    view.className = "login-view";
+    const heading = element("header");
+    heading.className = "login-heading";
+    const eyebrow = element("span", "GitOne");
+    eyebrow.className = "eyebrow";
+    heading.append(eyebrow, element("h1", "Sign in"));
+    const form = element("form");
+    form.className = "login-form";
+    const username = element("input");
+    username.name = "username";
+    username.autocomplete = "username";
+    username.required = true;
+    username.spellcheck = false;
+    const password = element("input");
+    password.name = "password";
+    password.type = "password";
+    password.autocomplete = "current-password";
+    password.required = true;
+    const error = element("p", message);
+    error.className = "login-error";
+    error.hidden = message === "";
+    error.setAttribute("role", "alert");
+    const submit = actionButton("Sign in", undefined, "primary login-submit");
+    submit.type = "submit";
+    form.append(fieldLabel("Username", username), fieldLabel("Password", password), error, submit);
+    view.append(heading, form);
+    app.replaceChildren(view);
+    username.focus();
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        form.setAttribute("aria-busy", "true");
+        error.hidden = true;
+        try {
+            const session = await request("/api/session", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    username: username.value.trim(),
+                    password: password.value,
+                }),
+            });
+            password.value = "";
+            setBrowserSession(session);
+            await renderAuthenticated();
+        }
+        catch (reason) {
+            const invalid = reason instanceof RequestError && reason.status === 401;
+            error.textContent = invalid
+                ? "Invalid username or password."
+                : reason instanceof Error ? reason.message : "Could not sign in.";
+            error.hidden = false;
+            password.select();
+        }
+        finally {
+            submit.disabled = false;
+            form.removeAttribute("aria-busy");
+        }
+    });
+}
 async function renderRoot(message) {
     const data = await request("/api/groups");
     document.title = "GitOne";
@@ -2218,22 +2326,41 @@ async function renderGroup(path, message) {
         showStatus(message);
     }
 }
+async function renderAuthenticated() {
+    const repository = currentRepository();
+    if (repository !== null) {
+        await renderRepositoryBrowser(repository);
+        return;
+    }
+    const group = currentGroup();
+    if (group === null) {
+        await renderRoot();
+    }
+    else {
+        await renderGroup(group);
+    }
+}
 async function render() {
     try {
-        const repository = currentRepository();
-        if (repository !== null) {
-            await renderRepositoryBrowser(repository);
-            return;
+        let session;
+        try {
+            session = await request("/api/session");
         }
-        const group = currentGroup();
-        if (group === null) {
-            await renderRoot();
+        catch (reason) {
+            if (reason instanceof RequestError && reason.status === 401) {
+                renderLogin();
+                return;
+            }
+            throw reason;
         }
-        else {
-            await renderGroup(group);
-        }
+        setBrowserSession(session);
+        await renderAuthenticated();
     }
     catch (reason) {
+        if (reason instanceof RequestError && reason.status === 401) {
+            renderLogin("Your session has expired.");
+            return;
+        }
         const message = reason instanceof Error ? reason.message : "Could not load GitOne.";
         const error = element("section");
         error.className = "load-error";
@@ -2243,4 +2370,18 @@ async function render() {
     }
 }
 initializeColorTheme();
+logoutButton.prepend(icon("log-out"));
+logoutButton.addEventListener("click", async () => {
+    logoutButton.disabled = true;
+    try {
+        await request("/api/session", { method: "DELETE" });
+    }
+    catch (reason) {
+        showStatus(reason instanceof Error ? reason.message : "Could not sign out.", true);
+    }
+    finally {
+        logoutButton.disabled = false;
+        renderLogin();
+    }
+});
 void render();

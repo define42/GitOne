@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	"net/http"
@@ -45,5 +46,70 @@ func TestRejectWrongHash(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != 422 {
 		t.Fatalf("expected 422, got %d", w.Code)
+	}
+}
+
+func TestPolicyDisablesLFS(t *testing.T) {
+	root := t.TempDir()
+	h := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.RepositoryPolicy, error) {
+			return control.RepositoryPolicy{}, nil
+		},
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/g/r.git/info/lfs/objects/batch",
+		bytes.NewBufferString(`{"operation":"download","objects":[]}`),
+	)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("expected disabled LFS to return 403, got %d", response.Code)
+	}
+}
+
+func TestUploadEnforcesObjectAndStorageLimits(t *testing.T) {
+	root := t.TempDir()
+	h := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.RepositoryPolicy, error) {
+			return control.RepositoryPolicy{LFS: control.LFSPolicy{
+				Enabled:             true,
+				MaximumObjectBytes:  4,
+				MaximumStorageBytes: 6,
+			}}, nil
+		},
+	}
+	upload := func(data string) *httptest.ResponseRecorder {
+		sum := sha256.Sum256([]byte(data))
+		oid := hex.EncodeToString(sum[:])
+		request := httptest.NewRequest(
+			http.MethodPut,
+			"/g/r.git/info/lfs/objects/"+oid,
+			bytes.NewBufferString(data),
+		)
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, request)
+		return response
+	}
+
+	if response := upload("12345"); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("oversized object returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := upload("1234"); response.Code != http.StatusOK {
+		t.Fatalf("first object returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := upload("56"); response.Code != http.StatusOK {
+		t.Fatalf("object at storage limit returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := upload("7"); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("storage overflow returned %d: %s", response.Code, response.Body.String())
 	}
 }

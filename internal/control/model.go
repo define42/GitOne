@@ -2,6 +2,7 @@ package control
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -57,7 +58,6 @@ func ValidateSettings(d Document) error {
 			return fmt.Errorf("invalid role for member %q", name)
 		}
 	}
-
 	tokenNames := map[string]struct{}{}
 	tokenKeys := map[string]struct{}{}
 	for _, token := range d.Tokens {
@@ -72,6 +72,11 @@ func ValidateSettings(d Document) error {
 		}
 		if !validRole(token.Role) {
 			return fmt.Errorf("invalid role for token %q", token.Name)
+		}
+		for _, repository := range token.Repositories {
+			if strings.TrimSpace(repository) == "" || filepath.Base(repository) != repository || repository == "control" {
+				return fmt.Errorf("invalid repository scope %q for token %q", repository, token.Name)
+			}
 		}
 		if _, exists := tokenNames[token.Name]; exists {
 			return fmt.Errorf("duplicate token name %q", token.Name)

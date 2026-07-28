@@ -1,8 +1,6 @@
 GO ?= go
 NPM ?= npm
 RUN_ARGS ?=
-GITONE_BOOTSTRAP_USER ?= bootstrap
-GITONE_BOOTSTRAP_TOKEN ?= hello
 
 .PHONY: ui test run
 
@@ -14,6 +12,9 @@ test: ui
 	$(GO) test ./...
 
 run: ui
-	GITONE_BOOTSTRAP_USER="$(GITONE_BOOTSTRAP_USER)" \
-	GITONE_BOOTSTRAP_TOKEN="$(GITONE_BOOTSTRAP_TOKEN)" \
 	$(GO) run ./cmd/gitone $(RUN_ARGS)
+docker:
+	docker compose stop
+	killall -9 gitone -q
+	docker compose build
+	docker compose up

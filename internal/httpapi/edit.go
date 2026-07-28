@@ -22,7 +22,7 @@ func (a API) updateRepositoryFile(
 ) (*updateRepositoryFileOutput, error) {
 	repository, parsed, err := a.openRepository(
 		ctx,
-		input.Authorization,
+		input.AuthInput,
 		input.Repository,
 		control.RoleWrite,
 	)
@@ -84,9 +84,9 @@ func (a API) updateRepositoryFile(
 	if message == "" {
 		message = "Update " + cleanPath
 	}
-	author, _, err := basicCredentials(input.Authorization)
+	author, err := a.credentialUsername(input.AuthInput)
 	if err != nil {
-		return nil, huma.Error401Unauthorized("valid HTTP Basic credentials are required")
+		return nil, huma.Error401Unauthorized("valid credentials are required")
 	}
 	signature := object.Signature{
 		Name:  author,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
@@ -24,12 +26,26 @@ import (
 	gittransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
+type staticDirectory map[string]string
+
+var testLDAPDirectory = staticDirectory{"alice": "secret"}
+
+func (d staticDirectory) Authenticate(
+	_ context.Context,
+	username string,
+	password string,
+) (string, error) {
+	if expected, ok := d[username]; !ok || expected != password {
+		return "", errors.New("invalid credentials")
+	}
+	return username, nil
+}
+
 func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
-		Root:           root,
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      root,
+		Directory: testLDAPDirectory,
 	})
 	request := httptest.NewRequest(http.MethodPost, "/api/groups/engineering?description=Engineering%20projects", nil)
 	request.SetBasicAuth("alice", "secret")
@@ -66,12 +82,320 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 	}
 }
 
+func TestLDAPLoginCreatesSecureBrowserSession(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := auth.NewSessionManager(auth.SessionConfig{
+		HashKey:  []byte(strings.Repeat("h", 64)),
+		BlockKey: []byte(strings.Repeat("b", 32)),
+		MaxAge:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root:      root,
+		Directory: staticDirectory{"alice": "ldap-secret"},
+		Sessions:  sessions,
+	})
+
+	invalid := httptest.NewRequest(
+		http.MethodPost,
+		"/api/session",
+		strings.NewReader(`{"username":"alice","password":"wrong"}`),
+	)
+	invalid.Header.Set("Content-Type", "application/json")
+	invalidResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusUnauthorized ||
+		invalidResponse.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("invalid LDAP login returned %d with cookie %q", invalidResponse.Code, invalidResponse.Header().Get("Set-Cookie"))
+	}
+
+	login := httptest.NewRequest(
+		http.MethodPost,
+		"/api/session",
+		strings.NewReader(`{"username":"alice","password":"ldap-secret"}`),
+	)
+	login.Header.Set("Content-Type", "application/json")
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("LDAP login returned %d: %s", loginResponse.Code, loginResponse.Body.String())
+	}
+	setCookie := loginResponse.Header().Get("Set-Cookie")
+	if !strings.Contains(setCookie, "HttpOnly") ||
+		!strings.Contains(setCookie, "SameSite=Strict") ||
+		strings.Contains(setCookie, "alice") ||
+		strings.Contains(setCookie, "ldap-secret") {
+		t.Fatalf("unexpected session cookie: %s", setCookie)
+	}
+	cookies := loginResponse.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != auth.SessionCookieName {
+		t.Fatalf("login did not issue the GitOne session cookie: %#v", cookies)
+	}
+
+	group := httptest.NewRequest(http.MethodGet, "/api/groups/engineering", nil)
+	group.AddCookie(cookies[0])
+	groupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(groupResponse, group)
+	if groupResponse.Code != http.StatusOK {
+		t.Fatalf("session cookie did not authorize API request: %d: %s", groupResponse.Code, groupResponse.Body.String())
+	}
+
+	current := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	current.AddCookie(cookies[0])
+	currentResponse := httptest.NewRecorder()
+	handler.ServeHTTP(currentResponse, current)
+	if currentResponse.Code != http.StatusOK ||
+		!strings.Contains(currentResponse.Body.String(), `"username":"alice"`) {
+		t.Fatalf("unexpected current session response: %d: %s", currentResponse.Code, currentResponse.Body.String())
+	}
+
+	logout := httptest.NewRequest(http.MethodDelete, "/api/session", nil)
+	logout.AddCookie(cookies[0])
+	logoutResponse := httptest.NewRecorder()
+	handler.ServeHTTP(logoutResponse, logout)
+	if logoutResponse.Code != http.StatusNoContent ||
+		!strings.Contains(logoutResponse.Header().Get("Set-Cookie"), "Max-Age=0") {
+		t.Fatalf("logout did not clear the session: %d %q", logoutResponse.Code, logoutResponse.Header().Get("Set-Cookie"))
+	}
+}
+
+func TestLDAPUserCanCreateRootGroupButNotUnauthorizedSubgroup(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := auth.NewSessionManager(auth.SessionConfig{
+		HashKey:  []byte(strings.Repeat("h", 64)),
+		BlockKey: []byte(strings.Repeat("b", 32)),
+		MaxAge:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root:      root,
+		Directory: staticDirectory{"bob": "ldap-secret"},
+		Sessions:  sessions,
+	})
+	login := httptest.NewRequest(
+		http.MethodPost,
+		"/api/session",
+		strings.NewReader(`{"username":"bob","password":"ldap-secret"}`),
+	)
+	login.Header.Set("Content-Type", "application/json")
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("LDAP login returned %d: %s", loginResponse.Code, loginResponse.Body.String())
+	}
+	cookies := loginResponse.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("LDAP login returned unexpected cookies: %#v", cookies)
+	}
+
+	createRoot := httptest.NewRequest(
+		http.MethodPost,
+		"/api/groups/design?description=Product%20design",
+		nil,
+	)
+	createRoot.AddCookie(cookies[0])
+	createRootResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createRootResponse, createRoot)
+	if createRootResponse.Code != http.StatusCreated {
+		t.Fatalf("root group creation returned %d: %s", createRootResponse.Code, createRootResponse.Body.String())
+	}
+	document, err := control.NewStore(root).Load(context.Background(), "design")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Members["bob"] != control.RoleOwner ||
+		document.Description != "Product design" {
+		t.Fatalf("LDAP group creator did not become owner: %#v", document)
+	}
+
+	createSubgroup := httptest.NewRequest(
+		http.MethodPost,
+		"/api/groups/engineering%2Fbackend",
+		nil,
+	)
+	createSubgroup.AddCookie(cookies[0])
+	createSubgroupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createSubgroupResponse, createSubgroup)
+	if createSubgroupResponse.Code != http.StatusForbidden {
+		t.Fatalf(
+			"unauthorized subgroup creation returned %d: %s",
+			createSubgroupResponse.Code,
+			createSubgroupResponse.Body.String(),
+		)
+	}
+}
+
+func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"public", "internal", "api", "web"} {
+		if err := store.CreateRepository(
+			repopath.Repository{Groups: []string{"engineering"}, Name: name},
+			storage.CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controls := control.NewStore(root)
+	document, err := controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash, err := auth.HashSecret("ci-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Repositories["public"] = control.RepositoryPolicy{Visibility: "public"}
+	document.Repositories["internal"] = control.RepositoryPolicy{Visibility: "internal"}
+	document.Tokens = []control.Token{{
+		Name:         "deploy",
+		Key:          "ci",
+		Hash:         tokenHash,
+		Role:         control.RoleAdmin,
+		Repositories: []string{"api"},
+	}}
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.CreateGroup("community", "bob", ""); err != nil {
+		t.Fatal(err)
+	}
+	community, err := controls.Load(context.Background(), "community")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.UpdateGroupControl("community", community, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root: root,
+		Directory: staticDirectory{
+			"alice": "secret",
+			"bob":   "bob-secret",
+		},
+	})
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/engineering/public.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("public repository returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodPost,
+		"/engineering/api.git/info/lfs/objects/batch",
+		strings.NewReader(`{"operation":"download","objects":[]}`),
+	)
+	request.SetBasicAuth("alice", "secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("default LFS policy returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodPost,
+		"/engineering/public.git/info/lfs/objects/batch",
+		strings.NewReader(`{"operation":"download","objects":[]}`),
+	)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("explicitly disabled LFS returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/engineering/internal.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	request.SetBasicAuth("bob", "bob-secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("internal repository returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/engineering/api.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	request.SetBasicAuth("ci", "ci-secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("scoped repository returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/engineering/web.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	request.SetBasicAuth("ci", "ci-secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("out-of-scope repository returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/groups/engineering", nil)
+	request.SetBasicAuth("ci", "ci-secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("group detail returned %d: %s", response.Code, response.Body.String())
+	}
+	var detail struct {
+		Repositories []struct {
+			Name string `json:"name"`
+		} `json:"repositories"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Repositories) != 1 || detail.Repositories[0].Name != "api" {
+		t.Fatalf("scoped token saw unexpected repositories: %#v", detail.Repositories)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/repositories/engineering%2Fother", nil)
+	request.SetBasicAuth("ci", "ci-secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("out-of-scope repository creation returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
-		Root:           root,
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root: root,
+		Directory: staticDirectory{
+			"alice": "secret",
+			"bob":   "bob-secret",
+		},
 	})
 	for _, path := range []string{"engineering", "engineering%2Fbackend"} {
 		request := httptest.NewRequest(http.MethodPost, "/api/groups/"+path, nil)
@@ -109,7 +433,7 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 		"tokens": [{
 			"name": "deploy",
 			"key": "ci",
-			"hash": "sha256:deadbeef",
+			"newSecret": "deploy-secret",
 			"role": "write",
 			"repositories": ["api"],
 			"disabled": true
@@ -152,6 +476,7 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 		updated.Inherit ||
 		updated.Members["bob"] != control.RoleRead ||
 		len(updated.Tokens) != 1 ||
+		!strings.HasPrefix(updated.Tokens[0].Hash, "$argon2id$") ||
 		!updated.Repositories["api"].LFS.Enabled {
 		t.Fatalf("unexpected updated settings: %#v", updated)
 	}
@@ -160,7 +485,7 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 	}
 
 	forbidden := httptest.NewRequest(http.MethodGet, "/api/groups/product/settings", nil)
-	forbidden.SetBasicAuth("bob", "bob")
+	forbidden.SetBasicAuth("bob", "bob-secret")
 	forbiddenResponse := httptest.NewRecorder()
 	handler.ServeHTTP(forbiddenResponse, forbidden)
 	if forbiddenResponse.Code != http.StatusForbidden {
@@ -171,9 +496,8 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 func TestLegacyCreateGroupEndpointIsRemoved(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
-		Root:           root,
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      root,
+		Directory: testLDAPDirectory,
 	})
 	request := httptest.NewRequest(http.MethodPost, "/api/groups", strings.NewReader("path=engineering"))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -193,9 +517,8 @@ func TestLegacyCreateGroupEndpointIsRemoved(t *testing.T) {
 func TestCreateRepositoryFromPath(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
-		Root:           root,
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      root,
+		Directory: testLDAPDirectory,
 	})
 
 	createGroup := httptest.NewRequest(http.MethodPost, "/api/groups/engineering", nil)
@@ -308,9 +631,8 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 
 func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 	handler := New(Config{
-		Root:           t.TempDir(),
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      t.TempDir(),
+		Directory: testLDAPDirectory,
 	})
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -493,9 +815,8 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 
 	handler := New(Config{
-		Root:           root,
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      root,
+		Directory: testLDAPDirectory,
 	})
 	get := func(path string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -961,9 +1282,8 @@ func TestRepositoryBrowserResolvesLFSContent(t *testing.T) {
 	}
 
 	handler := New(Config{
-		Root:           root,
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      root,
+		Directory: testLDAPDirectory,
 	})
 	request := httptest.NewRequest(
 		http.MethodGet,
@@ -1070,9 +1390,8 @@ func TestCompareAndMergeRepositoryBranches(t *testing.T) {
 	)
 
 	handler := New(Config{
-		Root:           root,
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      root,
+		Directory: testLDAPDirectory,
 	})
 	do := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -1305,9 +1624,8 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := New(Config{
-		Root:           root,
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      root,
+		Directory: testLDAPDirectory,
 	})
 
 	listRequest := httptest.NewRequest(http.MethodGet, "/api/groups", nil)
@@ -1405,19 +1723,18 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 
 func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	handler := New(Config{
-		Root:           t.TempDir(),
-		BootstrapUser:  "alice",
-		BootstrapToken: "secret",
+		Root:      t.TempDir(),
+		Directory: testLDAPDirectory,
 	})
 
 	unauthenticated := httptest.NewRequest(http.MethodGet, "/", nil)
 	unauthenticatedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(unauthenticatedResponse, unauthenticated)
-	if unauthenticatedResponse.Code != http.StatusUnauthorized {
-		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, unauthenticatedResponse.Code)
+	if unauthenticatedResponse.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, unauthenticatedResponse.Code)
 	}
-	if unauthenticatedResponse.Header().Get("WWW-Authenticate") == "" {
-		t.Fatal("missing Basic Auth challenge")
+	if unauthenticatedResponse.Header().Get("WWW-Authenticate") != "" {
+		t.Fatal("UI shell should not trigger a browser Basic Auth challenge")
 	}
 
 	for _, path := range []string{"/", "/groups/engineering/backend", "/repositories/engineering/api"} {
@@ -1432,13 +1749,15 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		if !strings.Contains(body, `<main id="app"`) ||
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=17">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=18">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
 			!strings.Contains(body, `<option value="dark" selected>Dark</option>`) ||
 			!strings.Contains(body, `<option value="github">GitHub</option>`) ||
 			!strings.Contains(body, `<option value="gitlab">GitLab</option>`) ||
+			!strings.Contains(body, `<div id="session-controls"`) ||
+			!strings.Contains(body, `<button id="logout"`) ||
 			!strings.Contains(body, `<div id="notifications"`) {
 			t.Fatalf("%s did not serve the TypeScript UI shell", path)
 		}
@@ -1474,7 +1793,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	}
 	if !strings.Contains(assetResponse.Body.String(), "initializeColorTheme") ||
 		!strings.Contains(assetResponse.Body.String(), "localStorage.setItem(colorThemeStorageKey, theme)") ||
-		!strings.Contains(assetResponse.Body.String(), "document.documentElement.dataset.theme = theme") {
+		!strings.Contains(assetResponse.Body.String(), "document.documentElement.dataset.theme = theme") ||
+		!strings.Contains(assetResponse.Body.String(), "renderLogin") ||
+		!strings.Contains(assetResponse.Body.String(), `request("/api/session"`) {
 		t.Fatal("served UI does not persist and apply color themes")
 	}
 	if strings.Contains(assetResponse.Body.String(), `"Recent commits"`) {
@@ -1593,9 +1914,13 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	}
 	if !strings.Contains(assetResponse.Body.String(), "groupSettingsControl") ||
 		!strings.Contains(assetResponse.Body.String(), "groupSettingsAPIURL") ||
-		!strings.Contains(assetResponse.Body.String(), "hashTokenSecret") ||
+		!strings.Contains(assetResponse.Body.String(), "newSecret: secret") ||
 		!strings.Contains(assetResponse.Body.String(), `method: "PUT"`) {
 		t.Fatal("served UI does not provide complete group control settings")
+	}
+	if strings.Contains(assetResponse.Body.String(), "memberSecrets") ||
+		strings.Contains(assetResponse.Body.String(), "member-secret") {
+		t.Fatal("served UI still exposes local member password controls")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "group.description") {
 		t.Fatal("served UI does not show group descriptions")

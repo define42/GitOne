@@ -446,8 +446,9 @@ func (s Store) UpdateGroupControl(group string, document control.Document, autho
 	if err != nil {
 		return err
 	}
-	return repository.Storer.SetReference(
+	return repository.Storer.CheckAndSetReference(
 		plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), commitHash),
+		head,
 	)
 }
 

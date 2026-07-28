@@ -1,10 +1,13 @@
 package githttp
 
 import (
+	"encoding/json"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
+	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +29,16 @@ func TestControlRejectsTags(t *testing.T) {
 	req.Commands = []*packp.Command{{Name: plumbing.NewTagReferenceName("v1"), Old: plumbing.NewHash("1111111111111111111111111111111111111111"), New: plumbing.NewHash("2222222222222222222222222222222222222222")}}
 	if e := validateControlRefs(req); e == nil {
 		t.Fatal("expected rejection")
+	}
+}
+
+func TestRejectsUnsupportedReceiveCapability(t *testing.T) {
+	capabilities := capability.NewList()
+	if err := capabilities.Set(capability.Atomic); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReceiveCapabilities(capabilities); err == nil {
+		t.Fatal("expected unsupported atomic capability to be rejected")
 	}
 }
 
@@ -61,6 +74,88 @@ func TestAuthenticatedUserWithoutPermissionIsForbidden(t *testing.T) {
 
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d", http.StatusForbidden, response.Code)
+	}
+}
+
+func TestRejectsStaleReferenceUpdate(t *testing.T) {
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "docs"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := packp.NewReferenceUpdateRequest()
+	request.Commands = []*packp.Command{{
+		Name: plumbing.NewBranchReferenceName("main"),
+		Old:  plumbing.NewHash("1111111111111111111111111111111111111111"),
+		New:  head.Hash(),
+	}}
+	if err = validateReferenceCommands(repository, request); err == nil ||
+		!strings.Contains(err.Error(), "stale reference") {
+		t.Fatalf("expected stale reference error, got %v", err)
+	}
+}
+
+func TestNativeGitRejectsInvalidControlDocument(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is not available")
+	}
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(Handler{Storage: store})
+	defer server.Close()
+	checkout := filepath.Join(t.TempDir(), "control")
+	runGit(t, "", "clone", server.URL+"/engineering/control.git", checkout)
+	runGit(t, checkout, "config", "user.name", "alice")
+	runGit(t, checkout, "config", "user.email", "alice@localhost")
+
+	controlPath := filepath.Join(checkout, "control.json")
+	contents, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err = json.Unmarshal(contents, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["members"] = map[string]string{"alice": "read"}
+	contents, err = json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(controlPath, append(contents, '\n'), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, checkout, "add", "control.json")
+	runGit(t, checkout, "commit", "-m", "Remove final owner")
+	command := exec.Command("git", "push", "origin", "main")
+	command.Dir = checkout
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("invalid control push succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "at least one owner required") {
+		t.Fatalf("push did not report control validation failure:\n%s", output)
 	}
 }
 

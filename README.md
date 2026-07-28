@@ -16,14 +16,28 @@ Every repository belongs to at least one group. Every group must contain `contro
 ## Run
 
 ```bash
-export GITONE_BOOTSTRAP_USER=bootstrap
-export GITONE_BOOTSTRAP_TOKEN='replace-me'
+export LDAP_URL='ldaps://localhost:389'
+export LDAP_BASE_DN='dc=glauth,dc=com'
+export LDAP_USER_DOMAIN='example.com'
+export LDAP_USER_FILTER='(mail=%s)'
+export GITONE_SESSION_HASH_KEY='<base64-encoded 64-byte key>'
+export GITONE_SESSION_BLOCK_KEY='<base64-encoded 32-byte key>'
 make run RUN_ARGS="-root ./data -listen :8080 -public-url http://localhost:8080"
+```
+
+The included development directory uses a self-signed certificate, so its compose configuration sets `LDAP_SKIP_TLS_VERIFY=true`. Configure `LDAP_CA_FILE` instead for a trusted deployment. `LDAP_USER_DOMAIN` is appended to usernames that do not already contain `@`. Set `LDAP_STARTTLS=true` when using StartTLS over an `ldap://` URL. `LDAP_CONNECTION_TIMEOUT` defaults to `5s`.
+
+The session keys encrypt and authenticate browser cookies and can be generated with `openssl rand -base64 64` and `openssl rand -base64 32`. When they are omitted, GitOne generates ephemeral keys and existing browser sessions end on restart. Sessions last 12 hours by default; configure `GITONE_SESSION_MAX_AGE` with a Go duration such as `8h`. Cookie `Secure` mode follows an HTTPS public URL and can be overridden with `GITONE_SESSION_SECURE`.
+
+The complete development stack can be started with:
+
+```bash
+docker compose up --build
 ```
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and enter your HTTP Basic authentication credentials when prompted. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser. The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files with server-side Chroma syntax highlighting, show the latest 100 commits in the selected branch’s history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Users with write access can edit UTF-8 files up to 1 MiB directly on a named branch and review their uncommitted changes as a unified diff; each save creates a commit and rejects the update if the branch changed after the editor was opened. They can also merge a clean comparison after confirmation. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
+Open [http://localhost:8080](http://localhost:8080) and sign in with LDAP credentials. After LDAP validation, GitOne stores only the username in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner; creating a subgroup still requires admin access inherited from its parent. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser. The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`. The repository viewer can browse files with server-side Chroma syntax highlighting, show the latest 100 commits in the selected branch’s history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Users with write access can edit UTF-8 files up to 1 MiB directly on a named branch and review their uncommitted changes as a unified diff; each save creates a commit and rejects the update if the branch changed after the editor was opened. They can also merge a clean comparison after confirmation. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
 Build the UI separately with:
 
@@ -33,7 +47,7 @@ make ui
 
 ## Endpoint reference
 
-`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. UI, administration, Git, and LFS requests use HTTP Basic authentication. Health and Huma documentation endpoints are public.
+`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. Browser administration requests use the secure session cookie. The API also accepts HTTP Basic authentication for scripts and automation tokens. Native Git and LFS operations continue to use HTTP Basic authentication. Git and LFS reads follow repository visibility: `public` permits anonymous reads, `internal` accepts any authenticated LDAP identity, and private/default repositories require group access. Writes always require group write access. Health and Huma documentation endpoints are public.
 
 ### Health
 
@@ -65,10 +79,13 @@ make ui
 
 | Method | Path | Description |
 | --- | --- | --- |
+| `POST` | `/api/session` | Validate LDAP credentials and create the signed and encrypted browser session cookie. |
+| `GET` | `/api/session` | Return the username from the current browser session. |
+| `DELETE` | `/api/session` | Clear the current browser session. |
 | `GET` | `/api/groups` | List accessible top-level groups. |
 | `GET` | `/api/groups/{path}` | Get a group’s description, immediate subgroups, and repositories with their descriptions. |
 | `GET` | `/api/groups/{path}/settings` | Get the complete `control.json` document for an admin-authorized group. |
-| `POST` | `/api/groups/{path}` | Create a group. `path` is the URL-encoded full group path. Optional query parameter: `description`. |
+| `POST` | `/api/groups/{path}` | Create a group. Any LDAP user may create a top-level group; nested groups require parent admin access. Optional query parameter: `description`. |
 | `PUT` | `/api/groups/{path}/settings` | Replace group control settings and optionally rename the group through the `name` field. |
 | `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
@@ -114,43 +131,43 @@ The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encod
 
 ## Administration examples
 
-Create the first group with the bootstrap credentials:
+Create the first group with LDAP credentials. The authenticated user becomes its owner:
 
 ```bash
-curl -u bootstrap:replace-me -X POST \
+curl -u alice:directory-password -X POST \
   'http://localhost:8080/api/groups/engineering?description=Engineering%20projects'
 ```
 
-Create a subgroup using an owner/admin token inherited from its parent:
+Create a subgroup as its parent owner:
 
 ```bash
-curl -u bootstrap:replace-me -X POST \
+curl -u alice:directory-password -X POST \
   'http://localhost:8080/api/groups/engineering%2Fbackend?description=Backend%20services'
 ```
 
 Create a repository:
 
 ```bash
-curl -u bootstrap:replace-me -X POST \
+curl -u alice:directory-password -X POST \
   'http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi?initializeReadme=true&description=Backend%20API'
 ```
 
-Clone the repository and enter the bootstrap token when Git prompts for a password:
+Clone the repository and enter the LDAP password when Git prompts:
 
 ```bash
-git clone http://bootstrap@localhost:8080/engineering/backend/api.git
+git clone http://alice@localhost:8080/engineering/backend/api.git
 ```
 
 List top-level groups:
 
 ```bash
-curl -u bootstrap:replace-me http://localhost:8080/api/groups
+curl -u alice:directory-password http://localhost:8080/api/groups
 ```
 
 Read a nested group:
 
 ```bash
-curl -u bootstrap:replace-me \
+curl -u alice:directory-password \
   http://localhost:8080/api/groups/engineering%2Fbackend
 ```
 
@@ -167,10 +184,11 @@ curl -u bootstrap:replace-me \
   },
   "tokens": [
     {
-      "name": "ci",
+      "name": "CI deploy",
       "key": "ci",
-      "hash": "sha256:<hex>",
-      "role": "write"
+      "hash": "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>",
+      "role": "write",
+      "repositories": ["api"]
     }
   ],
   "repositories": {
@@ -186,7 +204,11 @@ curl -u bootstrap:replace-me \
 }
 ```
 
-The initial implementation uses `sha256:` token hashes to keep bootstrap interoperability simple. Replace this with fully parsed Argon2id hashes before exposing the service publicly.
+Member entries contain only LDAP usernames and roles. GitOne binds directly with the submitted username plus the optional `LDAP_USER_DOMAIN`, searches for that authenticated identifier using `LDAP_USER_FILTER`, then matches the submitted username exactly against `members`; member passwords are never stored in `control.json`.
+
+Repository tokens remain available for automation and use salted Argon2id hashes. The settings API accepts a new token secret only for the duration of an update and hashes it on the server. A token's `key` is its HTTP Basic username, while `name` is only its display label. An empty token repository list grants access to every repository allowed by its role.
+
+Git LFS is enabled with unlimited quotas when a repository has no explicit policy. An explicit policy can disable LFS or configure object and storage limits; a zero limit means unlimited within the server's absolute upload guard.
 
 ## Tests
 
@@ -196,4 +218,4 @@ make test
 
 ## Current implementation boundaries
 
-This is an initial server implementation, not yet a production release. The receive-pack path uses go-git's pure-Go server implementation. Before production use, add pre-ref validation that reads the proposed `control.json`, fast-forward enforcement for `control.git`, LFS-pointer existence checks, quotas, coordinated rename/delete endpoints, upload reservations, rate limiting, TLS termination, and broader compatibility tests against native Git clients.
+This is an initial server implementation, not yet a production release. LDAP connections support TLS certificate verification, a custom CA file, bounded search results, escaped filters, and configurable timeouts. Receive-pack rejects stale old SHAs, validates proposed `control.json` commits, and permits only fast-forward updates to `control.git`. LFS enablement, object limits, and storage quotas are enforced at upload time within one server process. Before production use, add LFS-pointer existence checks during Git pushes, multi-process upload reservations and ref coordination, rate limiting, HTTP TLS termination, audit logs, and broader compatibility tests against native Git clients.

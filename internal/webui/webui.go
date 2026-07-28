@@ -17,12 +17,6 @@ var public = mustSub(embedded, "dist")
 type Handler struct{}
 
 func (Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if _, _, ok := r.BasicAuth(); !ok {
-		w.Header().Set("WWW-Authenticate", `Basic realm="GitOne"`)
-		http.Error(w, "authentication required", http.StatusUnauthorized)
-		return
-	}
-
 	if strings.HasPrefix(r.URL.Path, "/assets/") {
 		name := strings.TrimPrefix(r.URL.Path, "/assets/")
 		if name == "" || !fs.ValidPath(name) || strings.Contains(name, "/") {

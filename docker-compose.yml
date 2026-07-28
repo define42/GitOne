@@ -1,0 +1,27 @@
+services:
+  gitone:
+    build:
+      context: ./
+    environment:
+      - BASE_IMAGE_DIR=/data/baseimages
+      - LDAP_URL=ldaps://ldap:389
+      - LDAP_BASE_DN=dc=glauth,dc=com
+      - LDAP_USER_DOMAIN=example.com
+      - LDAP_USER_FILTER=(mail=%s)
+      - LDAP_SKIP_TLS_VERIFY=true
+    depends_on:
+      - ldap
+    ports:
+      - "8080:8080"
+    volumes:
+      - /data/:/data/
+  ldap:
+    image: glauth/glauth
+    container_name: ldap
+    restart: always
+    ports:
+      - "389:389"
+    volumes:
+      - ./testldap/default-config.cfg:/app/config/config.cfg
+      - ./testldap/key.pem:/app/config/key.pem
+      - ./testldap/cert.pem:/app/config/cert.pem

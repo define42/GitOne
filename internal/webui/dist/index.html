@@ -25,7 +25,7 @@
     }
   </script>
   <script src="/assets/diff.min.js"></script>
-  <script type="module" src="/assets/app.js?v=17"></script>
+  <script type="module" src="/assets/app.js?v=18"></script>
 </head>
 <body>
   <header class="site-header">
@@ -33,7 +33,7 @@
       <a class="brand-logo" href="/" aria-label="GitOne home">
         <img src="/assets/gitone.png" alt="GitOne">
       </a>
-      <nav class="global-navigation" aria-label="Global">
+      <nav id="global-navigation" class="global-navigation" aria-label="Global" hidden>
         <a href="/">Groups</a>
         <a href="/docs">API</a>
       </nav>
@@ -51,6 +51,10 @@
           <option value="gitlab">GitLab</option>
         </select>
       </label>
+      <div id="session-controls" class="session-controls" hidden>
+        <span id="session-username"></span>
+        <button id="logout" type="button" title="Sign out">Sign out</button>
+      </div>
     </div>
   </header>
   <div id="notifications" class="notifications" aria-live="polite" aria-atomic="true"></div>

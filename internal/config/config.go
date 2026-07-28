@@ -8,11 +8,9 @@ import (
 )
 
 type Config struct {
-	Listen         string `json:"listen"`
-	Root           string `json:"root"`
-	BootstrapUser  string `json:"bootstrapUser"`
-	BootstrapToken string `json:"bootstrapToken"`
-	PublicURL      string `json:"publicURL"`
+	Listen    string `json:"listen"`
+	Root      string `json:"root"`
+	PublicURL string `json:"publicURL"`
 }
 
 func Load(path string) (Config, error) {

@@ -10,15 +10,47 @@ import (
 	"github.com/define42/GitOne/internal/storage"
 	"github.com/define42/GitOne/internal/webui"
 	"net/http"
+	"sync"
 )
 
-type Config struct{ Root, PublicURL, BootstrapUser, BootstrapToken string }
+type Config struct {
+	Root, PublicURL string
+	Directory       auth.IdentityProvider
+	Sessions        *auth.SessionManager
+}
 
 func New(c Config) http.Handler {
 	st := storage.Store{Root: c.Root}
 	cs := control.NewStore(c.Root)
-	ar := &auth.Resolver{Controls: cs, BootstrapUser: c.BootstrapUser, BootstrapToken: c.BootstrapToken}
+	ar := &auth.Resolver{
+		Controls:  cs,
+		Directory: c.Directory,
+	}
+	sessions := c.Sessions
+	if sessions == nil {
+		var err error
+		sessions, err = auth.NewEphemeralSessionManager(false)
+		if err != nil {
+			panic(err)
+		}
+	}
 	authorizeRepo := func(r *http.Request, repo repopath.Repository, write bool) (bool, bool) {
+		document, _ := cs.Load(r.Context(), repo.Group())
+		if !write {
+			visibility := document.Repositories[repo.Name].Visibility
+			if visibility == "public" {
+				return true, true
+			}
+			if visibility == "internal" {
+				u, p, ok := r.BasicAuth()
+				if !ok {
+					return false, false
+				}
+				if _, authErr := ar.AuthenticateIdentity(r.Context(), u, p); authErr == nil {
+					return true, true
+				}
+			}
+		}
 		u, p, ok := r.BasicAuth()
 		if !ok {
 			return false, false
@@ -34,17 +66,38 @@ func New(c Config) http.Handler {
 		if repo.Name == "control" && write {
 			need = control.RoleOwner
 		}
-		return true, pr.Role.Allows(need)
+		return true, pr.Role.Allows(need) && pr.AllowsRepository(repo.Name)
 	}
 	mux := http.NewServeMux()
-	httpapi.Register(mux, httpapi.API{Storage: st, Resolver: ar})
+	httpapi.Register(mux, httpapi.API{Storage: st, Resolver: ar, Sessions: sessions})
 	ui := webui.Handler{}
 	mux.Handle("GET /{$}", ui)
 	mux.Handle("GET /groups/{path...}", ui)
 	mux.Handle("GET /repositories/{path...}", ui)
 	mux.Handle("GET /assets/{path...}", ui)
-	lh := lfs.Handler{Storage: st, PublicURL: c.PublicURL, Authorize: authorizeRepo}
-	gh := githttp.Handler{Storage: st, Authorize: authorizeRepo}
+	lh := lfs.Handler{
+		Storage:   st,
+		PublicURL: c.PublicURL,
+		Authorize: authorizeRepo,
+		Policy: func(r *http.Request, repo repopath.Repository) (control.RepositoryPolicy, error) {
+			document, err := cs.Load(r.Context(), repo.Group())
+			if err != nil {
+				return control.RepositoryPolicy{}, err
+			}
+			policy, configured := document.Repositories[repo.Name]
+			if !configured {
+				policy.LFS.Enabled = true
+			}
+			return policy, nil
+		},
+		UploadMu: &sync.Mutex{},
+	}
+	gh := githttp.Handler{
+		Storage:        st,
+		Authorize:      authorizeRepo,
+		ReceiveMu:      &sync.Mutex{},
+		ControlUpdated: cs.Invalidate,
+	}
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if containsLFS(r.URL.Path) {
 			lh.ServeHTTP(w, r)

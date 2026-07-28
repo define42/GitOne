@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -17,10 +18,12 @@ import (
 type API struct {
 	Storage  storage.Store
 	Resolver *auth.Resolver
+	Sessions *auth.SessionManager
 }
 
 type AuthInput struct {
 	Authorization string `header:"Authorization" hidden:"true"`
+	Cookie        string `header:"Cookie" hidden:"true"`
 }
 
 type healthOutput struct {
@@ -69,8 +72,19 @@ type updateGroupSettingsBody struct {
 	Description  string                              `json:"description"`
 	Inherit      bool                                `json:"inherit"`
 	Members      map[string]control.Role             `json:"members"`
-	Tokens       []control.Token                     `json:"tokens"`
+	Tokens       []groupTokenInput                   `json:"tokens"`
 	Repositories map[string]control.RepositoryPolicy `json:"repositories"`
+}
+
+type groupTokenInput struct {
+	Name         string       `json:"name"`
+	Key          string       `json:"key"`
+	Hash         string       `json:"hash,omitempty"`
+	NewSecret    string       `json:"newSecret,omitempty"`
+	Role         control.Role `json:"role"`
+	Repositories []string     `json:"repositories,omitempty"`
+	ExpiresAt    *time.Time   `json:"expiresAt,omitempty"`
+	Disabled     bool         `json:"disabled,omitempty"`
 }
 
 type updateGroupSettingsInput struct {
@@ -147,6 +161,12 @@ func Register(mux *http.ServeMux, service API) huma.API {
 			Scheme:      "basic",
 			Description: "GitOne HTTP Basic authentication",
 		},
+		"cookieAuth": {
+			Type:        "apiKey",
+			In:          "cookie",
+			Name:        auth.SessionCookieName,
+			Description: "GitOne signed and encrypted browser session",
+		},
 	}
 	api := humago.New(mux, config)
 
@@ -157,6 +177,8 @@ func Register(mux *http.ServeMux, service API) huma.API {
 		Summary:     "Check server health",
 		Tags:        []string{"Health"},
 	}, service.health)
+
+	registerSessionAPI(api, service)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-groups",
@@ -256,10 +278,6 @@ func (a API) health(context.Context, *struct{}) (*healthOutput, error) {
 }
 
 func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroupsOutput, error) {
-	user, secret, err := basicCredentials(input.Authorization)
-	if err != nil {
-		return nil, err
-	}
 	groups, listErr := a.Storage.ListGroups()
 	if listErr != nil {
 		return nil, huma.Error500InternalServerError("could not list groups", listErr)
@@ -267,12 +285,16 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 
 	output := &listGroupsOutput{}
 	output.Body.Groups = []groupSummary{}
-	authenticated := false
-	if _, resolveErr := a.Resolver.Authenticate(ctx, "", user, secret); resolveErr == nil {
-		authenticated = true
-	}
+	identity, identityErr := a.authenticateIdentity(ctx, input.AuthInput)
+	authenticated := identityErr == nil
 	for _, group := range groups {
-		principal, resolveErr := a.Resolver.Authenticate(ctx, group.Path, user, secret)
+		var principal auth.Principal
+		var resolveErr error
+		if identityErr == nil {
+			principal, resolveErr = a.Resolver.AuthorizeIdentity(ctx, group.Path, identity)
+		} else {
+			principal, resolveErr = a.authenticateBasicGroup(ctx, input.AuthInput, group.Path)
+		}
 		if resolveErr != nil {
 			continue
 		}
@@ -301,7 +323,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	username, err := a.authorize(ctx, input.Authorization, path, control.RoleRead)
+	principal, err := a.authorizePrincipal(ctx, input.AuthInput, path, control.RoleRead)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +335,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	var current *storage.GroupInfo
 	output := &groupDetailOutput{}
 	output.Body.Path = path
-	output.Body.Username = username
+	output.Body.Username = principal.Name
 	if document, loadErr := a.Resolver.Controls.Load(ctx, path); loadErr == nil {
 		output.Body.Description = document.Description
 	}
@@ -333,7 +355,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		if strings.Contains(name, "/") {
 			continue
 		}
-		if _, authErr := a.authorize(ctx, input.Authorization, group.Path, control.RoleRead); authErr != nil {
+		if _, authErr := a.authorize(ctx, input.AuthInput, group.Path, control.RoleRead); authErr != nil {
 			continue
 		}
 		description := ""
@@ -350,6 +372,9 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		return nil, huma.Error404NotFound("group not found")
 	}
 	for _, name := range current.Repositories {
+		if !principal.AllowsRepository(name) {
+			continue
+		}
 		description, descriptionErr := a.Storage.RepositoryDescription(repopath.Repository{
 			Groups: strings.Split(path, "/"),
 			Name:   name,
@@ -370,7 +395,7 @@ func (a API) getGroupSettings(ctx context.Context, input *GroupPathInput) (*grou
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, input.Authorization, path, control.RoleAdmin); err != nil {
+	if _, err = a.authorize(ctx, input.AuthInput, path, control.RoleAdmin); err != nil {
 		return nil, err
 	}
 	document, err := a.Resolver.Controls.Load(ctx, path)
@@ -387,9 +412,13 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	author, err := a.authorize(ctx, input.Authorization, path, control.RoleAdmin)
+	author, err := a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
 	if err != nil {
 		return nil, err
+	}
+	current, err := a.Resolver.Controls.Load(ctx, path)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not load current group settings", err)
 	}
 	name := strings.TrimSpace(input.Body.Name)
 	if name == "" || strings.Contains(name, "/") {
@@ -407,14 +436,41 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 		Description:  input.Body.Description,
 		Inherit:      input.Body.Inherit,
 		Members:      input.Body.Members,
-		Tokens:       input.Body.Tokens,
 		Repositories: input.Body.Repositories,
 	}
 	if document.Members == nil {
 		document.Members = map[string]control.Role{}
 	}
-	if document.Tokens == nil {
-		document.Tokens = []control.Token{}
+	document.Tokens = make([]control.Token, 0, len(input.Body.Tokens))
+	for _, submitted := range input.Body.Tokens {
+		hash := ""
+		if submitted.NewSecret != "" {
+			hash, err = auth.HashSecret(submitted.NewSecret)
+			if err != nil {
+				return nil, huma.Error500InternalServerError("could not secure token secret", err)
+			}
+		} else {
+			for _, existing := range current.Tokens {
+				if existing.Key == submitted.Key && existing.Hash == submitted.Hash {
+					hash = existing.Hash
+					break
+				}
+			}
+			if hash == "" {
+				return nil, huma.Error400BadRequest(
+					fmt.Sprintf("token %q needs a new secret", submitted.Name),
+				)
+			}
+		}
+		document.Tokens = append(document.Tokens, control.Token{
+			Name:         submitted.Name,
+			Key:          submitted.Key,
+			Hash:         hash,
+			Role:         submitted.Role,
+			Repositories: submitted.Repositories,
+			ExpiresAt:    submitted.ExpiresAt,
+			Disabled:     submitted.Disabled,
+		})
 	}
 	if document.Repositories == nil {
 		document.Repositories = map[string]control.RepositoryPolicy{}
@@ -518,9 +574,18 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	owner, err := a.authorize(ctx, input.Authorization, path, control.RoleAdmin)
-	if err != nil {
-		return nil, err
+	owner := ""
+	if strings.Contains(path, "/") {
+		owner, err = a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		identity, authErr := a.authenticateIdentity(ctx, input.AuthInput)
+		if authErr != nil {
+			return nil, authErr
+		}
+		owner = identity.Name
 	}
 	if err = a.Storage.CreateGroup(path, owner, input.Description); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
@@ -539,7 +604,7 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	author, err := a.authorize(ctx, input.Authorization, path, control.RoleAdmin)
+	author, err := a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
 	if err != nil {
 		return nil, err
 	}
@@ -559,7 +624,7 @@ func (a API) deleteGroup(ctx context.Context, input *GroupPathInput) (*emptyOutp
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, input.Authorization, path, control.RoleAdmin); err != nil {
+	if _, err = a.authorize(ctx, input.AuthInput, path, control.RoleAdmin); err != nil {
 		return nil, err
 	}
 	if err = a.Storage.DeleteGroup(path); err != nil {
@@ -573,13 +638,13 @@ func (a API) createRepository(ctx context.Context, input *createRepositoryInput)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	author, err := a.authorize(ctx, input.Authorization, repository.Group(), control.RoleAdmin)
+	principal, err := a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin)
 	if err != nil {
 		return nil, err
 	}
 	if err = a.Storage.CreateRepository(repository, storage.CreateRepositoryOptions{
 		InitializeReadme: input.InitializeReadme,
-		Author:           author,
+		Author:           principal.Name,
 		Description:      input.Description,
 	}); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
@@ -595,7 +660,7 @@ func (a API) renameRepository(ctx context.Context, input *renameRepositoryInput)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, input.Authorization, repository.Group(), control.RoleAdmin); err != nil {
+	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin); err != nil {
 		return nil, err
 	}
 	if err = a.Storage.RenameRepository(repository, strings.TrimSuffix(input.Body.NewName, ".git")); err != nil {
@@ -609,7 +674,7 @@ func (a API) deleteRepository(ctx context.Context, input *RepositoryPathInput) (
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, input.Authorization, repository.Group(), control.RoleAdmin); err != nil {
+	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin); err != nil {
 		return nil, err
 	}
 	if err = a.Storage.DeleteRepository(repository); err != nil {
@@ -618,19 +683,102 @@ func (a API) deleteRepository(ctx context.Context, input *RepositoryPathInput) (
 	return &emptyOutput{}, nil
 }
 
-func (a API) authorize(ctx context.Context, header, group string, need control.Role) (string, error) {
-	user, secret, err := basicCredentials(header)
+func (a API) authorize(ctx context.Context, credentials AuthInput, group string, need control.Role) (string, error) {
+	principal, err := a.authorizePrincipal(ctx, credentials, group, need)
 	if err != nil {
 		return "", err
 	}
-	principal, authErr := a.Resolver.Authenticate(ctx, group, user, secret)
-	if authErr != nil {
-		return "", huma.Error401Unauthorized("invalid credentials")
-	}
-	if !principal.Role.Allows(need) {
-		return "", huma.Error403Forbidden("forbidden")
+	if len(principal.Repositories) > 0 {
+		return "", huma.Error403Forbidden("repository-scoped tokens cannot manage groups")
 	}
 	return principal.Name, nil
+}
+
+func (a API) authorizeRepository(
+	ctx context.Context,
+	credentials AuthInput,
+	repository repopath.Repository,
+	need control.Role,
+) (auth.Principal, error) {
+	principal, err := a.authorizePrincipal(ctx, credentials, repository.Group(), need)
+	if err != nil {
+		return auth.Principal{}, err
+	}
+	if !principal.AllowsRepository(repository.Name) {
+		return auth.Principal{}, huma.Error403Forbidden("token cannot access this repository")
+	}
+	return principal, nil
+}
+
+func (a API) authorizePrincipal(
+	ctx context.Context,
+	credentials AuthInput,
+	group string,
+	need control.Role,
+) (auth.Principal, error) {
+	var principal auth.Principal
+	var authErr error
+	if identity, ok := a.sessionIdentity(credentials); ok {
+		principal, authErr = a.Resolver.AuthorizeIdentity(ctx, group, identity)
+		if authErr != nil {
+			return auth.Principal{}, huma.Error403Forbidden("forbidden")
+		}
+	} else {
+		principal, authErr = a.authenticateBasicGroup(ctx, credentials, group)
+	}
+	if authErr != nil {
+		return auth.Principal{}, huma.Error401Unauthorized("invalid credentials")
+	}
+	if !principal.Role.Allows(need) {
+		return auth.Principal{}, huma.Error403Forbidden("forbidden")
+	}
+	return principal, nil
+}
+
+func (a API) authenticateIdentity(ctx context.Context, credentials AuthInput) (auth.Principal, error) {
+	if identity, ok := a.sessionIdentity(credentials); ok {
+		return identity, nil
+	}
+	user, secret, err := basicCredentials(credentials.Authorization)
+	if err != nil {
+		return auth.Principal{}, err
+	}
+	principal, authErr := a.Resolver.AuthenticateIdentity(ctx, user, secret)
+	if authErr != nil {
+		return auth.Principal{}, huma.Error401Unauthorized("invalid credentials")
+	}
+	return principal, nil
+}
+
+func (a API) authenticateBasicGroup(
+	ctx context.Context,
+	credentials AuthInput,
+	group string,
+) (auth.Principal, error) {
+	user, secret, err := basicCredentials(credentials.Authorization)
+	if err != nil {
+		return auth.Principal{}, err
+	}
+	return a.Resolver.Authenticate(ctx, group, user, secret)
+}
+
+func (a API) sessionIdentity(credentials AuthInput) (auth.Principal, bool) {
+	if a.Sessions == nil {
+		return auth.Principal{}, false
+	}
+	username, err := a.Sessions.Username(credentials.Cookie)
+	if err != nil {
+		return auth.Principal{}, false
+	}
+	return auth.Principal{Name: username}, true
+}
+
+func (a API) credentialUsername(credentials AuthInput) (string, error) {
+	if identity, ok := a.sessionIdentity(credentials); ok {
+		return identity.Name, nil
+	}
+	user, _, err := basicCredentials(credentials.Authorization)
+	return user, err
 }
 
 func basicCredentials(header string) (string, string, error) {
@@ -658,10 +806,7 @@ func parseRepositoryPath(value string) (repopath.Repository, error) {
 func protected(operation huma.Operation) huma.Operation {
 	operation.Security = []map[string][]string{
 		{"basicAuth": []string{}},
+		{"cookieAuth": []string{}},
 	}
-	operation.Middlewares = append(operation.Middlewares, func(ctx huma.Context, next func(huma.Context)) {
-		ctx.SetHeader("WWW-Authenticate", `Basic realm="GitOne"`)
-		next(ctx)
-	})
 	return operation
 }

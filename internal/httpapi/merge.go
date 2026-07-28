@@ -29,7 +29,7 @@ func (a API) compareRepositoryBranches(
 	ctx context.Context,
 	input *compareRepositoryBranchesInput,
 ) (*compareRepositoryBranchesOutput, error) {
-	repository, parsed, err := a.openBrowsableRepository(ctx, input.Authorization, input.Repository)
+	repository, parsed, err := a.openBrowsableRepository(ctx, input.AuthInput, input.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ func (a API) compareRepositoryBranches(
 		return nil, huma.Error500InternalServerError("could not create branch diff", err)
 	}
 
-	_, canMergeErr := a.authorize(ctx, input.Authorization, parsed.Group(), control.RoleWrite)
+	_, canMergeErr := a.authorize(ctx, input.AuthInput, parsed.Group(), control.RoleWrite)
 	output := &compareRepositoryBranchesOutput{}
 	output.Body.Repository = parsed.Full()
 	output.Body.Base = baseName
@@ -94,7 +94,7 @@ func (a API) mergeRepositoryBranches(
 	ctx context.Context,
 	input *mergeRepositoryBranchesInput,
 ) (*mergeRepositoryBranchesOutput, error) {
-	repository, parsed, err := a.openRepository(ctx, input.Authorization, input.Repository, control.RoleWrite)
+	repository, parsed, err := a.openRepository(ctx, input.AuthInput, input.Repository, control.RoleWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -173,9 +173,9 @@ func (a API) mergeRepositoryBranches(
 		return nil, huma.Error409Conflict("branches have merge conflicts: " + strings.Join(conflicts, ", "))
 	}
 
-	author, _, err := basicCredentials(input.Authorization)
+	author, err := a.credentialUsername(input.AuthInput)
 	if err != nil {
-		return nil, huma.Error401Unauthorized("valid HTTP Basic credentials are required")
+		return nil, huma.Error401Unauthorized("valid credentials are required")
 	}
 	message := strings.TrimSpace(input.Body.Message)
 	if message == "" {

@@ -1,13 +1,20 @@
 package githttp
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"sync"
 
+	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	"github.com/go-git/go-billy/v5/osfs"
+	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/packfile"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
@@ -17,11 +24,15 @@ import (
 
 const noThinCapability capability.Capability = "no-thin"
 
+var fallbackReceiveMu sync.Mutex
+
 type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 
 type Handler struct {
-	Storage   storage.Store
-	Authorize Authorizer
+	Storage        storage.Store
+	Authorize      Authorizer
+	ReceiveMu      *sync.Mutex
+	ControlUpdated func(string)
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -148,37 +159,97 @@ func (h Handler) uploadPack(w http.ResponseWriter, r *http.Request, repo repopat
 }
 
 func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
-	t, ep, err := h.transport(repo)
+	path, err := h.Storage.GitPath(repo)
 	if err != nil {
 		http.Error(w, "not found", 404)
 		return
 	}
-	s, err := t.NewReceivePackSession(ep, nil)
+	repository, err := git.PlainOpen(path)
 	if err != nil {
-		http.Error(w, err.Error(), 404)
+		http.Error(w, "not found", 404)
 		return
 	}
-	defer s.Close()
 	req := packp.NewReferenceUpdateRequest()
 	if err = req.Decode(r.Body); err != nil {
 		http.Error(w, "bad receive-pack request", 400)
 		return
 	}
+	defer req.Packfile.Close()
+	if err = validateReceiveCapabilities(req.Capabilities); err != nil {
+		h.writeReceiveError(w, req, "ok", err)
+		return
+	}
+
 	if repo.Name == "control" {
 		if err := validateControlRefs(req); err != nil {
-			http.Error(w, err.Error(), 403)
+			h.writeReceiveError(w, req, "ok", err)
 			return
 		}
 	}
-	status, err := s.ReceivePack(r.Context(), req)
-	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
-	w.Header().Set("Cache-Control", "no-cache")
-	if status != nil {
-		_ = status.Encode(w)
+
+	mu := h.ReceiveMu
+	if mu == nil {
+		mu = &fallbackReceiveMu
 	}
-	if err != nil {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if err = validateReferenceCommands(repository, req); err != nil {
+		h.writeReceiveError(w, req, "ok", err)
 		return
 	}
+	reader := bufio.NewReader(req.Packfile)
+	if _, peekErr := reader.Peek(1); peekErr == nil {
+		if err = packfile.UpdateObjectStorage(repository.Storer, reader); err != nil {
+			h.writeReceiveError(w, req, err.Error(), err)
+			return
+		}
+	} else if !errors.Is(peekErr, io.EOF) {
+		h.writeReceiveError(w, req, peekErr.Error(), peekErr)
+		return
+	}
+
+	if repo.Name == "control" {
+		if err = validateControlUpdate(repository, repo.Group(), req.Commands[0]); err != nil {
+			h.writeReceiveError(w, req, "ok", err)
+			return
+		}
+	}
+
+	status := packp.NewReportStatus()
+	status.UnpackStatus = "ok"
+	allApplied := true
+	for _, command := range req.Commands {
+		err = applyReferenceCommand(repository, command)
+		commandStatus := &packp.CommandStatus{
+			ReferenceName: command.Name,
+			Status:        "ok",
+		}
+		if err != nil {
+			commandStatus.Status = err.Error()
+			allApplied = false
+		}
+		status.CommandStatuses = append(status.CommandStatuses, commandStatus)
+	}
+	h.writeReceiveStatus(w, req, status)
+	if allApplied && repo.Name == "control" && h.ControlUpdated != nil {
+		h.ControlUpdated(repo.Group())
+	}
+}
+
+func validateReceiveCapabilities(capabilities *capability.List) error {
+	for _, requested := range capabilities.All() {
+		switch requested {
+		case capability.Agent,
+			capability.OFSDelta,
+			capability.DeleteRefs,
+			capability.ReportStatus,
+			noThinCapability:
+		default:
+			return fmt.Errorf("unsupported receive capability %q", requested)
+		}
+	}
+	return nil
 }
 
 func validateControlRefs(req *packp.ReferenceUpdateRequest) error {
@@ -193,7 +264,120 @@ func validateControlRefs(req *packp.ReferenceUpdateRequest) error {
 		return fmt.Errorf("main cannot be deleted")
 	}
 	if c.Old == plumbing.ZeroHash {
-		return fmt.Errorf("main can only be created during bootstrap")
+		return fmt.Errorf("main can only be created during repository initialization")
 	}
 	return nil
+}
+
+func validateReferenceCommands(repository *git.Repository, req *packp.ReferenceUpdateRequest) error {
+	for _, command := range req.Commands {
+		current, err := repository.Reference(command.Name, false)
+		switch command.Action() {
+		case packp.Create:
+			if err == nil {
+				return fmt.Errorf("%s already exists", command.Name)
+			}
+			if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+				return fmt.Errorf("read %s: %w", command.Name, err)
+			}
+		case packp.Update, packp.Delete:
+			if err != nil {
+				return fmt.Errorf("%s does not exist", command.Name)
+			}
+			if current.Hash() != command.Old {
+				return fmt.Errorf(
+					"stale reference %s: expected %s, found %s",
+					command.Name,
+					command.Old,
+					current.Hash(),
+				)
+			}
+		default:
+			return fmt.Errorf("invalid update for %s", command.Name)
+		}
+	}
+	return nil
+}
+
+func validateControlUpdate(repository *git.Repository, group string, command *packp.Command) error {
+	oldCommit, err := repository.CommitObject(command.Old)
+	if err != nil {
+		return fmt.Errorf("load current control commit: %w", err)
+	}
+	newCommit, err := repository.CommitObject(command.New)
+	if err != nil {
+		return fmt.Errorf("new control revision must be a commit: %w", err)
+	}
+	fastForward, err := oldCommit.IsAncestor(newCommit)
+	if err != nil {
+		return fmt.Errorf("check control history: %w", err)
+	}
+	if !fastForward {
+		return errors.New("control updates must be fast-forward")
+	}
+	if _, err = control.ReadDocument(repository, command.New, group); err != nil {
+		return fmt.Errorf("invalid control.json: %w", err)
+	}
+	return nil
+}
+
+func applyReferenceCommand(repository *git.Repository, command *packp.Command) error {
+	switch command.Action() {
+	case packp.Create:
+		if _, err := repository.Reference(command.Name, false); err == nil {
+			return fmt.Errorf("%s already exists", command.Name)
+		} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+			return err
+		}
+		return repository.Storer.SetReference(plumbing.NewHashReference(command.Name, command.New))
+	case packp.Update:
+		return repository.Storer.CheckAndSetReference(
+			plumbing.NewHashReference(command.Name, command.New),
+			plumbing.NewHashReference(command.Name, command.Old),
+		)
+	case packp.Delete:
+		current, err := repository.Reference(command.Name, false)
+		if err != nil {
+			return err
+		}
+		if current.Hash() != command.Old {
+			return fmt.Errorf("stale reference %s", command.Name)
+		}
+		return repository.Storer.RemoveReference(command.Name)
+	default:
+		return fmt.Errorf("invalid update for %s", command.Name)
+	}
+}
+
+func (h Handler) writeReceiveError(
+	w http.ResponseWriter,
+	req *packp.ReferenceUpdateRequest,
+	unpack string,
+	err error,
+) {
+	if !req.Capabilities.Supports(capability.ReportStatus) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	status := packp.NewReportStatus()
+	status.UnpackStatus = unpack
+	for _, command := range req.Commands {
+		status.CommandStatuses = append(status.CommandStatuses, &packp.CommandStatus{
+			ReferenceName: command.Name,
+			Status:        err.Error(),
+		})
+	}
+	h.writeReceiveStatus(w, req, status)
+}
+
+func (h Handler) writeReceiveStatus(
+	w http.ResponseWriter,
+	req *packp.ReferenceUpdateRequest,
+	status *packp.ReportStatus,
+) {
+	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+	w.Header().Set("Cache-Control", "no-cache")
+	if req.Capabilities.Supports(capability.ReportStatus) {
+		_ = status.Encode(w)
+	}
 }

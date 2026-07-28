@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	"io"
@@ -14,12 +15,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+const maximumUploadBytes int64 = 100 << 30
 
 type Handler struct {
 	Storage   storage.Store
 	PublicURL string
 	Authorize func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
+	Policy    func(*http.Request, repopath.Repository) (control.RepositoryPolicy, error)
+	UploadMu  *sync.Mutex
 }
 type batchRequest struct {
 	Operation string   `json:"operation"`
@@ -54,16 +60,23 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case suffix == "/info/lfs/objects/batch":
 		h.batch(w, r, repo)
-	case strings.HasPrefix(suffix, "/info/lfs/objects/"):
-		if !h.authorize(w, r, repo, r.Method == http.MethodPut) {
-			return
-		}
-		h.object(w, r, repo, strings.TrimPrefix(suffix, "/info/lfs/objects/"))
 	case suffix == "/info/lfs/objects/verify":
 		if !h.authorize(w, r, repo, true) {
 			return
 		}
+		if _, ok := h.policy(w, r, repo); !ok {
+			return
+		}
 		w.WriteHeader(200)
+	case strings.HasPrefix(suffix, "/info/lfs/objects/"):
+		if !h.authorize(w, r, repo, r.Method == http.MethodPut) {
+			return
+		}
+		policy, ok := h.policy(w, r, repo)
+		if !ok {
+			return
+		}
+		h.object(w, r, repo, strings.TrimPrefix(suffix, "/info/lfs/objects/"), policy)
 	default:
 		http.NotFound(w, r)
 	}
@@ -78,7 +91,25 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 	if !h.authorize(w, r, repo, q.Operation == "upload") {
 		return
 	}
+	if q.Operation != "upload" && q.Operation != "download" {
+		http.Error(w, "unsupported LFS operation", http.StatusUnprocessableEntity)
+		return
+	}
+	policy, ok := h.policy(w, r, repo)
+	if !ok {
+		return
+	}
 	resp := batchResponse{Transfer: "basic"}
+	var storageBytes int64
+	if q.Operation == "upload" && policy.LFS.MaximumStorageBytes > 0 {
+		var usageErr error
+		storageBytes, usageErr = h.storageUsage(repo)
+		if usageErr != nil {
+			http.Error(w, "could not inspect LFS storage", http.StatusInternalServerError)
+			return
+		}
+	}
+	pending := map[string]int64{}
 	for _, o := range q.Objects {
 		if !validOID(o.OID) || o.Size < 0 {
 			o.Error = &objError{422, "invalid object"}
@@ -90,7 +121,20 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 		base := strings.TrimRight(h.PublicURL, "/") + "/" + repo.Full() + ".git/info/lfs/objects/" + o.OID
 		o.Actions = map[string]action{}
 		if q.Operation == "upload" && errors.Is(e, os.ErrNotExist) {
-			o.Actions["upload"] = action{Href: base}
+			additionalBytes := o.Size
+			if _, exists := pending[o.OID]; exists {
+				additionalBytes = 0
+			}
+			switch {
+			case policy.LFS.MaximumObjectBytes > 0 && o.Size > policy.LFS.MaximumObjectBytes:
+				o.Error = &objError{422, "object exceeds the repository LFS object limit"}
+			case policy.LFS.MaximumStorageBytes > 0 &&
+				storageBytes+pendingBytes(pending)+additionalBytes > policy.LFS.MaximumStorageBytes:
+				o.Error = &objError{422, "object exceeds the repository LFS storage limit"}
+			default:
+				o.Actions["upload"] = action{Href: base}
+				pending[o.OID] = o.Size
+			}
 		}
 		if q.Operation == "download" {
 			if e == nil {
@@ -106,6 +150,14 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 	}
 	w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func pendingBytes(objects map[string]int64) int64 {
+	var total int64
+	for _, size := range objects {
+		total += size
+	}
+	return total
 }
 
 func (h Handler) authorize(w http.ResponseWriter, r *http.Request, repo repopath.Repository, write bool) bool {
@@ -125,7 +177,33 @@ func (h Handler) authorize(w http.ResponseWriter, r *http.Request, repo repopath
 	return false
 }
 
-func (h Handler) object(w http.ResponseWriter, r *http.Request, repo repopath.Repository, oid string) {
+func (h Handler) policy(
+	w http.ResponseWriter,
+	r *http.Request,
+	repo repopath.Repository,
+) (control.RepositoryPolicy, bool) {
+	if h.Policy == nil {
+		return control.RepositoryPolicy{LFS: control.LFSPolicy{Enabled: true}}, true
+	}
+	policy, err := h.Policy(r, repo)
+	if err != nil {
+		http.Error(w, "could not load repository LFS policy", http.StatusInternalServerError)
+		return control.RepositoryPolicy{}, false
+	}
+	if !policy.LFS.Enabled {
+		http.Error(w, "Git LFS is disabled for this repository", http.StatusForbidden)
+		return control.RepositoryPolicy{}, false
+	}
+	return policy, true
+}
+
+func (h Handler) object(
+	w http.ResponseWriter,
+	r *http.Request,
+	repo repopath.Repository,
+	oid string,
+	policy control.RepositoryPolicy,
+) {
 	if !validOID(oid) {
 		http.Error(w, "invalid oid", 400)
 		return
@@ -137,7 +215,12 @@ func (h Handler) object(w http.ResponseWriter, r *http.Request, repo repopath.Re
 	}
 	switch r.Method {
 	case http.MethodPut:
-		if e = h.upload(r, p, oid); e != nil {
+		if policy.LFS.MaximumObjectBytes > 0 &&
+			r.ContentLength > policy.LFS.MaximumObjectBytes {
+			http.Error(w, "object exceeds the repository LFS object limit", 422)
+			return
+		}
+		if e = h.upload(r, repo, p, oid, policy.LFS); e != nil {
 			http.Error(w, e.Error(), 422)
 			return
 		}
@@ -164,7 +247,24 @@ func (h Handler) object(w http.ResponseWriter, r *http.Request, repo repopath.Re
 		w.WriteHeader(405)
 	}
 }
-func (h Handler) upload(r *http.Request, p, oid string) error {
+
+func (h Handler) upload(
+	r *http.Request,
+	repo repopath.Repository,
+	p string,
+	oid string,
+	policy control.LFSPolicy,
+) error {
+	mu := h.UploadMu
+	if mu == nil {
+		mu = &fallbackUploadMu
+	}
+	mu.Lock()
+	defer mu.Unlock()
+
+	if _, err := os.Stat(p); err == nil {
+		return nil
+	}
 	if e := os.MkdirAll(filepath.Dir(p), 0750); e != nil {
 		return e
 	}
@@ -175,12 +275,19 @@ func (h Handler) upload(r *http.Request, p, oid string) error {
 	name := tmp.Name()
 	defer os.Remove(name)
 	hash := sha256.New()
-	n, e := io.Copy(io.MultiWriter(tmp, hash), io.LimitReader(r.Body, 100<<30))
+	limit := maximumUploadBytes
+	if policy.MaximumObjectBytes > 0 && policy.MaximumObjectBytes < limit {
+		limit = policy.MaximumObjectBytes
+	}
+	n, e := io.Copy(io.MultiWriter(tmp, hash), io.LimitReader(r.Body, limit+1))
 	if e != nil {
 		tmp.Close()
 		return e
 	}
-	_ = n
+	if n > limit {
+		tmp.Close()
+		return errors.New("object exceeds the repository LFS object limit")
+	}
 	if e = tmp.Sync(); e != nil {
 		tmp.Close()
 		return e
@@ -194,7 +301,45 @@ func (h Handler) upload(r *http.Request, p, oid string) error {
 	if _, e = os.Stat(p); e == nil {
 		return nil
 	}
+	if policy.MaximumStorageBytes > 0 {
+		usage, usageErr := h.storageUsage(repo)
+		if usageErr != nil {
+			return usageErr
+		}
+		if usage+n > policy.MaximumStorageBytes {
+			return errors.New("object exceeds the repository LFS storage limit")
+		}
+	}
 	return os.Rename(name, p)
+}
+
+func (h Handler) storageUsage(repo repopath.Repository) (int64, error) {
+	root, err := h.Storage.LFSPath(repo)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	err = filepath.WalkDir(filepath.Join(root, "objects"), func(path string, entry os.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !validOID(entry.Name()) {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		total += info.Size()
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	return total, err
 }
 func (h Handler) objectPath(repo repopath.Repository, oid string) (string, error) {
 	return objectPath(h.Storage, repo, oid)
@@ -227,3 +372,5 @@ func validOID(s string) bool {
 }
 
 var _ = fmt.Sprintf
+
+var fallbackUploadMu sync.Mutex

@@ -15,7 +15,7 @@ func (a API) readRepositoryCommitDiff(
 ) (*repositoryCommitDiffOutput, error) {
 	repository, parsed, err := a.openRepository(
 		ctx,
-		input.Authorization,
+		input.AuthInput,
 		input.Repository,
 		control.RoleRead,
 	)

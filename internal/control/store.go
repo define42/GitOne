@@ -40,32 +40,47 @@ func (s *Store) Load(ctx context.Context, group string) (Document, error) {
 	if ok && c.hash == ref.Hash() {
 		return c.doc, nil
 	}
-	commit, e := r.CommitObject(ref.Hash())
+	d, e := ReadDocument(r, ref.Hash(), group)
 	if e != nil {
 		return Document{}, e
-	}
-	f, e := commit.File("control.json")
-	if e != nil {
-		return Document{}, e
-	}
-	rd, e := f.Reader()
-	if e != nil {
-		return Document{}, e
-	}
-	defer rd.Close()
-	dec := json.NewDecoder(io.LimitReader(rd, 1<<20))
-	dec.DisallowUnknownFields()
-	var d Document
-	if e = dec.Decode(&d); e != nil {
-		return d, e
-	}
-	if e = Validate(group, d); e != nil {
-		return d, e
 	}
 	s.mu.Lock()
 	s.cache[group] = cached{ref.Hash(), d}
 	s.mu.Unlock()
 	return d, nil
+}
+
+func ReadDocument(repository *git.Repository, hash plumbing.Hash, group string) (Document, error) {
+	commit, err := repository.CommitObject(hash)
+	if err != nil {
+		return Document{}, err
+	}
+	file, err := commit.File("control.json")
+	if err != nil {
+		return Document{}, err
+	}
+	reader, err := file.Reader()
+	if err != nil {
+		return Document{}, err
+	}
+	defer reader.Close()
+	decoder := json.NewDecoder(io.LimitReader(reader, 1<<20))
+	decoder.DisallowUnknownFields()
+	var document Document
+	if err = decoder.Decode(&document); err != nil {
+		return document, err
+	}
+	var trailing any
+	if err = decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("control.json must contain one JSON document")
+		}
+		return document, err
+	}
+	if err = Validate(group, document); err != nil {
+		return document, err
+	}
+	return document, nil
 }
 func Validate(group string, d Document) error {
 	if d.Version != 1 {
