@@ -42,6 +42,10 @@ type Store struct {
 
 const maximumLogBytes = 1 << 20
 
+func NewStore(storageRoot string) Store {
+	return Store{Root: storageRoot}
+}
+
 func (s Store) List(repository repopath.Repository) ([]Job, error) {
 	directory, err := s.repositoryDirectory(repository)
 	if err != nil {
@@ -59,7 +63,7 @@ func (s Store) List(repository repopath.Repository) ([]Job, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		job, readErr := s.Get(repository, strings.TrimSuffix(entry.Name(), ".json"))
+		job, readErr := readJob(directory, strings.TrimSuffix(entry.Name(), ".json"))
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -72,7 +76,15 @@ func (s Store) List(repository repopath.Repository) ([]Job, error) {
 }
 
 func (s Store) Get(repository repopath.Repository, id string) (Job, error) {
-	path, err := s.jobPath(repository, id, ".json")
+	directory, err := s.repositoryDirectory(repository)
+	if err != nil {
+		return Job{}, err
+	}
+	return readJob(directory, id)
+}
+
+func readJob(directory, id string) (Job, error) {
+	path, err := buildPath(directory, id, ".json")
 	if err != nil {
 		return Job{}, err
 	}
@@ -88,7 +100,11 @@ func (s Store) Get(repository repopath.Repository, id string) (Job, error) {
 }
 
 func (s Store) Log(repository repopath.Repository, id string) (string, error) {
-	path, err := s.jobPath(repository, id, ".log")
+	directory, err := s.repositoryDirectory(repository)
+	if err != nil {
+		return "", err
+	}
+	path, err := buildPath(directory, id, ".log")
 	if err != nil {
 		return "", err
 	}
@@ -99,6 +115,10 @@ func (s Store) Log(repository repopath.Repository, id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return readLog(file)
+}
+
+func readLog(file *os.File) (string, error) {
 	defer func() {
 		_ = file.Close()
 	}()
@@ -157,21 +177,25 @@ func (s Store) createLog(repository repopath.Repository, id string) (*os.File, e
 }
 
 func (s Store) workRoot() (string, error) {
-	return repopath.SafeJoin(s.Root, ".work")
+	return repopath.SafeJoin(s.Root, ".gitone", "work")
 }
 
 func (s Store) repositoryDirectory(repository repopath.Repository) (string, error) {
-	parts := append(append([]string(nil), repository.Groups...), repository.Name)
+	parts := append(append([]string(nil), repository.Groups...), repository.Name+".build")
 	return repopath.SafeJoin(s.Root, parts...)
 }
 
 func (s Store) jobPath(repository repopath.Repository, id, suffix string) (string, error) {
-	if !validJobID(id) {
-		return "", errors.New("invalid build ID")
-	}
 	directory, err := s.repositoryDirectory(repository)
 	if err != nil {
 		return "", err
+	}
+	return buildPath(directory, id, suffix)
+}
+
+func buildPath(directory, id, suffix string) (string, error) {
+	if !validJobID(id) {
+		return "", errors.New("invalid build ID")
 	}
 	return repopath.SafeJoin(directory, id+suffix)
 }

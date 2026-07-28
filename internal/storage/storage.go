@@ -40,6 +40,10 @@ func (s Store) LFSPath(r repopath.Repository) (string, error) {
 	return repopath.SafeJoin(s.Root, append(r.Groups, r.Name+".lfs")...)
 }
 
+func (s Store) BuildPath(r repopath.Repository) (string, error) {
+	return repopath.SafeJoin(s.Root, append(r.Groups, r.Name+".build")...)
+}
+
 func (s Store) GroupPath(group string) (string, error) {
 	parts, e := repopath.ParseGroup(group)
 	if e != nil {
@@ -90,7 +94,8 @@ func (s Store) ListGroups() ([]GroupInfo, error) {
 		for _, entry := range entries {
 			if !entry.IsDir() ||
 				strings.HasSuffix(entry.Name(), ".git") ||
-				strings.HasSuffix(entry.Name(), ".lfs") {
+				strings.HasSuffix(entry.Name(), ".lfs") ||
+				strings.HasSuffix(entry.Name(), ".build") {
 				continue
 			}
 			nextParts := append(append([]string(nil), parts...), entry.Name())
@@ -454,6 +459,10 @@ func (s Store) DeleteRepository(r repopath.Repository) error {
 	if err != nil {
 		return err
 	}
+	buildp, err := s.BuildPath(r)
+	if err != nil {
+		return err
+	}
 	trash, err := repopath.SafeJoin(s.Root, ".trash", time.Now().UTC().Format("20060102T150405.000000000"), r.Group())
 	if err != nil {
 		return err
@@ -466,6 +475,9 @@ func (s Store) DeleteRepository(r repopath.Repository) error {
 	}
 	if _, statErr := os.Stat(lfsp); statErr == nil {
 		_ = os.Rename(lfsp, filepath.Join(trash, r.Name+".lfs"))
+	}
+	if _, statErr := os.Stat(buildp); statErr == nil {
+		_ = os.Rename(buildp, filepath.Join(trash, r.Name+".build"))
 	}
 	return nil
 }
@@ -482,6 +494,10 @@ func (s Store) RenameRepository(r repopath.Repository, newName string) error {
 	if err != nil {
 		return err
 	}
+	buildp, err := s.BuildPath(r)
+	if err != nil {
+		return err
+	}
 	dstGit, err := repopath.SafeJoin(s.Root, append(r.Groups, newName+".git")...)
 	if err != nil {
 		return err
@@ -490,11 +506,26 @@ func (s Store) RenameRepository(r repopath.Repository, newName string) error {
 	if err != nil {
 		return err
 	}
+	dstBuild, err := repopath.SafeJoin(s.Root, append(r.Groups, newName+".build")...)
+	if err != nil {
+		return err
+	}
 	if err = os.Rename(gitp, dstGit); err != nil {
 		return err
 	}
+	lfsMoved := false
 	if _, statErr := os.Stat(lfsp); statErr == nil {
 		if err = os.Rename(lfsp, dstLFS); err != nil {
+			_ = os.Rename(dstGit, gitp)
+			return err
+		}
+		lfsMoved = true
+	}
+	if _, statErr := os.Stat(buildp); statErr == nil {
+		if err = os.Rename(buildp, dstBuild); err != nil {
+			if lfsMoved {
+				_ = os.Rename(dstLFS, lfsp)
+			}
 			_ = os.Rename(dstGit, gitp)
 			return err
 		}

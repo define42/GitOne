@@ -73,7 +73,7 @@ func New(c Config) http.Handler {
 		return true, pr.Role.Allows(need) && pr.AllowsRepository(repo.Name)
 	}
 	mux := http.NewServeMux()
-	buildStore := runner.Store{Root: runner.DefaultStateRoot(c.Root)}
+	buildStore := runner.NewStore(c.Root)
 	if c.Runner != nil {
 		buildStore = c.Runner.Store()
 	}

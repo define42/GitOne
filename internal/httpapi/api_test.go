@@ -20,7 +20,7 @@ import (
 
 func TestRepositoryBuildEndpoints(t *testing.T) {
 	service, credentials, commit := repositoryAPIFixture(t)
-	buildStore := runner.Store{Root: filepath.Join(t.TempDir(), "builds")}
+	buildStore := runner.NewStore(service.Storage.Root)
 	service.Builds = &buildStore
 	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
 	build := runner.Job{
@@ -32,7 +32,7 @@ func TestRepositoryBuildEndpoints(t *testing.T) {
 		Status:     runner.StatusSucceeded,
 		CreatedAt:  time.Now().UTC(),
 	}
-	directory := filepath.Join(buildStore.Root, "engineering", "api")
+	directory := filepath.Join(buildStore.Root, "engineering", "api.build")
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		t.Fatal(err)
 	}

@@ -320,6 +320,9 @@ func TestListGroupsAndRepositories(t *testing.T) {
 	if err := s.CreateRepository(repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "api"}, CreateRepositoryOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(s.Root, "engineering", "backend", "api.build"), 0o750); err != nil {
+		t.Fatal(err)
+	}
 
 	groups, err := s.ListGroups()
 	if err != nil {
@@ -363,6 +366,16 @@ func TestRepositoryAndGroupDeletionPreservesDataInTrash(t *testing.T) {
 	if err = os.WriteFile(payloadPath, payload, 0o640); err != nil {
 		t.Fatal(err)
 	}
+	buildPath, err := store.BuildPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(buildPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(buildPath, "build-1.log"), []byte("build output"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 
 	if err = store.RenameRepository(repositoryPath, "service"); err != nil {
 		t.Fatal(err)
@@ -383,17 +396,25 @@ func TestRepositoryAndGroupDeletionPreservesDataInTrash(t *testing.T) {
 		string(contents) != string(payload) {
 		t.Fatalf("renamed LFS payload = %q, %v", contents, readErr)
 	}
+	renamedBuildPath, err := store.BuildPath(renamedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contents, readErr := os.ReadFile(filepath.Join(renamedBuildPath, "build-1.log")); readErr != nil ||
+		string(contents) != "build output" {
+		t.Fatalf("renamed build log = %q, %v", contents, readErr)
+	}
 
 	if err = store.DeleteRepository(renamedPath); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{renamedGitPath, renamedLFSPath} {
+	for _, path := range []string{renamedGitPath, renamedLFSPath, renamedBuildPath} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Fatalf("deleted repository path still exists: %s: %v", path, statErr)
 		}
 	}
 
-	var foundGit, foundPayload bool
+	var foundGit, foundPayload, foundBuildLog bool
 	err = filepath.Walk(filepath.Join(root, ".trash"), func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -413,14 +434,28 @@ func TestRepositoryAndGroupDeletionPreservesDataInTrash(t *testing.T) {
 				t.Fatalf("trashed LFS payload = %q, want %q", contents, payload)
 			}
 			foundPayload = true
+		case "build-1.log":
+			contents, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			if string(contents) != "build output" {
+				t.Fatalf("trashed build log = %q", contents)
+			}
+			foundBuildLog = true
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !foundGit || !foundPayload {
-		t.Fatalf("trash is missing Git or LFS data: git=%v lfs=%v", foundGit, foundPayload)
+	if !foundGit || !foundPayload || !foundBuildLog {
+		t.Fatalf(
+			"trash is missing repository data: git=%v lfs=%v build=%v",
+			foundGit,
+			foundPayload,
+			foundBuildLog,
+		)
 	}
 
 	if err = store.DeleteGroup("engineering"); err != nil {

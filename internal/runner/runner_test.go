@@ -67,7 +67,7 @@ func TestRunnerSchedulesExactCommitAndPersistsResult(t *testing.T) {
 	executor := &recordingExecutor{}
 	buildRunner, err := New(Config{
 		Storage:  store,
-		State:    Store{Root: DefaultStateRoot(root)},
+		State:    NewStore(root),
 		Executor: executor,
 		Workers:  1,
 	})
@@ -118,7 +118,7 @@ func TestRunnerSkipsUnconfiguredAndFilteredBranches(t *testing.T) {
 	head, _ := repository.Head()
 	executor := &recordingExecutor{}
 	buildRunner, err := New(Config{
-		Storage: store, State: Store{Root: DefaultStateRoot(root)}, Executor: executor,
+		Storage: store, State: NewStore(root), Executor: executor,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestRunnerRecordsInvalidBuildConfiguration(t *testing.T) {
 	})
 	buildRunner, err := New(Config{
 		Storage:  store,
-		State:    Store{Root: DefaultStateRoot(root)},
+		State:    NewStore(root),
 		Executor: &recordingExecutor{},
 	})
 	if err != nil {
@@ -169,6 +169,51 @@ func TestRunnerRecordsInvalidBuildConfiguration(t *testing.T) {
 	}
 	if job == nil || job.Status != StatusFailed || !strings.Contains(job.Error, "script") {
 		t.Fatalf("unexpected invalid-configuration job: %#v", job)
+	}
+}
+
+func TestBuildStoreUsesRepositoryLocalDirectory(t *testing.T) {
+	root := t.TempDir()
+	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := os.MkdirAll(filepath.Join(root, "engineering", "api.git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(root)
+	job := Job{
+		ID:         "build-local",
+		Repository: repository.Full(),
+		Branch:     "main",
+		Commit:     strings.Repeat("1", 40),
+		Status:     StatusSucceeded,
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := store.save(repository, job); err != nil {
+		t.Fatal(err)
+	}
+	logFile, err := store.createLog(repository, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = logFile.WriteString("tests passed\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err = logFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	buildDirectory := filepath.Join(root, "engineering", "api.build")
+	for _, name := range []string{job.ID + ".json", job.ID + ".log"} {
+		if _, err = os.Stat(filepath.Join(buildDirectory, name)); err != nil {
+			t.Fatalf("repository-local build artifact %s: %v", name, err)
+		}
+	}
+	loaded, err := store.Get(repository, job.ID)
+	if err != nil || loaded.ID != job.ID {
+		t.Fatalf("repository-local build = %#v, %v", loaded, err)
+	}
+	log, err := store.Log(repository, job.ID)
+	if err != nil || log != "tests passed\n" {
+		t.Fatalf("repository-local log = %q, %v", log, err)
 	}
 }
 

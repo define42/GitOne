@@ -91,7 +91,7 @@ docker run --rm -p 8080:8080 \
   gitone -root /srv/gitone -listen :8080 -runner
 ```
 
-The Docker socket is a privileged host capability; expose it only to a trusted GitOne deployment. Build containers do not receive that socket. Build state and logs are retained under `<root>/.gitone/builds`; stored logs are capped at 10 MiB and API log responses at 1 MiB.
+The Docker socket is a privileged host capability; expose it only to a trusted GitOne deployment. Build containers do not receive that socket. Build state and logs are retained beside each bare repository under `<root>/<group>/<repository>.build`; stored logs are capped at 10 MiB and API log responses at 1 MiB.
 
 ## Endpoint reference
 

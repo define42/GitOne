@@ -66,10 +66,8 @@ func newServer(args []string) (*http.Server, bool, error) {
 	var buildRunner *runner.Runner
 	if *runnerEnabled {
 		buildRunner, err = runner.New(runner.Config{
-			Storage: storage.Store{Root: *root},
-			State: runner.Store{
-				Root: runner.DefaultStateRoot(*root),
-			},
+			Storage:  storage.Store{Root: *root},
+			State:    runner.NewStore(*root),
 			Executor: runner.ContainerExecutor{Command: *runnerCommand},
 			Workers:  *runnerWorkers,
 		})

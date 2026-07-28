@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -299,10 +298,6 @@ func newJobID() string {
 		return time.Now().UTC().Format("20060102T150405000000000")
 	}
 	return time.Now().UTC().Format("20060102T150405000000000") + "-" + hex.EncodeToString(random)
-}
-
-func DefaultStateRoot(storageRoot string) string {
-	return filepath.Join(storageRoot, ".gitone", "builds")
 }
 
 type cappedLogWriter struct {
