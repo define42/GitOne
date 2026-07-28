@@ -9,7 +9,7 @@ require (
 	github.com/go-git/go-git/v5 v5.16.2
 	github.com/go-ldap/ldap/v3 v3.4.13
 	github.com/gorilla/securecookie v1.1.2
-	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3
+	github.com/sergi/go-diff v1.4.0
 	github.com/testcontainers/testcontainers-go v0.43.0
 	golang.org/x/crypto v0.53.0
 )
