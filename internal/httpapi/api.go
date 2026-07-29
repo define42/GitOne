@@ -41,9 +41,10 @@ type healthOutput struct {
 }
 
 type groupSummary struct {
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	Description string `json:"description"`
+	Name        string       `json:"name"`
+	Path        string       `json:"path"`
+	Description string       `json:"description"`
+	Role        control.Role `json:"role"`
 }
 
 type listGroupsInput struct {
@@ -329,6 +330,7 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 			Name:        group.Path,
 			Path:        group.Path,
 			Description: description,
+			Role:        principal.Role,
 		})
 	}
 	if !authenticated {
@@ -374,7 +376,13 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		if strings.Contains(name, "/") {
 			continue
 		}
-		if _, authErr := a.authorize(ctx, input.AuthInput, group.Path, control.RoleRead); authErr != nil {
+		subgroupPrincipal, authErr := a.authorizePrincipal(
+			ctx,
+			input.AuthInput,
+			group.Path,
+			control.RoleRead,
+		)
+		if authErr != nil || len(subgroupPrincipal.Repositories) > 0 {
 			continue
 		}
 		description := ""
@@ -385,6 +393,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 			Name:        name,
 			Path:        group.Path,
 			Description: description,
+			Role:        subgroupPrincipal.Role,
 		})
 	}
 	if current == nil {

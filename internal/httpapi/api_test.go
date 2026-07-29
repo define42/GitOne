@@ -100,6 +100,63 @@ func TestRepositoryBuildEndpoints(t *testing.T) {
 	}
 }
 
+func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
+	service, _, _ := repositoryAPIFixture(t)
+	ctx := context.Background()
+	if err := service.Storage.CreateGroup(
+		"engineering/platform",
+		"alice",
+		"Platform services",
+	); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Description = "Engineering services"
+	document.Members["bob"] = control.RoleWrite
+	if err = service.Storage.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	service.Resolver.Controls.Invalidate("engineering")
+	service.Resolver.Directory = testIdentityProvider{
+		"alice": "secret",
+		"bob":   "bob-secret",
+	}
+	request, err := http.NewRequest(http.MethodGet, "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SetBasicAuth("bob", "bob-secret")
+	credentials := AuthInput{Authorization: request.Header.Get("Authorization")}
+
+	groups, err := service.listGroups(ctx, &listGroupsInput{AuthInput: credentials})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups.Body.Groups) != 1 ||
+		groups.Body.Groups[0].Path != "engineering" ||
+		groups.Body.Groups[0].Description != "Engineering services" ||
+		groups.Body.Groups[0].Role != control.RoleWrite {
+		t.Fatalf("unexpected group summaries: %#v", groups.Body.Groups)
+	}
+
+	group, err := service.getGroup(ctx, &GroupPathInput{
+		AuthInput: credentials,
+		Path:      "engineering",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(group.Body.Subgroups) != 1 ||
+		group.Body.Subgroups[0].Path != "engineering/platform" ||
+		group.Body.Subgroups[0].Description != "Platform services" ||
+		group.Body.Subgroups[0].Role != control.RoleWrite {
+		t.Fatalf("unexpected subgroup summaries: %#v", group.Body.Subgroups)
+	}
+}
+
 func TestRenameGroupControlsRejectsMissingAndExistingDestination(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}

@@ -568,10 +568,17 @@ function groupList(groups, emptyMessage = "No groups yet.") {
         iconContainer.append(icon("folder"));
         const content = element("span");
         content.className = "resource-content";
+        const title = element("span");
+        title.className = "resource-title";
         const name = element("strong", group.name);
+        const roleName = group.role[0].toUpperCase() + group.role.slice(1);
+        const role = element("span", `${roleName} access`);
+        role.className = "group-role-badge";
+        role.title = `Your permission for this group: ${roleName}`;
+        title.append(name, role);
         const description = element("span", group.description || "No description");
         description.className = "resource-description";
-        content.append(name, description);
+        content.append(title, description);
         const arrow = icon("chevron-right");
         arrow.classList.add("resource-arrow");
         link.append(iconContainer, content, arrow);
