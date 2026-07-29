@@ -689,9 +689,9 @@ func (a API) approveMergeRequest(
 	if request.MergeInProgress {
 		return nil, huma.Error409Conflict("merge request is currently being merged")
 	}
-	ownerOverride := principal.Name == request.Author &&
-		principal.Role == control.RoleOwner
-	if principal.Name == request.Author && !ownerOverride {
+	selfApproval := principal.Name == request.Author &&
+		principal.Role.Allows(control.RoleMaintainer)
+	if principal.Name == request.Author && !selfApproval {
 		return nil, huma.Error403Forbidden("merge request authors cannot approve their own changes")
 	}
 	_, currentSource, _, err := resolveBranch(repository, request.Source)
@@ -717,10 +717,10 @@ func (a API) approveMergeRequest(
 		for index := range stored.Approvals {
 			if stored.Approvals[index].Author == principal.Name {
 				stored.Approvals[index] = review.Approval{
-					Author:        principal.Name,
-					HeadCommit:    expectedHeadCommit,
-					CreatedAt:     now,
-					OwnerOverride: ownerOverride,
+					Author:       principal.Name,
+					HeadCommit:   expectedHeadCommit,
+					CreatedAt:    now,
+					SelfApproval: selfApproval,
 				}
 				replaced = true
 				break
@@ -728,10 +728,10 @@ func (a API) approveMergeRequest(
 		}
 		if !replaced {
 			stored.Approvals = append(stored.Approvals, review.Approval{
-				Author:        principal.Name,
-				HeadCommit:    expectedHeadCommit,
-				CreatedAt:     now,
-				OwnerOverride: ownerOverride,
+				Author:       principal.Name,
+				HeadCommit:   expectedHeadCommit,
+				CreatedAt:    now,
+				SelfApproval: selfApproval,
 			})
 		}
 		stored.BaseCommit = currentTarget.Hash().String()
@@ -900,7 +900,7 @@ func (a API) mergeStoredRequest(
 			}
 			approvedBy := map[string]struct{}{}
 			for _, approval := range stored.Approvals {
-				if (approval.Author != stored.Author || approval.OwnerOverride) &&
+				if (approval.Author != stored.Author || approval.SelfApproval) &&
 					approval.HeadCommit == expectedHeadCommit {
 					approvedBy[approval.Author] = struct{}{}
 				}
@@ -1317,14 +1317,15 @@ func (a API) buildMergeRequestView(
 		control.RoleRead,
 	)
 	canWrite := principalErr == nil && principal.Role.Allows(control.RoleDeveloper)
-	canApproveOwn := principalErr == nil && principal.Role == control.RoleOwner
+	canApproveOwn := principalErr == nil &&
+		principal.Role.Allows(control.RoleMaintainer)
 	approvals := make([]mergeRequestApprovalView, 0, len(request.Approvals))
 	currentApprovals := 0
 	staleApprovals := 0
 	viewerApproved := false
 	currentAuthors := map[string]struct{}{}
 	for _, approval := range request.Approvals {
-		current := (approval.Author != request.Author || approval.OwnerOverride) &&
+		current := (approval.Author != request.Author || approval.SelfApproval) &&
 			approval.HeadCommit == comparison.HeadCommit
 		approvals = append(approvals, mergeRequestApprovalView{
 			Author:     approval.Author,

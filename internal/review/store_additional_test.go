@@ -85,12 +85,12 @@ func TestValidateRejectsMalformedMergeRequests(t *testing.T) {
 				CreatedAt:  now,
 			}}
 		}},
-		{"invalid owner override", func(request *MergeRequest) {
+		{"invalid self-approval override", func(request *MergeRequest) {
 			request.Approvals = []Approval{{
-				Author:        "bob",
-				HeadCommit:    request.HeadCommit,
-				CreatedAt:     now,
-				OwnerOverride: true,
+				Author:       "bob",
+				HeadCommit:   request.HeadCommit,
+				CreatedAt:    now,
+				SelfApproval: true,
 			}}
 		}},
 		{"duplicate approval", func(request *MergeRequest) {

@@ -53,7 +53,7 @@ The main page lists only top-level groups and their descriptions. Select a group
 
 The repository viewer can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Its Builds tab shows queued, running, successful, and failed jobs, polls active jobs automatically, and exposes expandable live logs. Users with developer access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
-Comparisons can be saved as merge requests with durable Markdown descriptions and threaded, resolvable discussions. Approvals are bound to the exact source commit, so a new push requires a new approval. Authors cannot approve their own changes unless they are the group owner. An approval merges automatically when the request is conflict-free and all discussions are resolved; an explicit retry action is available after clearing a previous blocker.
+Comparisons can be saved as merge requests with durable Markdown descriptions and threaded, resolvable discussions. Approvals are bound to the exact source commit, so a new push requires a new approval. Authors cannot approve their own changes unless they are a group maintainer or owner. An approval merges automatically when the request is conflict-free and all discussions are resolved; an explicit retry action is available after clearing a previous blocker.
 
 Build the UI separately with:
 
@@ -334,7 +334,7 @@ Roles are cumulative: `owner` includes `maintainer`, `maintainer` includes `deve
 | Change repository visibility or LFS policy | — | — | — | ✓ |
 | Create, modify, or delete owner tokens | — | — | — | ✓ |
 | Push directly to the private `control.git` repository | — | — | — | ✓ |
-| Approve one's own merge request | — | — | — | ✓ |
+| Approve one's own merge request | — | — | ✓ | ✓ |
 
 [^cross-parent-move]: A cross-parent move requires maintainer-or-higher access to the source group and to both non-root parent groups.
 

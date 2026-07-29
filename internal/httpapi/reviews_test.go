@@ -1015,45 +1015,74 @@ func TestMergeRequestDiscussionApprovalAndExplicitMergeRetry(t *testing.T) {
 	}
 }
 
-func TestMergeRequestOwnerCanApproveOwnChanges(t *testing.T) {
-	fixture := newMergeRequestAPIFixture(t)
-	created := createTestMergeRequest(t, fixture)
+func TestMergeRequestMaintainerAndOwnerCanApproveOwnChanges(t *testing.T) {
+	for _, role := range []control.Role{
+		control.RoleMaintainer,
+		control.RoleOwner,
+	} {
+		t.Run(string(role), func(t *testing.T) {
+			fixture := newMergeRequestAPIFixture(t)
+			if role == control.RoleMaintainer {
+				document, err := fixture.service.Resolver.Controls.Load(
+					context.Background(),
+					fixture.path.Group(),
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				document.Members["alice"] = control.RoleMaintainer
+				document.Members["carol"] = control.RoleOwner
+				if err = fixture.service.Storage.UpdateGroupControl(
+					fixture.path.Group(),
+					document,
+					"alice",
+				); err != nil {
+					t.Fatal(err)
+				}
+				fixture.service.Resolver.Controls.Invalidate(fixture.path.Group())
+			}
+			created := createTestMergeRequest(t, fixture)
+			if !created.Body.CanApprove {
+				t.Fatalf("%s cannot approve own request: %#v", role, created.Body)
+			}
 
-	merged, err := fixture.service.approveMergeRequest(
-		context.Background(),
-		&approveMergeRequestInput{
-			MergeRequestInput: mergeRequestInput{
-				AuthInput:  fixture.alice,
-				Repository: fixture.path.Full(),
-				ID:         created.Body.ID,
-			},
-			Body: approveMergeRequestBody{ExpectedHeadCommit: fixture.head.String()},
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if merged.Body.State != review.StateMerged ||
-		merged.Body.CurrentApprovals != 1 ||
-		!merged.Body.ViewerApproved ||
-		merged.Body.MergedBy != "alice" {
-		t.Fatalf("owner approval did not merge own request: %#v", merged.Body)
-	}
-	persisted, err := review.NewStore(fixture.service.Storage.Root).Get(
-		fixture.path,
-		created.Body.ID,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(persisted.Approvals) != 1 ||
-		persisted.Approvals[0].Author != "alice" ||
-		!persisted.Approvals[0].OwnerOverride {
-		t.Fatalf("owner override was not persisted: %#v", persisted.Approvals)
+			merged, err := fixture.service.approveMergeRequest(
+				context.Background(),
+				&approveMergeRequestInput{
+					MergeRequestInput: mergeRequestInput{
+						AuthInput:  fixture.alice,
+						Repository: fixture.path.Full(),
+						ID:         created.Body.ID,
+					},
+					Body: approveMergeRequestBody{ExpectedHeadCommit: fixture.head.String()},
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if merged.Body.State != review.StateMerged ||
+				merged.Body.CurrentApprovals != 1 ||
+				!merged.Body.ViewerApproved ||
+				merged.Body.MergedBy != "alice" {
+				t.Fatalf("%s approval did not merge own request: %#v", role, merged.Body)
+			}
+			persisted, err := review.NewStore(fixture.service.Storage.Root).Get(
+				fixture.path,
+				created.Body.ID,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(persisted.Approvals) != 1 ||
+				persisted.Approvals[0].Author != "alice" ||
+				!persisted.Approvals[0].SelfApproval {
+				t.Fatalf("%s self-approval was not persisted: %#v", role, persisted.Approvals)
+			}
+		})
 	}
 }
 
-func TestMergeRequestNonOwnerCannotApproveOwnChanges(t *testing.T) {
+func TestMergeRequestDeveloperCannotApproveOwnChanges(t *testing.T) {
 	fixture := newMergeRequestAPIFixture(t)
 	created, err := fixture.service.createMergeRequest(
 		context.Background(),
@@ -1071,7 +1100,7 @@ func TestMergeRequestNonOwnerCannotApproveOwnChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	if created.Body.Author != "bob" || created.Body.CanApprove {
-		t.Fatalf("non-owner author has unexpected permissions: %#v", created.Body)
+		t.Fatalf("developer author has unexpected permissions: %#v", created.Body)
 	}
 
 	_, err = fixture.service.approveMergeRequest(

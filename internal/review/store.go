@@ -746,11 +746,11 @@ func validate(
 			!validCommitHash(approval.HeadCommit) {
 			return fmt.Errorf("approval %d is malformed", index)
 		}
-		if approval.Author == request.Author && !approval.OwnerOverride {
+		if approval.Author == request.Author && !approval.SelfApproval {
 			return fmt.Errorf("approval %d was made by the merge request author", index)
 		}
-		if approval.OwnerOverride && approval.Author != request.Author {
-			return fmt.Errorf("approval %d has an invalid owner override", index)
+		if approval.SelfApproval && approval.Author != request.Author {
+			return fmt.Errorf("approval %d has an invalid self-approval override", index)
 		}
 		if _, duplicate := approvalAuthors[approval.Author]; duplicate {
 			return fmt.Errorf("duplicate approval by %q", approval.Author)

@@ -44,10 +44,11 @@ type MergeRequest struct {
 }
 
 type Approval struct {
-	Author        string    `json:"author"`
-	HeadCommit    string    `json:"headCommit"`
-	CreatedAt     time.Time `json:"createdAt"`
-	OwnerOverride bool      `json:"ownerOverride,omitempty"`
+	Author     string    `json:"author"`
+	HeadCommit string    `json:"headCommit"`
+	CreatedAt  time.Time `json:"createdAt"`
+	// SelfApproval retains the historical JSON field name for stored review compatibility.
+	SelfApproval bool `json:"ownerOverride,omitempty"`
 }
 
 type Thread struct {
