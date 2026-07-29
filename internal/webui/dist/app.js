@@ -757,6 +757,96 @@ function createForm(heading, labelText, placeholder, submitText, onSubmit, addit
     });
     return { trigger, dialog };
 }
+function repositoryRenameControl(route, groupPath, repositoryName) {
+    const trigger = actionButton("Rename", "pencil", "secondary");
+    const dialog = element("dialog");
+    dialog.className = "action-dialog";
+    const form = element("form");
+    form.className = "dialog-form";
+    const header = element("div");
+    header.className = "dialog-header";
+    const title = element("h2", "Rename repository");
+    const close = actionButton("Close", "close", "icon-button");
+    close.setAttribute("aria-label", "Close");
+    close.title = "Close";
+    header.append(title, close);
+    const description = element("p", "The repository URL will change. Git data, LFS objects, builds, and merge requests move with it.");
+    description.className = "dialog-description";
+    const name = element("input");
+    name.name = "name";
+    name.required = true;
+    name.autocomplete = "off";
+    name.spellcheck = false;
+    const actions = element("div");
+    actions.className = "dialog-actions";
+    const cancel = actionButton("Cancel", undefined, "secondary");
+    const submit = actionButton("Rename repository", "pencil", "primary");
+    submit.type = "submit";
+    actions.append(cancel, submit);
+    form.append(header, description, fieldLabel("New repository name", name), actions);
+    dialog.append(form);
+    trigger.addEventListener("click", () => {
+        name.value = repositoryName;
+        name.setCustomValidity("");
+        dialog.showModal();
+        name.select();
+    });
+    close.addEventListener("click", () => dialog.close());
+    cancel.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) {
+            dialog.close();
+        }
+    });
+    dialog.addEventListener("close", () => {
+        if (trigger.isConnected) {
+            trigger.focus();
+        }
+    });
+    name.addEventListener("input", () => name.setCustomValidity(""));
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const submittedName = name.value.trim();
+        const renamedName = submittedName.endsWith(".git")
+            ? submittedName.slice(0, -4)
+            : submittedName;
+        if (renamedName === repositoryName) {
+            name.setCustomValidity("Enter a different repository name.");
+            name.reportValidity();
+            return;
+        }
+        submit.disabled = true;
+        cancel.disabled = true;
+        close.disabled = true;
+        form.setAttribute("aria-busy", "true");
+        try {
+            await request(`/api/repositories/${encodeURIComponent(route.repository)}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ newName: submittedName }),
+            });
+            window.location.assign(repositoryBrowserURL(`${groupPath}/${renamedName}`, {
+                ref: route.ref,
+                path: route.path,
+                file: route.file ?? undefined,
+                view: route.view,
+                page: route.page,
+                mergeRequest: route.mergeRequest,
+                reviewTab: route.reviewTab,
+                mergeRequestState: route.mergeRequestState,
+            }));
+        }
+        catch (reason) {
+            showStatus(reason instanceof Error ? reason.message : "Could not rename the repository.", true);
+            submit.disabled = false;
+            cancel.disabled = false;
+            close.disabled = false;
+            form.removeAttribute("aria-busy");
+            name.focus();
+        }
+    });
+    return { trigger, dialog };
+}
 function repositoryImportControl(groupPath) {
     const trigger = actionButton("Import bare Git", "download", "primary");
     const dialog = element("dialog");
@@ -3772,13 +3862,16 @@ async function renderRepositoryBrowser(route) {
     }
     const repositoryActions = element("div");
     repositoryActions.className = "repository-actions";
-    repositoryActions.append(archive.trigger, clone.trigger);
+    const rename = group.role === "maintainer" || group.role === "owner"
+        ? repositoryRenameControl(route, groupPath, repositoryName)
+        : null;
+    repositoryActions.append(...(rename ? [rename.trigger] : []), archive.trigger, clone.trigger);
     toolbar.append(branchControl, repositoryActions);
     overview.append(toolbar);
     const fileCreator = content !== null && "entries" in content && content.canEdit
         ? repositoryFileCreator(route, content)
         : null;
-    app.append(overview, repositoryNavigation(route, fileCreator?.trigger), branchCreator.dialog, branchComparison.dialog, archive.dialog, clone.dialog, ...(fileCreator ? [fileCreator.dialog] : []));
+    app.append(overview, repositoryNavigation(route, fileCreator?.trigger), branchCreator.dialog, branchComparison.dialog, archive.dialog, clone.dialog, ...(rename ? [rename.dialog] : []), ...(fileCreator ? [fileCreator.dialog] : []));
     if (route.view === "history") {
         app.append(repositoryHistory(route, commits));
         return;
