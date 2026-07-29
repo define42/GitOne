@@ -228,40 +228,15 @@ func (s Store) importRepository(
 	r repopath.Repository,
 	options ImportRepositoryOptions,
 ) error {
-	gp, err := s.GroupPath(r.Group())
+	destination, err := s.prepareImportDestination(r)
 	if err != nil {
 		return err
-	}
-	if _, err = os.Stat(filepath.Join(gp, "control.git")); err != nil {
-		return errors.New("group does not exist")
-	}
-	gitPath, err := s.GitPath(r)
-	if err != nil {
-		return err
-	}
-	lfsPath, err := s.LFSPath(r)
-	if err != nil {
-		return err
-	}
-	buildPath, err := s.BuildPath(r)
-	if err != nil {
-		return err
-	}
-	reviewPath, err := s.ReviewPath(r)
-	if err != nil {
-		return err
-	}
-	for _, existing := range []string{gitPath, lfsPath, buildPath, reviewPath} {
-		exists, statErr := pathEntryExists(existing)
-		if statErr != nil {
-			return statErr
-		}
-		if exists {
-			return errors.New("repository data already exists")
-		}
 	}
 
-	temporaryPath, err := os.MkdirTemp(gp, ".gitone-import-*.build")
+	temporaryPath, err := os.MkdirTemp(
+		destination.groupPath,
+		".gitone-import-*.build",
+	)
 	if err != nil {
 		return err
 	}
@@ -282,18 +257,11 @@ func (s Store) importRepository(
 	if _, err = git.PlainCloneContext(ctx, temporaryPath, true, cloneOptions); err != nil {
 		return &RemoteImportError{Err: err}
 	}
-	if err = os.Chmod(temporaryPath, 0o750); err != nil {
-		return err
-	}
-	if err = os.Rename(temporaryPath, gitPath); err != nil {
-		return err
-	}
-	if err = os.MkdirAll(filepath.Join(lfsPath, "objects"), 0o750); err != nil {
-		_ = os.RemoveAll(gitPath)
-		_ = os.RemoveAll(lfsPath)
-		return err
-	}
-	return nil
+	return adoptImportedRepository(
+		temporaryPath,
+		destination.gitPath,
+		destination.lfsPath,
+	)
 }
 
 func (s Store) createRepository(r repopath.Repository, options CreateRepositoryOptions) error {

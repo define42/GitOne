@@ -1131,6 +1131,140 @@ func TestImportRepositoryRejectsNonHTTPRemote(t *testing.T) {
 	}
 }
 
+func TestImportBareRepositoryFromArchiveUpload(t *testing.T) {
+	sourceRoot := t.TempDir()
+	sourceStore := storage.Store{Root: sourceRoot}
+	if err := sourceStore.CreateGroup("source", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	source := repopath.Repository{Groups: []string{"source"}, Name: "api"}
+	if err := sourceStore.CreateRepository(source, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+		Description:      "Uploaded API",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(sourceRoot, "source", "api.git")
+	sourceRepository, err := git.PlainOpen(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceHead, err := sourceRepository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := repositoryZIPBytes(t, sourcePath)
+
+	targetRoot := t.TempDir()
+	targetStore := storage.Store{Root: targetRoot}
+	if err = targetStore.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root:      targetRoot,
+		Directory: testLDAPDirectory(),
+	})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fuploaded/import-archive?filename=api.zip",
+		bytes.NewReader(archive),
+	)
+	request.Header.Set("Content-Type", "application/zip")
+	request.SetBasicAuth("alice", "secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("archive import: status %d: %s", response.Code, response.Body.String())
+	}
+
+	importedPath := filepath.Join(targetRoot, "engineering", "uploaded.git")
+	imported, err := git.PlainOpen(importedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importedHead, err := imported.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if importedHead.Hash() != sourceHead.Hash() {
+		t.Fatalf("imported HEAD = %s, want %s", importedHead.Hash(), sourceHead.Hash())
+	}
+	if _, err = imported.Worktree(); !errors.Is(err, git.ErrIsBareRepository) {
+		t.Fatalf("uploaded repository is not bare: %v", err)
+	}
+	description, err := targetStore.RepositoryDescription(repopath.Repository{
+		Groups: []string{"engineering"},
+		Name:   "uploaded",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if description != "Uploaded API" {
+		t.Fatalf("uploaded description = %q", description)
+	}
+	if _, err = os.Stat(filepath.Join(
+		targetRoot,
+		"engineering",
+		"uploaded.lfs",
+		"objects",
+	)); err != nil {
+		t.Fatalf("uploaded repository LFS storage: %v", err)
+	}
+}
+
+func repositoryZIPBytes(t *testing.T, repositoryPath string) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	err := filepath.Walk(
+		repositoryPath,
+		func(current string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			relative, relativeErr := filepath.Rel(repositoryPath, current)
+			if relativeErr != nil {
+				return relativeErr
+			}
+			if relative == "." {
+				return nil
+			}
+			header, headerErr := zip.FileInfoHeader(info)
+			if headerErr != nil {
+				return headerErr
+			}
+			header.Name = filepath.ToSlash(relative)
+			if info.IsDir() {
+				header.Name += "/"
+				_, headerErr = writer.CreateHeader(header)
+				return headerErr
+			}
+			entry, createErr := writer.CreateHeader(header)
+			if createErr != nil {
+				return createErr
+			}
+			source, openErr := os.Open(current)
+			if openErr != nil {
+				return openErr
+			}
+			_, copyErr := io.Copy(entry, source)
+			closeErr := source.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			return closeErr
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
 func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 	handler := New(Config{
 		Root:      t.TempDir(),
@@ -2477,9 +2611,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=10">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=11">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=30">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=31">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -2615,6 +2749,11 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "password: password.value") {
 		t.Fatal("served UI does not provide HTTP/HTTPS bare repository imports")
 	}
+	if !strings.Contains(assetResponse.Body.String(), `"ZIP/TAR upload"`) ||
+		!strings.Contains(assetResponse.Body.String(), `/import-archive?filename=`) ||
+		!strings.Contains(assetResponse.Body.String(), "body: archive") {
+		t.Fatal("served UI does not provide bare repository archive uploads")
+	}
 	if !strings.Contains(assetResponse.Body.String(), "repository.description") {
 		t.Fatal("served UI does not show repository descriptions")
 	}
@@ -2706,6 +2845,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 				`"/api/repositories/{repository}/branches"`,
 				`"/api/groups/{path}/settings"`,
 				`"/api/repositories/{path}/import"`,
+				`"/api/repositories/{path}/import-archive"`,
 				`"/api/repositories/{repository}/branches/{branch}"`,
 				`"/api/repositories/{repository}/compare"`,
 				`"/api/repositories/{repository}/merges"`,

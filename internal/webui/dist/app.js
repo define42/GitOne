@@ -750,8 +750,21 @@ function repositoryImportControl(groupPath) {
     close.setAttribute("aria-label", "Close");
     close.title = "Close";
     header.append(title, close);
-    const description = element("p", "Mirror all Git refs and tags from an HTTP or HTTPS remote. Git LFS objects are not copied.");
+    const description = element("p", "Import all Git refs and tags from a remote or an uploaded archive. Git LFS objects are not copied.");
     description.className = "dialog-description";
+    const methodTabs = element("div");
+    methodTabs.className = "segmented-control repository-import-method";
+    methodTabs.setAttribute("role", "tablist");
+    methodTabs.setAttribute("aria-label", "Import source");
+    const remoteTab = actionButton("HTTP/HTTPS remote");
+    remoteTab.className = "segment active";
+    remoteTab.setAttribute("role", "tab");
+    remoteTab.setAttribute("aria-selected", "true");
+    const archiveTab = actionButton("ZIP/TAR upload");
+    archiveTab.className = "segment";
+    archiveTab.setAttribute("role", "tab");
+    archiveTab.setAttribute("aria-selected", "false");
+    methodTabs.append(remoteTab, archiveTab);
     const remoteURL = element("input");
     remoteURL.name = "remoteURL";
     remoteURL.type = "url";
@@ -759,24 +772,29 @@ function repositoryImportControl(groupPath) {
     remoteURL.autocomplete = "off";
     remoteURL.pattern = "https?://.+";
     remoteURL.placeholder = "https://git.example.com/team/project.git";
+    const remotePanel = element("div");
+    remotePanel.className = "repository-import-panel";
     const name = element("input");
     name.name = "name";
     name.required = true;
     name.autocomplete = "off";
     name.placeholder = "project";
     let suggestedName = "";
-    remoteURL.addEventListener("input", () => {
+    const suggestName = (value) => {
         if (name.value !== "" && name.value !== suggestedName) {
             return;
         }
+        suggestedName = value;
+        name.value = value;
+    };
+    remoteURL.addEventListener("input", () => {
         try {
             const remote = new URL(remoteURL.value);
             const lastPart = remote.pathname.split("/").filter(Boolean).at(-1) ?? "";
-            suggestedName = decodeURIComponent(lastPart).replace(/\.git$/i, "");
-            name.value = suggestedName;
+            suggestName(decodeURIComponent(lastPart).replace(/\.git$/i, ""));
         }
         catch {
-            suggestedName = "";
+            suggestName("");
         }
     });
     const username = element("input");
@@ -791,13 +809,61 @@ function repositoryImportControl(groupPath) {
     const authentication = element("div");
     authentication.className = "repository-import-authentication";
     authentication.append(fieldLabel("Username", username), fieldLabel("Password or token", password));
+    remotePanel.append(fieldLabel("Remote HTTP/HTTPS URL", remoteURL), authentication);
+    const archiveFile = element("input");
+    archiveFile.name = "archive";
+    archiveFile.type = "file";
+    archiveFile.accept = [
+        ".zip",
+        ".tar",
+        ".tar.gz",
+        ".tgz",
+        "application/zip",
+        "application/x-tar",
+        "application/gzip",
+    ].join(",");
+    const archiveHint = element("p", "Upload up to 1 GiB. The bare repository can be at the archive root or inside one enclosing folder. Links and special files are rejected.");
+    archiveHint.className = "dialog-description repository-import-hint";
+    const archivePanel = element("div");
+    archivePanel.className = "repository-import-panel";
+    archivePanel.hidden = true;
+    archivePanel.append(fieldLabel("Bare repository archive", archiveFile), archiveHint);
+    archiveFile.addEventListener("change", () => {
+        const filename = archiveFile.files?.[0]?.name ?? "";
+        suggestName(filename
+            .replace(/\.(?:tar\.gz|tgz|zip|tar)$/i, "")
+            .replace(/\.git$/i, ""));
+    });
+    let method = "remote";
+    const selectMethod = (next, focus = true) => {
+        method = next;
+        const remote = next === "remote";
+        remotePanel.hidden = !remote;
+        archivePanel.hidden = remote;
+        remoteURL.required = remote;
+        archiveFile.required = !remote;
+        remoteTab.classList.toggle("active", remote);
+        archiveTab.classList.toggle("active", !remote);
+        remoteTab.setAttribute("aria-selected", String(remote));
+        archiveTab.setAttribute("aria-selected", String(!remote));
+        if (focus) {
+            if (remote) {
+                remoteURL.focus();
+            }
+            else {
+                archiveFile.focus();
+            }
+        }
+    };
+    remoteTab.addEventListener("click", () => selectMethod("remote"));
+    archiveTab.addEventListener("click", () => selectMethod("archive"));
     const actions = element("div");
     actions.className = "dialog-actions";
     const cancel = actionButton("Cancel", undefined, "secondary");
     const submit = actionButton("Import repository", "download", "primary");
     submit.type = "submit";
     actions.append(cancel, submit);
-    form.append(header, description, fieldLabel("Remote HTTP/HTTPS URL", remoteURL), fieldLabel("Repository name", name), authentication, actions);
+    form.append(header, description, methodTabs, remotePanel, archivePanel, fieldLabel("Repository name", name), actions);
     dialog.append(form);
     trigger.addEventListener("click", () => {
         dialog.showModal();
@@ -815,6 +881,7 @@ function repositoryImportControl(groupPath) {
             trigger.focus();
             form.reset();
             suggestedName = "";
+            selectMethod("remote", false);
         }
     });
     form.addEventListener("submit", async (event) => {
@@ -826,15 +893,33 @@ function repositoryImportControl(groupPath) {
         const repositoryName = name.value.trim();
         try {
             const repositoryPath = encodeURIComponent(`${groupPath}/${repositoryName}`);
-            await request(`/api/repositories/${repositoryPath}/import`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    url: remoteURL.value.trim(),
-                    username: username.value.trim(),
-                    password: password.value,
-                }),
-            });
+            if (method === "remote") {
+                await request(`/api/repositories/${repositoryPath}/import`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        url: remoteURL.value.trim(),
+                        username: username.value.trim(),
+                        password: password.value,
+                    }),
+                });
+            }
+            else {
+                const archive = archiveFile.files?.[0];
+                if (!archive) {
+                    throw new Error("Choose a ZIP or TAR archive to upload.");
+                }
+                if (archive.size > 1024 * 1024 * 1024) {
+                    throw new Error("Archive upload exceeds the 1 GiB limit.");
+                }
+                await request(`/api/repositories/${repositoryPath}/import-archive?filename=${encodeURIComponent(archive.name)}`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": archive.type || "application/octet-stream",
+                    },
+                    body: archive,
+                });
+            }
             password.value = "";
             dialog.close();
             await renderGroup(groupPath, `Repository ${repositoryName} imported.`);

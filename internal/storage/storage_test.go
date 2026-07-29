@@ -1,12 +1,17 @@
 package storage
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -321,6 +326,353 @@ func TestImportRepositoryCleansUpFailedRemote(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".gitone-import-") {
 			t.Fatalf("failed import left temporary data %q", entry.Name())
 		}
+	}
+}
+
+func TestImportRepositoryArchive(t *testing.T) {
+	sourceRoot := t.TempDir()
+	sourceStore := Store{Root: sourceRoot}
+	if err := sourceStore.CreateGroup("source", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	source := repopath.Repository{Groups: []string{"source"}, Name: "api"}
+	if err := sourceStore.CreateRepository(source, CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+		Description:      "Archived API",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(sourceRoot, "source", "api.git")
+	sourceRepository, err := git.PlainOpen(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceHead, err := sourceRepository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Join(sourcePath, "hooks"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Join(sourcePath, "objects", "info"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(
+		filepath.Join(sourcePath, "hooks", "post-receive"),
+		[]byte("#!/bin/sh\nexit 1\n"),
+		0o750,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(
+		filepath.Join(sourcePath, "objects", "info", "alternates"),
+		[]byte("/untrusted/object/store\n"),
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name     string
+		filename string
+		prefix   string
+		write    func(*testing.T, string, string, string)
+	}{
+		{
+			name:     "ZIP repository at archive root",
+			filename: "api.zip",
+			write:    writeRepositoryZIP,
+		},
+		{
+			name:     "compressed TAR with enclosing folder",
+			filename: "api.tar.gz",
+			prefix:   "api.git",
+			write:    writeRepositoryTARGZ,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			archivePath := filepath.Join(t.TempDir(), test.filename)
+			test.write(t, sourcePath, archivePath, test.prefix)
+
+			targetRoot := t.TempDir()
+			targetStore := Store{Root: targetRoot}
+			if createErr := targetStore.CreateGroup("engineering", "alice", ""); createErr != nil {
+				t.Fatal(createErr)
+			}
+			target := repopath.Repository{
+				Groups: []string{"engineering"},
+				Name:   "imported",
+			}
+			if importErr := targetStore.ImportRepositoryArchive(
+				context.Background(),
+				target,
+				test.filename,
+				archivePath,
+			); importErr != nil {
+				t.Fatal(importErr)
+			}
+
+			importedPath := filepath.Join(targetRoot, "engineering", "imported.git")
+			imported, openErr := git.PlainOpen(importedPath)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			importedHead, headErr := imported.Head()
+			if headErr != nil {
+				t.Fatal(headErr)
+			}
+			if importedHead.Hash() != sourceHead.Hash() {
+				t.Fatalf("imported HEAD = %s, want %s", importedHead.Hash(), sourceHead.Hash())
+			}
+			if _, worktreeErr := imported.Worktree(); !errors.Is(
+				worktreeErr,
+				git.ErrIsBareRepository,
+			) {
+				t.Fatalf("imported repository is not bare: %v", worktreeErr)
+			}
+			description, descriptionErr := targetStore.RepositoryDescription(target)
+			if descriptionErr != nil {
+				t.Fatal(descriptionErr)
+			}
+			if description != "Archived API" {
+				t.Fatalf("imported description = %q", description)
+			}
+			for _, expected := range []string{
+				filepath.Join(targetRoot, "engineering", "imported.lfs", "objects"),
+			} {
+				if _, statErr := os.Stat(expected); statErr != nil {
+					t.Fatalf("missing imported repository data %s: %v", expected, statErr)
+				}
+			}
+			for _, removed := range []string{
+				filepath.Join(importedPath, "hooks"),
+				filepath.Join(importedPath, "objects", "info", "alternates"),
+			} {
+				if _, statErr := os.Stat(removed); !os.IsNotExist(statErr) {
+					t.Fatalf("unsafe imported path still exists %s: %v", removed, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestImportRepositoryArchiveRejectsUnsafeEntries(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		filename string
+		write    func(*testing.T, string)
+	}{
+		{
+			name:     "ZIP path traversal",
+			filename: "unsafe.zip",
+			write: func(t *testing.T, archivePath string) {
+				t.Helper()
+				output, err := os.Create(archivePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writer := zip.NewWriter(output)
+				entry, err := writer.Create("../escaped")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = entry.Write([]byte("escaped")); err != nil {
+					t.Fatal(err)
+				}
+				if err = writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err = output.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:     "TAR symbolic link",
+			filename: "unsafe.tar",
+			write: func(t *testing.T, archivePath string) {
+				t.Helper()
+				output, err := os.Create(archivePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writer := tar.NewWriter(output)
+				if err = writer.WriteHeader(&tar.Header{
+					Name:     "repository.git/HEAD",
+					Typeflag: tar.TypeSymlink,
+					Linkname: "/etc/passwd",
+					Mode:     0o777,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err = writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err = output.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			store := Store{Root: root}
+			if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+				t.Fatal(err)
+			}
+			archivePath := filepath.Join(t.TempDir(), test.filename)
+			test.write(t, archivePath)
+			repository := repopath.Repository{
+				Groups: []string{"engineering"},
+				Name:   "imported",
+			}
+			err := store.ImportRepositoryArchive(
+				context.Background(),
+				repository,
+				test.filename,
+				archivePath,
+			)
+			var archiveError *ArchiveImportError
+			if !errors.As(err, &archiveError) {
+				t.Fatalf("unsafe archive error = %v, want ArchiveImportError", err)
+			}
+			for _, unexpected := range []string{
+				filepath.Join(root, "engineering", "escaped"),
+				filepath.Join(root, "engineering", "imported.git"),
+				filepath.Join(root, "engineering", "imported.lfs"),
+			} {
+				if _, statErr := os.Stat(unexpected); !os.IsNotExist(statErr) {
+					t.Fatalf("unsafe import created %s: %v", unexpected, statErr)
+				}
+			}
+			entries, readErr := os.ReadDir(filepath.Join(root, "engineering"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".gitone-import-") {
+					t.Fatalf("unsafe import left temporary data %q", entry.Name())
+				}
+			}
+		})
+	}
+}
+
+func writeRepositoryZIP(
+	t *testing.T,
+	repositoryPath string,
+	archivePath string,
+	prefix string,
+) {
+	t.Helper()
+	output, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(output)
+	err = filepath.Walk(repositoryPath, func(current string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, relativeErr := filepath.Rel(repositoryPath, current)
+		if relativeErr != nil {
+			return relativeErr
+		}
+		if relative == "." {
+			return nil
+		}
+		name := path.Join(prefix, filepath.ToSlash(relative))
+		header, headerErr := zip.FileInfoHeader(info)
+		if headerErr != nil {
+			return headerErr
+		}
+		header.Name = name
+		if info.IsDir() {
+			header.Name += "/"
+			_, headerErr = writer.CreateHeader(header)
+			return headerErr
+		}
+		entry, createErr := writer.CreateHeader(header)
+		if createErr != nil {
+			return createErr
+		}
+		source, openErr := os.Open(current)
+		if openErr != nil {
+			return openErr
+		}
+		_, copyErr := io.Copy(entry, source)
+		closeErr := source.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = output.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRepositoryTARGZ(
+	t *testing.T,
+	repositoryPath string,
+	archivePath string,
+	prefix string,
+) {
+	t.Helper()
+	output, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed := gzip.NewWriter(output)
+	writer := tar.NewWriter(compressed)
+	err = filepath.Walk(repositoryPath, func(current string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, relativeErr := filepath.Rel(repositoryPath, current)
+		if relativeErr != nil {
+			return relativeErr
+		}
+		if relative == "." {
+			return nil
+		}
+		header, headerErr := tar.FileInfoHeader(info, "")
+		if headerErr != nil {
+			return headerErr
+		}
+		header.Name = path.Join(prefix, filepath.ToSlash(relative))
+		if headerErr = writer.WriteHeader(header); headerErr != nil || info.IsDir() {
+			return headerErr
+		}
+		source, openErr := os.Open(current)
+		if openErr != nil {
+			return openErr
+		}
+		_, copyErr := io.Copy(writer, source)
+		closeErr := source.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = output.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

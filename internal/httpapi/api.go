@@ -286,6 +286,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 		Tags:          []string{"Repositories"},
 		DefaultStatus: http.StatusCreated,
 	}), service.importRepository)
+	registerRepositoryArchiveImport(mux, api, service)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID:   "rename-repository",

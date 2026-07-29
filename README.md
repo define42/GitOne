@@ -42,7 +42,7 @@ docker compose up --build
 
 Open [http://localhost:8080](http://localhost:8080) and sign in with LDAP credentials. After LDAP validation, GitOne stores only the username in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner; creating a subgroup still requires admin access inherited from its parent. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser.
 
-The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can create repositories or mirror every Git ref and tag from an HTTP(S) remote into a new bare repository; Git LFS objects remain separate and are not imported. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
+The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can create repositories, mirror every Git ref and tag from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository; Git LFS objects remain separate and are not imported. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
 
 The repository viewer can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Its Builds tab shows queued, running, successful, and failed jobs, polls active jobs automatically, and exposes expandable live logs. Users with write access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
@@ -157,6 +157,7 @@ These endpoints require `Authorization: Bearer <GITONE_RUNNER_TOKEN>`.
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.yaml`. |
 | `POST` | `/api/repositories/{path}/import` | Mirror all Git refs and tags from an HTTP or HTTPS remote into a new bare repository. JSON fields: `url`, optional `username`, and optional `password` or access token. Git LFS objects are not imported. |
+| `POST` | `/api/repositories/{path}/import-archive?filename=repository.tar.gz` | Upload a `.zip`, `.tar`, `.tar.gz`, or `.tgz` file as the raw request body. The archive must contain one bare Git repository at its root or in one enclosing folder and may be up to 1 GiB compressed. Git LFS objects are not imported. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |
 
@@ -241,6 +242,17 @@ Create a repository:
 curl -u alice:directory-password -X POST \
   'http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi?initializeReadme=true&description=Backend%20API'
 ```
+
+Import a bare repository archive:
+
+```bash
+curl -u alice:directory-password -X POST \
+  -H 'Content-Type: application/gzip' \
+  --data-binary @api.git.tar.gz \
+  'http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi/import-archive?filename=api.git.tar.gz'
+```
+
+Uploaded archives are extracted with entry-count and expanded-size limits. Paths that escape the archive root, symbolic or hard links, device files, and other special files are rejected. Imported hooks and object alternates are removed before the repository becomes available.
 
 Clone the repository and enter the LDAP password when Git prompts:
 
