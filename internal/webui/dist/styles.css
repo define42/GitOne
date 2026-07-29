@@ -596,6 +596,7 @@ a:hover {
   align-items: center;
   display: flex;
   min-width: 0;
+  --location-color: var(--muted);
 }
 
 .location-context li:not(:last-child)::after {
@@ -610,8 +611,10 @@ a:hover {
 }
 
 .location-context a {
-  color: var(--muted);
-  display: block;
+  align-items: center;
+  color: var(--location-color);
+  display: flex;
+  gap: 0.3rem;
   min-width: 0;
   overflow: hidden;
   text-decoration: none;
@@ -619,9 +622,34 @@ a:hover {
   white-space: nowrap;
 }
 
+.location-context .icon {
+  height: 0.85rem;
+  width: 0.85rem;
+}
+
+.location-context .location-group {
+  --location-color: var(--accent);
+}
+
+.location-context .location-subgroup {
+  --location-color: var(--accent);
+}
+
+.location-context .location-repository {
+  --location-color: var(--brand-orange);
+}
+
+.location-context .location-folder {
+  --location-color: var(--warning-text);
+}
+
+.location-context .location-file {
+  --location-color: var(--focus);
+}
+
 .location-context a:hover,
 .location-context a[aria-current="page"] {
-  color: var(--accent);
+  color: color-mix(in srgb, var(--location-color) 72%, var(--text));
 }
 
 .global-navigation {

@@ -95,6 +95,12 @@ const iconPaths = {
     download: ["M12 3v12", "m7 10 5 5 5-5", "M5 21h14"],
     file: ["M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z", "M14 2v6h6"],
     folder: ["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"],
+    group: [
+        "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2",
+        "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z",
+        "M22 21v-2a4 4 0 0 0-3-3.9",
+        "M16 3.1a4 4 0 0 1 0 7.8",
+    ],
     "git-branch": [
         "M6 3v12",
         "M18 9a9 9 0 0 1-9 9",
@@ -213,12 +219,21 @@ function repositoryBrowserURL(repository, options = {}) {
     }
     return `${url.pathname}${url.search}`;
 }
+const locationContextIcons = {
+    group: "group",
+    subgroup: "group",
+    repository: "repository",
+    folder: "folder",
+    file: "file",
+};
 function setLocationContext(items) {
     const entries = items.map((item, index) => {
         const entry = element("li");
-        const link = element("a", item.label);
+        entry.className = `location-${item.kind}`;
+        const link = element("a");
         link.href = item.href;
-        link.title = item.label;
+        link.title = `${item.kind[0].toUpperCase()}${item.kind.slice(1)}: ${item.label}`;
+        link.append(icon(locationContextIcons[item.kind]), document.createTextNode(item.label));
         if (index === items.length - 1) {
             link.setAttribute("aria-current", "page");
         }
@@ -233,6 +248,7 @@ function setGroupLocation(path) {
     setLocationContext(parts.map((part, index) => ({
         label: part,
         href: groupURL(parts.slice(0, index + 1).join("/")),
+        kind: index === 0 ? "group" : "subgroup",
     })));
 }
 function setRepositoryLocation(route) {
@@ -246,16 +262,19 @@ function setRepositoryLocation(route) {
         ...groupParts.map((part, index) => ({
             label: part,
             href: groupURL(groupParts.slice(0, index + 1).join("/")),
+            kind: index === 0 ? "group" : "subgroup",
         })),
         {
             label: parts.at(-1) ?? route.repository,
             href: repositoryBrowserURL(route.repository, { ref: route.ref }),
+            kind: "repository",
         },
         ...pathParts.map((part, index) => {
             const path = pathParts.slice(0, index + 1).join("/");
             const isFile = route.file !== null && index === pathParts.length - 1;
             return {
                 label: part,
+                kind: isFile ? "file" : "folder",
                 href: isFile
                     ? repositoryBrowserURL(route.repository, {
                         ref: route.ref,
