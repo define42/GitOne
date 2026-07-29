@@ -990,12 +990,13 @@ function sectionHeading(title, count, actions = []) {
     header.append(heading, ...actions);
     return header;
 }
-function roleSelect(value) {
+function roleSelect(value, canSelectOwner = true) {
     const select = element("select");
     for (const role of ["read", "write", "admin", "owner"]) {
         const option = element("option", role[0].toUpperCase() + role.slice(1));
         option.value = role;
         option.selected = role === value;
+        option.disabled = role === "owner" && !canSelectOwner;
         select.append(option);
     }
     return select;
@@ -1019,7 +1020,8 @@ function localDateTime(value) {
     const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
     return local.toISOString().slice(0, 16);
 }
-function groupSettingsControl(path, settings) {
+function groupSettingsControl(path, settings, role) {
+    const canManageOwnerSettings = role === "owner";
     const trigger = actionButton("Settings", "settings", "secondary");
     const dialog = element("dialog");
     dialog.className = "action-dialog settings-dialog";
@@ -1074,6 +1076,7 @@ function groupSettingsControl(path, settings) {
     accessHeader.className = "settings-section-header";
     accessHeader.append(element("h3", "Members"));
     const addMember = actionButton("Add member", "plus", "secondary");
+    addMember.disabled = !canManageOwnerSettings;
     accessHeader.append(addMember);
     const members = element("div");
     members.className = "settings-items member-items";
@@ -1087,9 +1090,12 @@ function groupSettingsControl(path, settings) {
         memberName.required = true;
         memberName.autocomplete = "off";
         memberName.value = username;
+        memberName.disabled = !canManageOwnerSettings;
         const memberRole = roleSelect(role);
         memberRole.className = "member-role";
+        memberRole.disabled = !canManageOwnerSettings;
         const remove = removeButton(`Remove ${username || "member"}`);
+        remove.disabled = !canManageOwnerSettings;
         remove.addEventListener("click", () => row.remove());
         row.append(legend, fieldLabel("Username", memberName), fieldLabel("Role", memberRole), remove);
         members.append(row);
@@ -1101,7 +1107,13 @@ function groupSettingsControl(path, settings) {
         addMemberRow(username, role);
     }
     addMember.addEventListener("click", () => addMemberRow());
-    accessPanel.append(accessHeader, members);
+    accessPanel.append(accessHeader);
+    if (!canManageOwnerSettings) {
+        const notice = element("p", "Only group owners can change members and roles.");
+        notice.className = "settings-empty";
+        accessPanel.append(notice);
+    }
+    accessPanel.append(members);
     const tokensPanel = element("section");
     tokensPanel.className = "settings-panel-view";
     tokensPanel.setAttribute("role", "tabpanel");
@@ -1110,6 +1122,14 @@ function groupSettingsControl(path, settings) {
     tokensHeader.append(element("h3", "Tokens"));
     const addToken = actionButton("Add token", "plus", "secondary");
     tokensHeader.append(addToken);
+    if (!canManageOwnerSettings) {
+        const notice = element("p", "Only group owners can create or change owner tokens.");
+        notice.className = "settings-empty";
+        tokensPanel.append(tokensHeader, notice);
+    }
+    else {
+        tokensPanel.append(tokensHeader);
+    }
     const tokens = element("div");
     tokens.className = "settings-items token-items";
     const tokenEmpty = element("p", "No tokens.");
@@ -1147,7 +1167,7 @@ function groupSettingsControl(path, settings) {
         tokenKey.required = true;
         tokenKey.autocomplete = "off";
         tokenKey.value = token.key;
-        const tokenRole = roleSelect(token.role);
+        const tokenRole = roleSelect(token.role, canManageOwnerSettings);
         tokenRole.className = "token-role";
         const tokenHash = element("input");
         tokenHash.className = "token-hash";
@@ -1185,7 +1205,7 @@ function groupSettingsControl(path, settings) {
         addTokenRow(token);
     }
     addToken.addEventListener("click", () => addTokenRow());
-    tokensPanel.append(tokensHeader, tokenEmpty, tokens);
+    tokensPanel.append(tokenEmpty, tokens);
     refreshTokenEmpty();
     const policyPanel = element("section");
     policyPanel.className = "settings-panel-view";
@@ -1204,9 +1224,11 @@ function groupSettingsControl(path, settings) {
         option.selected = value === settings.visibility;
         visibility.append(option);
     }
+    visibility.disabled = !canManageOwnerSettings;
     const lfsEnabled = element("input");
     lfsEnabled.type = "checkbox";
     lfsEnabled.checked = settings.lfs.enabled;
+    lfsEnabled.disabled = !canManageOwnerSettings;
     const lfsLabel = element("label");
     lfsLabel.className = "checkbox-label settings-checkbox";
     lfsLabel.append(lfsEnabled, document.createTextNode("Enable Git LFS for repositories in this group"));
@@ -1217,6 +1239,7 @@ function groupSettingsControl(path, settings) {
     maximumObject.value = settings.lfs.maximumObjectBytes
         ? String(settings.lfs.maximumObjectBytes)
         : "";
+    maximumObject.disabled = !canManageOwnerSettings;
     const maximumStorage = element("input");
     maximumStorage.type = "number";
     maximumStorage.min = "0";
@@ -1224,7 +1247,13 @@ function groupSettingsControl(path, settings) {
     maximumStorage.value = settings.lfs.maximumStorageBytes
         ? String(settings.lfs.maximumStorageBytes)
         : "";
+    maximumStorage.disabled = !canManageOwnerSettings;
     policyGrid.append(fieldLabel("Visibility", visibility), lfsLabel, fieldLabel("Maximum object bytes", maximumObject), fieldLabel("Maximum group storage bytes", maximumStorage));
+    if (!canManageOwnerSettings) {
+        const notice = element("p", "Only group owners can change repository visibility and LFS policy.");
+        notice.className = "settings-empty";
+        policyPanel.append(notice);
+    }
     policyPanel.append(policyGrid);
     const panelDefinitions = [
         ["General", generalPanel],
@@ -3660,6 +3689,7 @@ async function renderRepositoryBrowser(route) {
         path: groupPath,
         description: "",
         username: "",
+        role: "read",
         subgroups: [],
         repositories: [{ name: repositoryName, description: "" }],
     }));
@@ -3964,7 +3994,7 @@ async function renderGroup(path, message) {
     }, [repositoryDescription.label, initializeReadmeLabel]);
     const importRepository = repositoryImportControl(data.path);
     const settingsControl = controlSettings
-        ? groupSettingsControl(data.path, controlSettings)
+        ? groupSettingsControl(data.path, controlSettings, data.role)
         : null;
     const subgroups = element("section");
     subgroups.className = "content-section";

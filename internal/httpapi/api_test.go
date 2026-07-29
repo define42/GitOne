@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -150,6 +151,7 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(group.Body.Subgroups) != 1 ||
+		group.Body.Role != control.RoleWrite ||
 		group.Body.Subgroups[0].Path != "engineering/platform" ||
 		group.Body.Subgroups[0].Description != "Platform services" ||
 		group.Body.Subgroups[0].Role != control.RoleWrite {
@@ -307,6 +309,155 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 	}
 	if preserved.Body.Settings.Tokens[0].Hash != token.Hash {
 		t.Fatal("unchanged token hash was not preserved")
+	}
+}
+
+func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
+	service, ownerCredentials, _ := repositoryAPIFixture(t)
+	ctx := context.Background()
+	current, err := service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Members["bob"] = control.RoleAdmin
+	if err = service.Storage.UpdateGroupControl("engineering", current, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	service.Resolver.Controls.Invalidate("engineering")
+	service.Resolver.Directory = testIdentityProvider{
+		"alice": "secret",
+		"bob":   "bob-secret",
+	}
+	request, err := http.NewRequest(http.MethodGet, "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SetBasicAuth("bob", "bob-secret")
+	adminCredentials := AuthInput{Authorization: request.Header.Get("Authorization")}
+
+	settingsBody := func() updateGroupSettingsBody {
+		t.Helper()
+		document, loadErr := service.Resolver.Controls.Load(ctx, "engineering")
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		tokens := make([]groupTokenInput, 0, len(document.Tokens))
+		for _, token := range document.Tokens {
+			tokens = append(tokens, groupTokenInput{
+				Name:      token.Name,
+				Key:       token.Key,
+				Hash:      token.Hash,
+				Role:      token.Role,
+				ExpiresAt: token.ExpiresAt,
+				Disabled:  token.Disabled,
+			})
+		}
+		return updateGroupSettingsBody{
+			Name:        "engineering",
+			Description: document.Description,
+			Inherit:     document.Inherit,
+			Visibility:  document.Visibility,
+			LFS:         document.LFS,
+			Members:     maps.Clone(document.Members),
+			Tokens:      tokens,
+		}
+	}
+	update := func(credentials AuthInput, body updateGroupSettingsBody) error {
+		t.Helper()
+		_, updateErr := service.updateGroupSettings(ctx, &updateGroupSettingsInput{
+			GroupPathInput: GroupPathInput{
+				AuthInput: credentials,
+				Path:      "engineering",
+			},
+			Body: body,
+		})
+		return updateErr
+	}
+
+	adminUpdate := settingsBody()
+	adminUpdate.Description = "Admins may change ordinary settings"
+	adminUpdate.Tokens = append(adminUpdate.Tokens, groupTokenInput{
+		Name:      "automation",
+		Key:       "ci",
+		NewSecret: "ci-secret",
+		Role:      control.RoleAdmin,
+	})
+	if err = update(adminCredentials, adminUpdate); err != nil {
+		t.Fatalf("admin ordinary settings update failed: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		change func(*updateGroupSettingsBody)
+	}{
+		{
+			name: "members",
+			change: func(body *updateGroupSettingsBody) {
+				body.Members["carol"] = control.RoleRead
+			},
+		},
+		{
+			name: "visibility",
+			change: func(body *updateGroupSettingsBody) {
+				body.Visibility = "internal"
+			},
+		},
+		{
+			name: "LFS policy",
+			change: func(body *updateGroupSettingsBody) {
+				body.LFS.MaximumObjectBytes = 1024
+			},
+		},
+		{
+			name: "owner token",
+			change: func(body *updateGroupSettingsBody) {
+				body.Tokens = append(body.Tokens, groupTokenInput{
+					Name:      "owner automation",
+					Key:       "owner-ci",
+					NewSecret: "owner-secret",
+					Role:      control.RoleOwner,
+				})
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := settingsBody()
+			test.change(&body)
+			if updateErr := update(adminCredentials, body); updateErr == nil {
+				t.Fatalf("admin changed owner-only setting %s", test.name)
+			}
+			persisted, loadErr := service.Resolver.Controls.Load(ctx, "engineering")
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if !maps.Equal(persisted.Members, current.Members) ||
+				persisted.Visibility != current.Visibility ||
+				persisted.LFS != current.LFS ||
+				len(persisted.Tokens) != 1 ||
+				persisted.Tokens[0].Role != control.RoleAdmin {
+				t.Fatalf("denied update changed settings: %#v", persisted)
+			}
+		})
+	}
+
+	ownerUpdate := settingsBody()
+	ownerUpdate.Members["carol"] = control.RoleRead
+	ownerUpdate.Visibility = "internal"
+	ownerUpdate.LFS.MaximumObjectBytes = 1024
+	updated, err := service.updateGroupSettings(ctx, &updateGroupSettingsInput{
+		GroupPathInput: GroupPathInput{
+			AuthInput: ownerCredentials,
+			Path:      "engineering",
+		},
+		Body: ownerUpdate,
+	})
+	if err != nil {
+		t.Fatalf("owner protected settings update failed: %v", err)
+	}
+	if updated.Body.Settings.Members["carol"] != control.RoleRead ||
+		updated.Body.Settings.Visibility != "internal" ||
+		updated.Body.Settings.LFS.MaximumObjectBytes != 1024 {
+		t.Fatalf("owner settings changes were not retained: %#v", updated.Body.Settings)
 	}
 }
 

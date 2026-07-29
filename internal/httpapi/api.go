@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -68,6 +69,7 @@ type groupDetailOutput struct {
 		Path         string              `json:"path"`
 		Description  string              `json:"description"`
 		Username     string              `json:"username"`
+		Role         control.Role        `json:"role"`
 		Subgroups    []groupSummary      `json:"subgroups"`
 		Repositories []repositorySummary `json:"repositories"`
 	}
@@ -379,6 +381,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	output := &groupDetailOutput{}
 	output.Body.Path = path
 	output.Body.Username = principal.Name
+	output.Body.Role = principal.Role
 	if document, loadErr := a.Resolver.Controls.Load(ctx, path); loadErr == nil {
 		output.Body.Description = document.Description
 	}
@@ -477,10 +480,16 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 		_ = releaseOperation()
 	}()
 	a.Resolver.Controls.Invalidate(path)
-	author, err := a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
+	principal, err := a.authorizePrincipal(
+		ctx,
+		input.AuthInput,
+		path,
+		control.RoleAdmin,
+	)
 	if err != nil {
 		return nil, err
 	}
+	author := principal.Name
 	current, err := a.Resolver.Controls.Load(ctx, path)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not load current group settings", err)
@@ -530,6 +539,18 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	if err = control.Validate(target, document); err != nil {
 		return nil, huma.Error400BadRequest("invalid group settings", err)
 	}
+	if !principal.Role.Allows(control.RoleOwner) {
+		if ownerOnlyGroupSettingsChanged(current, document) {
+			return nil, huma.Error403Forbidden(
+				"only group owners can change members, visibility, or LFS policy",
+			)
+		}
+		if ownerTokensChanged(current.Tokens, document.Tokens) {
+			return nil, huma.Error403Forbidden(
+				"only group owners can manage owner tokens",
+			)
+		}
+	}
 
 	if target == path {
 		if err = a.Storage.UpdateGroupControlLocked(path, document, author); err != nil {
@@ -544,6 +565,51 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	output.Body.Path = target
 	output.Body.Settings = document
 	return output, nil
+}
+
+func ownerOnlyGroupSettingsChanged(current, updated control.Document) bool {
+	return !maps.Equal(current.Members, updated.Members) ||
+		current.Visibility != updated.Visibility ||
+		current.LFS != updated.LFS
+}
+
+func ownerTokensChanged(current, updated []control.Token) bool {
+	currentOwners := ownerTokensByKey(current)
+	updatedOwners := ownerTokensByKey(updated)
+	if len(currentOwners) != len(updatedOwners) {
+		return true
+	}
+	for key, currentToken := range currentOwners {
+		updatedToken, ok := updatedOwners[key]
+		if !ok || !tokensEqual(currentToken, updatedToken) {
+			return true
+		}
+	}
+	return false
+}
+
+func ownerTokensByKey(tokens []control.Token) map[string]control.Token {
+	owners := map[string]control.Token{}
+	for _, token := range tokens {
+		if token.Role == control.RoleOwner {
+			owners[token.Key] = token
+		}
+	}
+	return owners
+}
+
+func tokensEqual(left, right control.Token) bool {
+	if left.Name != right.Name ||
+		left.Key != right.Key ||
+		left.Hash != right.Hash ||
+		left.Role != right.Role ||
+		left.Disabled != right.Disabled {
+		return false
+	}
+	if left.ExpiresAt == nil || right.ExpiresAt == nil {
+		return left.ExpiresAt == nil && right.ExpiresAt == nil
+	}
+	return left.ExpiresAt.Equal(*right.ExpiresAt)
 }
 
 type groupControlRename struct {
