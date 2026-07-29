@@ -49,7 +49,7 @@ make ui
 
 ## Repository builds
 
-GitOne includes an API-connected container runner. After a successful branch update, the server reads the build definition from `.gitone.json` at the exact new commit and persists a queued job. A remote runner claims the job with a renewable lease, downloads an exact-commit source archive, runs the script in an ephemeral Docker-compatible container, and streams logs and completion state back to GitOne. Branches created, edited, or merged through the API trigger builds too.
+GitOne builds are split across two applications and container images. The `gitone` web server owns repositories, the durable build queue, logs, and the runner API. The separate `gitone-runner` worker claims jobs over that API and is the only application that needs access to Docker. After a successful branch update, the server reads the build definition from `.gitone.json` at the exact new commit and persists a queued job. A runner claims the job with a renewable lease, downloads an exact-commit source archive, runs the script in an ephemeral Docker-compatible container, and streams logs and completion state back to GitOne. Branches created, edited, or merged through the API trigger builds too.
 
 ```json
 {
@@ -83,17 +83,18 @@ GITONE_RUNNER_TOKEN="$(openssl rand -hex 32)" make run RUN_ARGS="-root ./data"
 Start the worker on the runner server with the same token:
 
 ```bash
+docker build -f Dockerfile.runner -t gitone-runner:local .
 docker run --rm \
   -e GITONE_RUNNER_TOKEN="$GITONE_RUNNER_TOKEN" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /var/lib/gitone-runner:/var/lib/gitone-runner \
-  gitone -runner-remote \
+  gitone-runner:local \
     -runner-url https://gitone.example \
     -runner-id build-server-1 \
     -runner-work-root /var/lib/gitone-runner
 ```
 
-The runner makes outbound HTTP(S) requests only and does not mount GitOne's `/data`. Its work root must be bind-mounted at the same absolute path on the runner host because the local Docker daemon bind-mounts each downloaded workspace into the build container. The default runner command is `docker`; use `-runner-command podman` for a Docker-compatible alternative. `-runner-workers` controls concurrency and defaults to one.
+The runner makes outbound HTTP(S) requests only and does not mount GitOne's `/data`. Its work root must be bind-mounted at the same absolute path on the runner host because the local Docker daemon bind-mounts each downloaded workspace into the build container. The default runner command is `docker`; use `-runner-command podman` for a Docker-compatible alternative. `-runner-workers` controls concurrency and defaults to one. The web image is built from `Dockerfile`; the worker image is built from `Dockerfile.runner`. `docker compose up --build` builds and starts both.
 
 The Docker socket is a privileged host capability and belongs only on the runner server. Build containers do not receive that socket. The GitOne server retains repositories, durable queue state, and logs beside each bare repository under `<root>/<group>/<repository>.build`; stored logs are capped at 10 MiB and API log responses at 1 MiB. Leases allow another runner to reclaim work after a runner failure or network loss.
 

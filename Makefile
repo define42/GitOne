@@ -2,7 +2,7 @@ GO ?= go
 NPM ?= npm
 RUN_ARGS ?=
 
-.PHONY: ui test run
+.PHONY: ui test run run-runner build build-runner docker lint
 
 ui:
 	$(NPM) --prefix web ci --no-audit --no-fund
@@ -13,6 +13,16 @@ test: ui
 
 run: ui
 	$(GO) run ./cmd/gitone $(RUN_ARGS)
+
+run-runner:
+	$(GO) run ./cmd/gitone-runner $(RUN_ARGS)
+
+build: ui
+	$(GO) build ./cmd/gitone
+
+build-runner:
+	$(GO) build ./cmd/gitone-runner
+
 docker:
 	docker compose stop
 	docker compose build

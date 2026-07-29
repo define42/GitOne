@@ -82,14 +82,11 @@ func TestNewServerRejectsInvalidConfiguration(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid runner workers", func(t *testing.T) {
+	t.Run("embedded runner flag", func(t *testing.T) {
 		setValidEnvironment(t)
-		if _, _, err := newServer([]string{
-			"-root", t.TempDir(),
-			"-runner",
-			"-runner-workers", "-1",
-		}); err == nil || !strings.Contains(err.Error(), "workers") {
-			t.Fatalf("invalid runner workers error = %v", err)
+		if _, _, err := newServer([]string{"-runner"}); err == nil ||
+			!strings.Contains(err.Error(), "flag provided but not defined") {
+			t.Fatalf("embedded runner flag error = %v", err)
 		}
 	})
 }

@@ -20,7 +20,7 @@ Implemented:
 - Stale-ref rejection and validated fast-forward-only control updates
 - Repository visibility and LFS policy enforcement
 - Go and TypeScript build validation plus a multi-stage Dockerfile
-- API-connected container runner driven by `.gitone.json`, with durable leases, exact-commit source archives, remote log streaming, branch filters, timeouts, build APIs, and a live Builds UI
+- Separate `gitone` web and `gitone-runner` applications and container images, connected through an authenticated build API with durable leases, exact-commit source archives, remote log streaming, branch filters, timeouts, build APIs, and a live Builds UI
 
 Not production-complete yet:
 

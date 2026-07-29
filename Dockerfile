@@ -14,7 +14,7 @@ COPY --from=ui /src/internal/webui/dist/app.js ./internal/webui/dist/app.js
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /gitone ./cmd/gitone
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates docker-cli git
+RUN apk add --no-cache ca-certificates
 COPY --from=build /gitone /gitone
 EXPOSE 8080
 ENTRYPOINT ["/gitone"]

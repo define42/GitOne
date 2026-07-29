@@ -112,3 +112,15 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/gitone:latest
             ghcr.io/${{ github.repository_owner }}/gitone:${{ steps.tag.outputs.new_tag }}
             ghcr.io/${{ github.repository_owner }}/gitone:${{ github.sha }}
+
+      - name: Build and push runner container
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile.runner
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/gitone-runner:latest
+            ghcr.io/${{ github.repository_owner }}/gitone-runner:${{ steps.tag.outputs.new_tag }}
+            ghcr.io/${{ github.repository_owner }}/gitone-runner:${{ github.sha }}

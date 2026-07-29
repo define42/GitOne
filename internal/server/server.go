@@ -20,7 +20,6 @@ type Config struct {
 	Root, PublicURL string
 	Directory       auth.IdentityProvider
 	Sessions        *auth.SessionManager
-	Runner          *runner.Runner
 	Coordinator     *runner.Coordinator
 	RunnerToken     string
 }
@@ -77,10 +76,6 @@ func New(c Config) http.Handler {
 	mux := http.NewServeMux()
 	buildStore := runner.NewStore(c.Root)
 	var scheduler runner.Scheduler
-	if c.Runner != nil {
-		buildStore = c.Runner.Store()
-		scheduler = c.Runner
-	}
 	if c.Coordinator != nil {
 		buildStore = c.Coordinator.Store()
 		scheduler = c.Coordinator
