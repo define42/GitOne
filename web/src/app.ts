@@ -1219,6 +1219,143 @@ function createForm(
   return {trigger, dialog};
 }
 
+function repositoryImportControl(
+  groupPath: string,
+): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
+  const trigger = actionButton("Import bare Git", "download", "primary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog repository-import-dialog";
+  const form = element("form");
+  form.className = "dialog-form";
+
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", "Import bare Git repository");
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+
+  const description = element(
+    "p",
+    "Mirror all Git refs and tags from an HTTP or HTTPS remote. Git LFS objects are not copied.",
+  );
+  description.className = "dialog-description";
+
+  const remoteURL = element("input");
+  remoteURL.name = "remoteURL";
+  remoteURL.type = "url";
+  remoteURL.required = true;
+  remoteURL.autocomplete = "off";
+  remoteURL.pattern = "https?://.+";
+  remoteURL.placeholder = "https://git.example.com/team/project.git";
+
+  const name = element("input");
+  name.name = "name";
+  name.required = true;
+  name.autocomplete = "off";
+  name.placeholder = "project";
+  let suggestedName = "";
+  remoteURL.addEventListener("input", () => {
+    if (name.value !== "" && name.value !== suggestedName) {
+      return;
+    }
+    try {
+      const remote = new URL(remoteURL.value);
+      const lastPart = remote.pathname.split("/").filter(Boolean).at(-1) ?? "";
+      suggestedName = decodeURIComponent(lastPart).replace(/\.git$/i, "");
+      name.value = suggestedName;
+    } catch {
+      suggestedName = "";
+    }
+  });
+
+  const username = element("input");
+  username.name = "username";
+  username.autocomplete = "off";
+  username.placeholder = "Optional";
+  const password = element("input");
+  password.name = "password";
+  password.type = "password";
+  password.autocomplete = "off";
+  password.placeholder = "Optional password or access token";
+  const authentication = element("div");
+  authentication.className = "repository-import-authentication";
+  authentication.append(
+    fieldLabel("Username", username),
+    fieldLabel("Password or token", password),
+  );
+
+  const actions = element("div");
+  actions.className = "dialog-actions";
+  const cancel = actionButton("Cancel", undefined, "secondary");
+  const submit = actionButton("Import repository", "download", "primary");
+  submit.type = "submit";
+  actions.append(cancel, submit);
+  form.append(
+    header,
+    description,
+    fieldLabel("Remote HTTP/HTTPS URL", remoteURL),
+    fieldLabel("Repository name", name),
+    authentication,
+    actions,
+  );
+  dialog.append(form);
+
+  trigger.addEventListener("click", () => {
+    dialog.showModal();
+    remoteURL.focus();
+  });
+  close.addEventListener("click", () => dialog.close());
+  cancel.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+      form.reset();
+      suggestedName = "";
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    cancel.disabled = true;
+    close.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    const repositoryName = name.value.trim();
+    try {
+      const repositoryPath = encodeURIComponent(`${groupPath}/${repositoryName}`);
+      await request(`/api/repositories/${repositoryPath}/import`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          url: remoteURL.value.trim(),
+          username: username.value.trim(),
+          password: password.value,
+        }),
+      });
+      password.value = "";
+      dialog.close();
+      await renderGroup(groupPath, `Repository ${repositoryName} imported.`);
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "Could not import the repository.",
+        true,
+      );
+    } finally {
+      submit.disabled = false;
+      cancel.disabled = false;
+      close.disabled = false;
+      form.removeAttribute("aria-busy");
+    }
+  });
+  return {trigger, dialog};
+}
+
 function pageHeader(
   eyebrow: string,
   title: string,
@@ -5063,6 +5200,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     },
     [repositoryDescription.label, initializeReadmeLabel],
   );
+  const importRepository = repositoryImportControl(data.path);
   const settingsControl = controlSettings
     ? groupSettingsControl(data.path, data, controlSettings)
     : null;
@@ -5138,6 +5276,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     ...(settingsControl ? [settingsControl.trigger] : []),
     createSubgroup.trigger,
     createRepository.trigger,
+    importRepository.trigger,
   ];
 
   app.append(
@@ -5152,6 +5291,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     danger,
     createSubgroup.dialog,
     createRepository.dialog,
+    importRepository.dialog,
     ...(settingsControl ? [settingsControl.dialog] : []),
   );
   if (message) {

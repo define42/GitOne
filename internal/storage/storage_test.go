@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,6 +285,42 @@ func TestCreateRepositoryWithDescriptionOnly(t *testing.T) {
 	}
 	if description != "Backend API" {
 		t.Fatalf("unexpected repository description: %q", description)
+	}
+}
+
+func TestImportRepositoryCleansUpFailedRemote(t *testing.T) {
+	remote := httptest.NewServer(http.NotFoundHandler())
+	defer remote.Close()
+
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "imported"}
+	err := store.ImportRepository(context.Background(), repository, ImportRepositoryOptions{
+		URL: remote.URL + "/missing.git",
+	})
+	var remoteError *RemoteImportError
+	if !errors.As(err, &remoteError) {
+		t.Fatalf("failed import error = %v, want RemoteImportError", err)
+	}
+	for _, path := range []string{
+		filepath.Join(root, "engineering", "imported.git"),
+		filepath.Join(root, "engineering", "imported.lfs"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("failed import left %s: %v", path, statErr)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "engineering"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".gitone-import-") {
+			t.Fatalf("failed import left temporary data %q", entry.Name())
+		}
 	}
 }
 

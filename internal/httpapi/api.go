@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -151,6 +152,17 @@ type createRepositoryInput struct {
 	Description      string `query:"description" doc:"Repository description stored in .gitone.yaml"`
 }
 
+type importRepositoryBody struct {
+	URL      string `json:"url" minLength:"1" doc:"HTTP or HTTPS Git remote URL"`
+	Username string `json:"username,omitempty" doc:"Optional HTTP Basic authentication username"`
+	Password string `json:"password,omitempty" doc:"Optional HTTP Basic password or access token"`
+}
+
+type importRepositoryInput struct {
+	RepositoryPathInput
+	Body importRepositoryBody
+}
+
 type renameRepositoryBody struct {
 	NewName string `json:"newName" minLength:"1"`
 }
@@ -265,6 +277,15 @@ func Register(mux *http.ServeMux, service API) huma.API {
 		Tags:          []string{"Repositories"},
 		DefaultStatus: http.StatusCreated,
 	}), service.createRepository)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "import-repository",
+		Method:        http.MethodPost,
+		Path:          "/api/repositories/{path}/import",
+		Summary:       "Import a bare repository from an HTTP or HTTPS remote",
+		Tags:          []string{"Repositories"},
+		DefaultStatus: http.StatusCreated,
+	}), service.importRepository)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID:   "rename-repository",
@@ -746,6 +767,56 @@ func (a API) createRepository(ctx context.Context, input *createRepositoryInput)
 	return output, nil
 }
 
+func (a API) importRepository(ctx context.Context, input *importRepositoryInput) (*createRepositoryOutput, error) {
+	repository, err := parseRepositoryPath(input.Path)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	remoteURL, err := canonicalImportURL(input.Body.URL)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	username := strings.TrimSpace(input.Body.Username)
+	if input.Body.Password != "" && username == "" {
+		return nil, huma.Error400BadRequest(
+			"an authentication username is required when a password or token is supplied",
+		)
+	}
+
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	a.Resolver.Controls.Invalidate(repository.Group())
+	if _, err = a.authorizeRepository(
+		ctx,
+		input.AuthInput,
+		repository,
+		control.RoleAdmin,
+	); err != nil {
+		return nil, err
+	}
+	err = a.Storage.ImportRepositoryLocked(ctx, repository, storage.ImportRepositoryOptions{
+		URL:      remoteURL,
+		Username: username,
+		Password: input.Body.Password,
+	})
+	if err != nil {
+		var remoteError *storage.RemoteImportError
+		if errors.As(err, &remoteError) {
+			return nil, huma.Error502BadGateway(remoteError.Error())
+		}
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	output := &createRepositoryOutput{}
+	output.Body.Group = repository.Group()
+	output.Body.Name = repository.Name
+	return output, nil
+}
+
 func (a API) renameRepository(ctx context.Context, input *renameRepositoryInput) (*emptyOutput, error) {
 	repository, err := parseRepositoryPath(input.Path)
 	if err != nil {
@@ -911,6 +982,26 @@ func canonicalGroup(value string) (string, error) {
 func parseRepositoryPath(value string) (repopath.Repository, error) {
 	repository, _, err := repopath.ParseGitRequestPath("/" + strings.TrimSuffix(value, ".git") + ".git/info/refs")
 	return repository, err
+}
+
+func canonicalImportURL(value string) (string, error) {
+	remote, err := url.ParseRequestURI(strings.TrimSpace(value))
+	if err != nil || remote.Hostname() == "" {
+		return "", errors.New("a valid absolute HTTP or HTTPS remote URL is required")
+	}
+	remote.Scheme = strings.ToLower(remote.Scheme)
+	if remote.Scheme != "http" && remote.Scheme != "https" {
+		return "", errors.New("remote URL scheme must be HTTP or HTTPS")
+	}
+	if remote.User != nil {
+		return "", errors.New(
+			"remote URL must not contain credentials; use the username and password fields",
+		)
+	}
+	if remote.Fragment != "" {
+		return "", errors.New("remote URL must not contain a fragment")
+	}
+	return remote.String(), nil
 }
 
 func protected(operation huma.Operation) huma.Operation {

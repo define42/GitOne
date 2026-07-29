@@ -985,6 +985,152 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 	}
 }
 
+func TestImportBareRepositoryFromHTTP(t *testing.T) {
+	sourceRoot := t.TempDir()
+	sourceStore := storage.Store{Root: sourceRoot}
+	if err := sourceStore.CreateGroup("source", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := repopath.Repository{Groups: []string{"source"}, Name: "api"}
+	if err := sourceStore.CreateRepository(sourcePath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+		Description:      "Imported API",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sourceRepository, err := git.PlainOpen(filepath.Join(sourceRoot, "source", "api.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceHead, err := sourceRepository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reference := range []plumbing.ReferenceName{
+		plumbing.NewBranchReferenceName("feature"),
+		plumbing.NewTagReferenceName("v1"),
+	} {
+		if err = sourceRepository.Storer.SetReference(
+			plumbing.NewHashReference(reference, sourceHead.Hash()),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceServer := httptest.NewServer(New(Config{
+		Root:      sourceRoot,
+		Directory: testLDAPDirectory(),
+	}))
+	defer sourceServer.Close()
+
+	targetRoot := t.TempDir()
+	targetStore := storage.Store{Root: targetRoot}
+	if err = targetStore.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	targetHandler := New(Config{
+		Root:      targetRoot,
+		Directory: testLDAPDirectory(),
+	})
+	remoteURL := sourceServer.URL + "/source/api.git"
+	body, err := json.Marshal(map[string]string{
+		"url":      remoteURL,
+		"username": "alice",
+		"password": "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fimported/import",
+		bytes.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.SetBasicAuth("alice", "secret")
+	response := httptest.NewRecorder()
+	targetHandler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("import repository: status %d: %s", response.Code, response.Body.String())
+	}
+
+	importedPath := filepath.Join(targetRoot, "engineering", "imported.git")
+	imported, err := git.PlainOpen(importedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importedHead, err := imported.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if importedHead.Hash() != sourceHead.Hash() {
+		t.Fatalf("imported HEAD = %s, want %s", importedHead.Hash(), sourceHead.Hash())
+	}
+	for _, reference := range []plumbing.ReferenceName{
+		plumbing.NewBranchReferenceName("feature"),
+		plumbing.NewTagReferenceName("v1"),
+	} {
+		importedReference, referenceErr := imported.Reference(reference, true)
+		if referenceErr != nil {
+			t.Fatalf("imported reference %s: %v", reference, referenceErr)
+		}
+		if importedReference.Hash() != sourceHead.Hash() {
+			t.Fatalf("imported reference %s = %s, want %s", reference, importedReference.Hash(), sourceHead.Hash())
+		}
+	}
+	configuration, err := imported.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := configuration.Remotes["origin"]
+	if origin == nil || len(origin.URLs) != 1 || origin.URLs[0] != remoteURL {
+		t.Fatalf("imported origin = %#v, want URL %q", origin, remoteURL)
+	}
+	if _, err = imported.Worktree(); !errors.Is(err, git.ErrIsBareRepository) {
+		t.Fatalf("imported repository is not bare: %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(targetRoot, "engineering", "imported.lfs", "objects")); err != nil {
+		t.Fatalf("imported repository LFS storage: %v", err)
+	}
+	description, err := targetStore.RepositoryDescription(repopath.Repository{
+		Groups: []string{"engineering"},
+		Name:   "imported",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if description != "Imported API" {
+		t.Fatalf("imported description = %q", description)
+	}
+}
+
+func TestImportRepositoryRejectsNonHTTPRemote(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root:      root,
+		Directory: testLDAPDirectory(),
+	})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fimported/import",
+		strings.NewReader(`{"url":"file:///tmp/source.git"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.SetBasicAuth("alice", "secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("non-HTTP import: status %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "engineering", "imported.git")); !os.IsNotExist(err) {
+		t.Fatalf("non-HTTP import created repository data: %v", err)
+	}
+}
+
 func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 	handler := New(Config{
 		Root:      t.TempDir(),
@@ -2331,9 +2477,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=9">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=10">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=29">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=30">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -2463,6 +2609,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if !strings.Contains(assetResponse.Body.String(), "repositoryDescription.input.value") {
 		t.Fatal("served UI does not provide the repository description option")
 	}
+	if !strings.Contains(assetResponse.Body.String(), "repositoryImportControl") ||
+		!strings.Contains(assetResponse.Body.String(), `"Import bare Git"`) ||
+		!strings.Contains(assetResponse.Body.String(), `/api/repositories/${repositoryPath}/import`) ||
+		!strings.Contains(assetResponse.Body.String(), "password: password.value") {
+		t.Fatal("served UI does not provide HTTP/HTTPS bare repository imports")
+	}
 	if !strings.Contains(assetResponse.Body.String(), "repository.description") {
 		t.Fatal("served UI does not show repository descriptions")
 	}
@@ -2553,6 +2705,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 				`"Repository browser"`,
 				`"/api/repositories/{repository}/branches"`,
 				`"/api/groups/{path}/settings"`,
+				`"/api/repositories/{path}/import"`,
 				`"/api/repositories/{repository}/branches/{branch}"`,
 				`"/api/repositories/{repository}/compare"`,
 				`"/api/repositories/{repository}/merges"`,

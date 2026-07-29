@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	gittransport "github.com/go-git/go-git/v5/plumbing/transport"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"gopkg.in/yaml.v3"
 )
 
@@ -27,6 +30,39 @@ type CreateRepositoryOptions struct {
 	InitializeReadme bool
 	Author           string
 	Description      string
+}
+
+type ImportRepositoryOptions struct {
+	URL      string
+	Username string
+	Password string
+}
+
+type RemoteImportError struct {
+	Err error
+}
+
+func (e *RemoteImportError) Error() string {
+	switch {
+	case errors.Is(e.Err, context.Canceled):
+		return "remote repository import was canceled"
+	case errors.Is(e.Err, context.DeadlineExceeded):
+		return "remote repository import timed out"
+	case errors.Is(e.Err, gittransport.ErrAuthenticationRequired):
+		return "remote repository requires authentication"
+	case errors.Is(e.Err, gittransport.ErrAuthorizationFailed):
+		return "remote repository rejected the supplied credentials"
+	case errors.Is(e.Err, gittransport.ErrRepositoryNotFound):
+		return "remote repository was not found"
+	case errors.Is(e.Err, gittransport.ErrEmptyRemoteRepository):
+		return "remote repository is empty"
+	default:
+		return "could not clone the remote repository"
+	}
+}
+
+func (e *RemoteImportError) Unwrap() error {
+	return e.Err
 }
 
 type GroupInfo struct {
@@ -155,6 +191,109 @@ func (s Store) CreateRepositoryLocked(
 	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
 		return s.createRepository(r, options)
 	})
+}
+
+func (s Store) ImportRepository(
+	ctx context.Context,
+	r repopath.Repository,
+	options ImportRepositoryOptions,
+) error {
+	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return s.ImportRepositoryLocked(ctx, r, options)
+}
+
+// ImportRepositoryLocked mirrors a remote HTTP(S) repository into a bare
+// repository while its caller holds the repository operations lock.
+func (s Store) ImportRepositoryLocked(
+	ctx context.Context,
+	r repopath.Repository,
+	options ImportRepositoryOptions,
+) error {
+	if r.Name == "control" {
+		return errors.New("reserved repository name")
+	}
+	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+		return s.importRepository(ctx, r, options)
+	})
+}
+
+func (s Store) importRepository(
+	ctx context.Context,
+	r repopath.Repository,
+	options ImportRepositoryOptions,
+) error {
+	gp, err := s.GroupPath(r.Group())
+	if err != nil {
+		return err
+	}
+	if _, err = os.Stat(filepath.Join(gp, "control.git")); err != nil {
+		return errors.New("group does not exist")
+	}
+	gitPath, err := s.GitPath(r)
+	if err != nil {
+		return err
+	}
+	lfsPath, err := s.LFSPath(r)
+	if err != nil {
+		return err
+	}
+	buildPath, err := s.BuildPath(r)
+	if err != nil {
+		return err
+	}
+	reviewPath, err := s.ReviewPath(r)
+	if err != nil {
+		return err
+	}
+	for _, existing := range []string{gitPath, lfsPath, buildPath, reviewPath} {
+		exists, statErr := pathEntryExists(existing)
+		if statErr != nil {
+			return statErr
+		}
+		if exists {
+			return errors.New("repository data already exists")
+		}
+	}
+
+	temporaryPath, err := os.MkdirTemp(gp, ".gitone-import-*.build")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = os.RemoveAll(temporaryPath)
+	}()
+
+	cloneOptions := &git.CloneOptions{
+		URL:    options.URL,
+		Mirror: true,
+	}
+	if options.Username != "" {
+		cloneOptions.Auth = &githttp.BasicAuth{
+			Username: options.Username,
+			Password: options.Password,
+		}
+	}
+	if _, err = git.PlainCloneContext(ctx, temporaryPath, true, cloneOptions); err != nil {
+		return &RemoteImportError{Err: err}
+	}
+	if err = os.Chmod(temporaryPath, 0o750); err != nil {
+		return err
+	}
+	if err = os.Rename(temporaryPath, gitPath); err != nil {
+		return err
+	}
+	if err = os.MkdirAll(filepath.Join(lfsPath, "objects"), 0o750); err != nil {
+		_ = os.RemoveAll(gitPath)
+		_ = os.RemoveAll(lfsPath)
+		return err
+	}
+	return nil
 }
 
 func (s Store) createRepository(r repopath.Repository, options CreateRepositoryOptions) error {
