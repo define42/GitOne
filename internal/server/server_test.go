@@ -2329,8 +2329,11 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		body := response.Body.String()
 		if !strings.Contains(body, `<main id="app"`) ||
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
+			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
+			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=3">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=22">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=24">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||

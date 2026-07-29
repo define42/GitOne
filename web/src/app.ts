@@ -333,6 +333,10 @@ interface GroupSettingsUpdate {
 const appRoot = document.querySelector<HTMLElement>("#app");
 const notificationRoot = document.querySelector<HTMLElement>("#notifications");
 const colorThemeSelect = document.querySelector<HTMLSelectElement>("#color-theme");
+const locationContextRoot =
+  document.querySelector<HTMLElement>("#location-context");
+const locationContextListRoot =
+  document.querySelector<HTMLOListElement>("#location-context-list");
 const globalNavigationRoot = document.querySelector<HTMLElement>("#global-navigation");
 const sessionControlsRoot = document.querySelector<HTMLElement>("#session-controls");
 const sessionUsernameRoot = document.querySelector<HTMLElement>("#session-username");
@@ -342,6 +346,8 @@ if (
   !appRoot ||
   !notificationRoot ||
   !colorThemeSelect ||
+  !locationContextRoot ||
+  !locationContextListRoot ||
   !globalNavigationRoot ||
   !sessionControlsRoot ||
   !sessionUsernameRoot ||
@@ -352,6 +358,8 @@ if (
 const app: HTMLElement = appRoot;
 const notifications: HTMLElement = notificationRoot;
 const themeSelect: HTMLSelectElement = colorThemeSelect;
+const locationContext: HTMLElement = locationContextRoot;
+const locationContextList: HTMLOListElement = locationContextListRoot;
 const globalNavigation: HTMLElement = globalNavigationRoot;
 const sessionControls: HTMLElement = sessionControlsRoot;
 const sessionUsername: HTMLElement = sessionUsernameRoot;
@@ -592,6 +600,45 @@ function repositoryBrowserURL(
     url.searchParams.set("state", options.mergeRequestState);
   }
   return `${url.pathname}${url.search}`;
+}
+
+function setLocationContext(items: {label: string; href: string}[]): void {
+  const entries = items.map((item, index) => {
+    const entry = element("li");
+    const link = element("a", item.label);
+    link.href = item.href;
+    link.title = item.label;
+    if (index === items.length - 1) {
+      link.setAttribute("aria-current", "page");
+    }
+    entry.append(link);
+    return entry;
+  });
+  locationContextList.replaceChildren(...entries);
+  locationContext.hidden = entries.length === 0;
+}
+
+function setGroupLocation(path: string): void {
+  const parts = path.split("/");
+  setLocationContext(parts.map((part, index) => ({
+    label: part,
+    href: groupURL(parts.slice(0, index + 1).join("/")),
+  })));
+}
+
+function setRepositoryLocation(repository: string, ref = "main"): void {
+  const parts = repository.split("/");
+  const groupParts = parts.slice(0, -1);
+  setLocationContext([
+    ...groupParts.map((part, index) => ({
+      label: part,
+      href: groupURL(groupParts.slice(0, index + 1).join("/")),
+    })),
+    {
+      label: parts.at(-1) ?? repository,
+      href: repositoryBrowserURL(repository, {ref}),
+    },
+  ]);
 }
 
 function repositoryBranchesAPIURL(repository: string): string {
@@ -1129,7 +1176,10 @@ function pageHeader(
   copy.className = "page-header-copy";
   const label = element("span", eyebrow);
   label.className = "eyebrow";
-  copy.append(label, element("h1", title));
+  copy.append(label);
+  if (title) {
+    copy.append(element("h1", title));
+  }
   if (description) {
     const text = element("p", description);
     text.className = "page-description";
@@ -1706,101 +1756,40 @@ function groupSettingsControl(
   return {trigger, dialog};
 }
 
-function breadcrumbs(path: string): HTMLElement {
-  const nav = element("nav");
-  nav.setAttribute("aria-label", "Breadcrumb");
-  const list = element("ol");
-  const homeItem = element("li");
-  const home = element("a", "Groups");
-  home.href = "/";
-  homeItem.append(home);
-  list.append(homeItem);
-
-  const parts = path.split("/");
-  for (let index = 0; index < parts.length; index += 1) {
-    const item = element("li");
-    const link = element("a", parts[index]);
-    link.href = groupURL(parts.slice(0, index + 1).join("/"));
-    item.append(link);
-    list.append(item);
-  }
-  nav.append(list);
-  return nav;
-}
-
-function repositoryBreadcrumbs(route: RepositoryBrowserRoute): HTMLElement {
-  const nav = element("nav");
-  nav.setAttribute("aria-label", "Breadcrumb");
-  const list = element("ol");
-  const homeItem = element("li");
-  const home = element("a", "Groups");
-  home.href = "/";
-  homeItem.append(home);
-  list.append(homeItem);
-
-  const repositoryParts = route.repository.split("/");
-  const groupParts = repositoryParts.slice(0, -1);
-  for (let index = 0; index < groupParts.length; index += 1) {
-    const item = element("li");
-    const link = element("a", groupParts[index]);
-    link.href = groupURL(groupParts.slice(0, index + 1).join("/"));
-    item.append(link);
-    list.append(item);
-  }
-
-  const repositoryItem = element("li");
-  const repositoryLink = element("a", repositoryParts.at(-1) ?? route.repository);
-  repositoryLink.href = repositoryBrowserURL(route.repository, {ref: route.ref});
-  repositoryItem.append(repositoryLink);
-  list.append(repositoryItem);
-
-  if (route.view === "history") {
-    const historyItem = element("li");
-    historyItem.append(element("span", "History"));
-    list.append(historyItem);
-  } else if (route.view === "builds") {
-    const buildsItem = element("li");
-    buildsItem.append(element("span", "Builds"));
-    list.append(buildsItem);
-  } else if (route.view === "merge-requests") {
-    const mergeRequestsItem = element("li");
-    if (route.mergeRequest === undefined) {
-      mergeRequestsItem.append(element("span", "Merge requests"));
-    } else {
-      const mergeRequests = element("a", "Merge requests");
-      mergeRequests.href = repositoryBrowserURL(route.repository, {
-        view: "merge-requests",
-        mergeRequestState: route.mergeRequestState,
-      });
-      mergeRequestsItem.append(mergeRequests);
-    }
-    list.append(mergeRequestsItem);
-    if (route.mergeRequest !== undefined) {
-      const mergeRequestItem = element("li");
-      mergeRequestItem.append(element("span", `!${route.mergeRequest}`));
-      list.append(mergeRequestItem);
-    }
-  }
-
+function repositoryContentBreadcrumbs(
+  route: RepositoryBrowserRoute,
+): HTMLElement | null {
   const selectedPath = route.view === "files" || route.view === "blame"
     ? route.file ?? route.path
     : "";
-  if (selectedPath) {
-    const pathParts = selectedPath.split("/");
-    for (let index = 0; index < pathParts.length; index += 1) {
-      const item = element("li");
-      if (route.file !== null && index === pathParts.length - 1) {
-        item.append(element("span", pathParts[index]));
-      } else {
-        const link = element("a", pathParts[index]);
-        link.href = repositoryBrowserURL(route.repository, {
-          ref: route.ref,
-          path: pathParts.slice(0, index + 1).join("/"),
-        });
-        item.append(link);
-      }
-      list.append(item);
+  if (!selectedPath) {
+    return null;
+  }
+
+  const nav = element("nav");
+  nav.className = "breadcrumbs";
+  nav.setAttribute("aria-label", "Repository path");
+  const list = element("ol");
+  const rootItem = element("li");
+  const root = element("a", "Files");
+  root.href = repositoryBrowserURL(route.repository, {ref: route.ref});
+  rootItem.append(root);
+  list.append(rootItem);
+
+  const pathParts = selectedPath.split("/");
+  for (let index = 0; index < pathParts.length; index += 1) {
+    const item = element("li");
+    if (route.file !== null && index === pathParts.length - 1) {
+      item.append(element("span", pathParts[index]));
+    } else {
+      const link = element("a", pathParts[index]);
+      link.href = repositoryBrowserURL(route.repository, {
+        ref: route.ref,
+        path: pathParts.slice(0, index + 1).join("/"),
+      });
+      item.append(link);
     }
+    list.append(item);
   }
   nav.append(list);
   return nav;
@@ -4628,6 +4617,7 @@ async function repositoryReadme(
 
 async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<void> {
   stopRepositoryBuildPolling();
+  setRepositoryLocation(route.repository, route.ref);
   const repositoryParts = route.repository.split("/");
   const repositoryName = repositoryParts.at(-1) ?? route.repository;
   const groupPath = repositoryParts.slice(0, -1).join("/");
@@ -4675,8 +4665,17 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   const repository = group.repositories.find((candidate) => candidate.name === repositoryName);
 
   document.title = `${route.repository} · GitOne`;
-  app.replaceChildren(repositoryBreadcrumbs(route));
-  app.append(pageHeader("Repository", route.repository, repository?.description ?? ""));
+  app.replaceChildren();
+  const description = repository?.description.trim();
+  if (description) {
+    const repositoryDescription = element("p", description);
+    repositoryDescription.className = "repository-page-description";
+    app.append(repositoryDescription);
+  }
+  const contentBreadcrumbs = repositoryContentBreadcrumbs(route);
+  if (contentBreadcrumbs) {
+    app.append(contentBreadcrumbs);
+  }
 
   const overview = element("section");
   overview.className = "repository-overview";
@@ -4878,6 +4877,7 @@ function setBrowserSession(session: BrowserSession | null): void {
 
 function renderLogin(message = ""): void {
   stopRepositoryBuildPolling();
+  setLocationContext([]);
   setBrowserSession(null);
   document.title = "Sign in · GitOne";
   notifications.replaceChildren();
@@ -4951,6 +4951,7 @@ function renderLogin(message = ""): void {
 
 async function renderRoot(message?: string): Promise<void> {
   stopRepositoryBuildPolling();
+  setLocationContext([]);
   const data = await request<GroupList>("/api/groups");
   document.title = "GitOne";
   app.replaceChildren();
@@ -4994,6 +4995,7 @@ async function renderRoot(message?: string): Promise<void> {
 
 async function renderGroup(path: string, message?: string): Promise<void> {
   stopRepositoryBuildPolling();
+  setGroupLocation(path);
   const [data, controlSettings] = await Promise.all([
     request<GroupDetail>(apiGroupURL(path)),
     request<GroupControlSettings>(groupSettingsAPIURL(path)).catch(() => null),
@@ -5123,10 +5125,9 @@ async function renderGroup(path: string, message?: string): Promise<void> {
   ];
 
   app.append(
-    breadcrumbs(data.path),
     pageHeader(
       "Group",
-      data.path,
+      "",
       data.description,
       pageActions,
     ),

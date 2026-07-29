@@ -558,6 +558,7 @@ a:hover {
   background: var(--brand-plate);
   border-radius: 4px;
   display: flex;
+  flex: 0 0 auto;
   height: 2.5rem;
   overflow: hidden;
   width: 7.5rem;
@@ -569,6 +570,60 @@ a:hover {
   object-fit: cover;
   transform: scale(1.18);
   width: 100%;
+}
+
+.location-context {
+  align-items: center;
+  border-left: 1px solid var(--border);
+  display: flex;
+  font-size: 0.9rem;
+  font-weight: 650;
+  margin-left: 0.85rem;
+  max-width: 25rem;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0.35rem 0 0.35rem 0.85rem;
+}
+
+.location-context ol {
+  align-items: center;
+  display: flex;
+  list-style: none;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.location-context li {
+  align-items: center;
+  display: flex;
+  min-width: 0;
+}
+
+.location-context li:not(:last-child)::after {
+  color: var(--muted);
+  content: "/";
+  flex: 0 0 auto;
+  margin: 0 0.4rem;
+}
+
+.location-context li:last-child {
+  flex: 0 1 auto;
+}
+
+.location-context a {
+  color: var(--muted);
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.location-context a:hover,
+.location-context a[aria-current="page"] {
+  color: var(--accent);
 }
 
 .global-navigation {
@@ -754,12 +809,12 @@ a:hover {
   border-color: transparent;
 }
 
-nav[aria-label="Breadcrumb"] {
+.breadcrumbs {
   margin-bottom: 1rem;
   overflow-x: auto;
 }
 
-nav[aria-label="Breadcrumb"] ol {
+.breadcrumbs ol {
   align-items: center;
   display: flex;
   gap: 0.4rem;
@@ -769,7 +824,7 @@ nav[aria-label="Breadcrumb"] ol {
   padding: 0;
 }
 
-nav[aria-label="Breadcrumb"] li {
+.breadcrumbs li {
   align-items: center;
   color: var(--muted);
   display: flex;
@@ -777,17 +832,17 @@ nav[aria-label="Breadcrumb"] li {
   gap: 0.4rem;
 }
 
-nav[aria-label="Breadcrumb"] li:not(:last-child)::after {
+.breadcrumbs li:not(:last-child)::after {
   color: var(--muted);
   content: "/";
 }
 
-nav[aria-label="Breadcrumb"] a {
+.breadcrumbs a {
   color: var(--muted);
   text-decoration: none;
 }
 
-nav[aria-label="Breadcrumb"] a:hover {
+.breadcrumbs a:hover {
   color: var(--accent);
 }
 
@@ -842,6 +897,13 @@ h3 {
   color: var(--muted);
   line-height: 1.55;
   margin: 0.55rem 0 0;
+  max-width: 46rem;
+}
+
+.repository-page-description {
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 0 0 1.25rem;
   max-width: 46rem;
 }
 
@@ -3131,6 +3193,11 @@ table {
     width: 6.5rem;
   }
 
+  .location-context {
+    margin-left: 0.6rem;
+    padding-left: 0.6rem;
+  }
+
   .global-navigation a {
     padding: 0 0.55rem;
   }
@@ -3471,6 +3538,12 @@ table {
 
   .member-row > button {
     justify-self: end;
+  }
+}
+
+@media (max-width: 34rem) {
+  .location-context {
+    display: none;
   }
 }
 
