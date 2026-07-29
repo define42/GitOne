@@ -13,6 +13,7 @@ import (
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
@@ -33,6 +34,17 @@ type GroupInfo struct {
 	Repositories []string
 }
 
+func pathEntryExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
 func (s Store) GitPath(r repopath.Repository) (string, error) {
 	return repopath.SafeJoin(s.Root, append(r.Groups, r.Name+".git")...)
 }
@@ -43,6 +55,10 @@ func (s Store) LFSPath(r repopath.Repository) (string, error) {
 
 func (s Store) BuildPath(r repopath.Repository) (string, error) {
 	return repopath.SafeJoin(s.Root, append(r.Groups, r.Name+".build")...)
+}
+
+func (s Store) ReviewPath(r repopath.Repository) (string, error) {
+	return repopath.SafeJoin(s.Root, append(r.Groups, r.Name+".reviews")...)
 }
 
 func (s Store) GroupPath(group string) (string, error) {
@@ -96,7 +112,8 @@ func (s Store) ListGroups() ([]GroupInfo, error) {
 			if !entry.IsDir() ||
 				strings.HasSuffix(entry.Name(), ".git") ||
 				strings.HasSuffix(entry.Name(), ".lfs") ||
-				strings.HasSuffix(entry.Name(), ".build") {
+				strings.HasSuffix(entry.Name(), ".build") ||
+				strings.HasSuffix(entry.Name(), ".reviews") {
 				continue
 			}
 			nextParts := append(append([]string(nil), parts...), entry.Name())
@@ -116,9 +133,31 @@ func (s Store) ListGroups() ([]GroupInfo, error) {
 }
 
 func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryOptions) error {
+	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return s.CreateRepositoryLocked(r, options)
+}
+
+// CreateRepositoryLocked creates a repository while its caller holds the
+// repository operations lock.
+func (s Store) CreateRepositoryLocked(
+	r repopath.Repository,
+	options CreateRepositoryOptions,
+) error {
 	if r.Name == "control" {
 		return errors.New("reserved repository name")
 	}
+	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+		return s.createRepository(r, options)
+	})
+}
+
+func (s Store) createRepository(r repopath.Repository, options CreateRepositoryOptions) error {
 	gp, e := s.GroupPath(r.Group())
 	if e != nil {
 		return e
@@ -126,10 +165,30 @@ func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryO
 	if _, e = os.Stat(filepath.Join(gp, "control.git")); e != nil {
 		return errors.New("group does not exist")
 	}
-	gitp, _ := s.GitPath(r)
-	lfsp, _ := s.LFSPath(r)
-	if _, e = os.Stat(gitp); e == nil {
-		return errors.New("repository exists")
+	gitp, e := s.GitPath(r)
+	if e != nil {
+		return e
+	}
+	lfsp, e := s.LFSPath(r)
+	if e != nil {
+		return e
+	}
+	buildp, e := s.BuildPath(r)
+	if e != nil {
+		return e
+	}
+	reviewp, e := s.ReviewPath(r)
+	if e != nil {
+		return e
+	}
+	for _, existing := range []string{gitp, lfsp, buildp, reviewp} {
+		exists, statErr := pathEntryExists(existing)
+		if statErr != nil {
+			return statErr
+		}
+		if exists {
+			return errors.New("repository data already exists")
+		}
 	}
 	if e = os.MkdirAll(gp, 0o750); e != nil {
 		return e
@@ -268,6 +327,25 @@ func plumbingSymbolicMain() *plumbing.Reference {
 }
 
 func (s Store) CreateGroup(group, owner, description string) error {
+	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return s.CreateGroupLocked(group, owner, description)
+}
+
+// CreateGroupLocked creates a group while its caller holds the repository
+// operations lock.
+func (s Store) CreateGroupLocked(group, owner, description string) error {
+	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+		return s.createGroup(group, owner, description)
+	})
+}
+
+func (s Store) createGroup(group, owner, description string) error {
 	gp, e := s.GroupPath(group)
 	if e != nil {
 		return e
@@ -350,9 +428,30 @@ func (s Store) CreateGroup(group, owner, description string) error {
 }
 
 func (s Store) UpdateGroupControl(group string, document control.Document, author string) error {
+	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return s.UpdateGroupControlLocked(group, document, author)
+}
+
+// UpdateGroupControlLocked commits control state while its caller holds the
+// repository operations lock.
+func (s Store) UpdateGroupControlLocked(
+	group string,
+	document control.Document,
+	author string,
+) error {
 	if err := control.Validate(group, document); err != nil {
 		return err
 	}
+	return s.updateGroupControl(group, document, author)
+}
+
+func (s Store) updateGroupControl(group string, document control.Document, author string) error {
 	groupPath, err := s.GroupPath(group)
 	if err != nil {
 		return err
@@ -455,6 +554,19 @@ func (s Store) UpdateGroupControl(group string, document control.Document, autho
 }
 
 func (s Store) DeleteRepository(r repopath.Repository) error {
+	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return s.DeleteRepositoryLocked(r)
+}
+
+// DeleteRepositoryLocked deletes repository data while its caller holds the
+// repository operations lock.
+func (s Store) DeleteRepositoryLocked(r repopath.Repository) error {
 	gitp, err := s.GitPath(r)
 	if err != nil {
 		return err
@@ -467,26 +579,83 @@ func (s Store) DeleteRepository(r repopath.Repository) error {
 	if err != nil {
 		return err
 	}
+	reviewp, err := s.ReviewPath(r)
+	if err != nil {
+		return err
+	}
 	trash, err := repopath.SafeJoin(s.Root, ".trash", time.Now().UTC().Format("20060102T150405.000000000"), r.Group())
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(trash, 0o750); err != nil {
-		return err
-	}
-	if err = os.Rename(gitp, filepath.Join(trash, r.Name+".git")); err != nil {
-		return err
-	}
-	if _, statErr := os.Stat(lfsp); statErr == nil {
-		_ = os.Rename(lfsp, filepath.Join(trash, r.Name+".lfs"))
-	}
-	if _, statErr := os.Stat(buildp); statErr == nil {
-		_ = os.Rename(buildp, filepath.Join(trash, r.Name+".build"))
-	}
-	return nil
+	reviews := review.NewStore(s.Root)
+	return reviews.WithLifecycleLockHeld(func() error {
+		if err = os.MkdirAll(trash, 0o750); err != nil {
+			return err
+		}
+		type repositoryMove struct {
+			source      string
+			destination string
+		}
+		moves := []repositoryMove{{
+			source:      gitp,
+			destination: filepath.Join(trash, r.Name+".git"),
+		}}
+		for _, sidecar := range []repositoryMove{
+			{source: lfsp, destination: filepath.Join(trash, r.Name+".lfs")},
+			{source: buildp, destination: filepath.Join(trash, r.Name+".build")},
+			{source: reviewp, destination: filepath.Join(trash, r.Name+".reviews")},
+		} {
+			exists, statErr := pathEntryExists(sidecar.source)
+			if statErr != nil {
+				return statErr
+			}
+			if exists {
+				moves = append(moves, sidecar)
+			}
+		}
+		for _, move := range moves {
+			exists, statErr := pathEntryExists(move.destination)
+			if statErr != nil {
+				return statErr
+			}
+			if exists {
+				return fmt.Errorf("trash destination already exists: %s", move.destination)
+			}
+		}
+		for index, move := range moves {
+			if err = os.Rename(move.source, move.destination); err == nil {
+				continue
+			}
+			var rollbackErr error
+			for rollback := index - 1; rollback >= 0; rollback-- {
+				candidate := moves[rollback]
+				if restoreErr := os.Rename(candidate.destination, candidate.source); restoreErr != nil {
+					rollbackErr = errors.Join(rollbackErr, restoreErr)
+				}
+			}
+			if rollbackErr != nil {
+				return errors.Join(err, fmt.Errorf("restore repository after failed delete: %w", rollbackErr))
+			}
+			return err
+		}
+		return nil
+	})
 }
 
 func (s Store) RenameRepository(r repopath.Repository, newName string) error {
+	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return s.RenameRepositoryLocked(r, newName)
+}
+
+// RenameRepositoryLocked renames repository data while its caller holds the
+// repository operations lock.
+func (s Store) RenameRepositoryLocked(r repopath.Repository, newName string) error {
 	if newName == "" || newName == "control" || filepath.Base(newName) != newName {
 		return errors.New("invalid repository name")
 	}
@@ -502,6 +671,14 @@ func (s Store) RenameRepository(r repopath.Repository, newName string) error {
 	if err != nil {
 		return err
 	}
+	reviewp, err := s.ReviewPath(r)
+	if err != nil {
+		return err
+	}
+	renamed := repopath.Repository{
+		Groups: append([]string(nil), r.Groups...),
+		Name:   newName,
+	}
 	dstGit, err := repopath.SafeJoin(s.Root, append(r.Groups, newName+".git")...)
 	if err != nil {
 		return err
@@ -514,30 +691,108 @@ func (s Store) RenameRepository(r repopath.Repository, newName string) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Rename(gitp, dstGit); err != nil {
+	dstReview, err := s.ReviewPath(renamed)
+	if err != nil {
 		return err
 	}
+	reviews := review.NewStore(s.Root)
+	gitMoved := false
 	lfsMoved := false
-	if _, statErr := os.Stat(lfsp); statErr == nil {
-		if err = os.Rename(lfsp, dstLFS); err != nil {
-			_ = os.Rename(dstGit, gitp)
-			return err
-		}
-		lfsMoved = true
-	}
-	if _, statErr := os.Stat(buildp); statErr == nil {
-		if err = os.Rename(buildp, dstBuild); err != nil {
-			if lfsMoved {
-				_ = os.Rename(dstLFS, lfsp)
+	buildMoved := false
+	return reviews.MoveRepositoryLocked(
+		r,
+		renamed,
+		func() error {
+			for _, destination := range []string{dstGit, dstLFS, dstBuild, dstReview} {
+				exists, statErr := pathEntryExists(destination)
+				if statErr != nil {
+					return statErr
+				}
+				if exists {
+					return fmt.Errorf("destination repository data already exists: %s", destination)
+				}
 			}
-			_ = os.Rename(dstGit, gitp)
-			return err
-		}
-	}
-	return nil
+			lfsExists, existsErr := pathEntryExists(lfsp)
+			if existsErr != nil {
+				return existsErr
+			}
+			buildExists, existsErr := pathEntryExists(buildp)
+			if existsErr != nil {
+				return existsErr
+			}
+			reviewExists, existsErr := pathEntryExists(reviewp)
+			if existsErr != nil {
+				return existsErr
+			}
+			if reviewExists {
+				info, statErr := os.Lstat(reviewp)
+				if statErr != nil {
+					return statErr
+				}
+				if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					return errors.New("review store is not a directory")
+				}
+			}
+			if renameErr := os.Rename(gitp, dstGit); renameErr != nil {
+				return renameErr
+			}
+			gitMoved = true
+			if lfsExists {
+				if renameErr := os.Rename(lfsp, dstLFS); renameErr != nil {
+					return renameErr
+				}
+				lfsMoved = true
+			}
+			if buildExists {
+				if renameErr := os.Rename(buildp, dstBuild); renameErr != nil {
+					return renameErr
+				}
+				buildMoved = true
+			}
+			return nil
+		},
+		func() error {
+			var rollbackErr error
+			if buildMoved {
+				if restoreErr := os.Rename(dstBuild, buildp); restoreErr != nil {
+					rollbackErr = errors.Join(rollbackErr, restoreErr)
+				}
+			}
+			if lfsMoved {
+				if restoreErr := os.Rename(dstLFS, lfsp); restoreErr != nil {
+					rollbackErr = errors.Join(rollbackErr, restoreErr)
+				}
+			}
+			if gitMoved {
+				if restoreErr := os.Rename(dstGit, gitp); restoreErr != nil {
+					rollbackErr = errors.Join(rollbackErr, restoreErr)
+				}
+			}
+			return rollbackErr
+		},
+	)
 }
 
 func (s Store) DeleteGroup(group string) error {
+	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return s.DeleteGroupLocked(group)
+}
+
+// DeleteGroupLocked deletes a group while its caller holds the repository
+// operations lock.
+func (s Store) DeleteGroupLocked(group string) error {
+	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+		return s.deleteGroup(group)
+	})
+}
+
+func (s Store) deleteGroup(group string) error {
 	gp, err := s.GroupPath(group)
 	if err != nil {
 		return err
@@ -562,6 +817,19 @@ func (s Store) DeleteGroup(group string) error {
 }
 
 func (s Store) RenameGroup(group, newPath string) error {
+	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return s.RenameGroupLocked(group, newPath)
+}
+
+// RenameGroupLocked renames a group while its caller holds the repository
+// operations lock.
+func (s Store) RenameGroupLocked(group, newPath string) error {
 	if newPath == group || strings.HasPrefix(newPath, group+"/") {
 		return errors.New("cannot move a group into itself")
 	}
@@ -573,21 +841,35 @@ func (s Store) RenameGroup(group, newPath string) error {
 	if err != nil {
 		return err
 	}
-	if _, err = os.Stat(dst); err == nil {
-		return errors.New("destination group exists")
-	}
 	root, err := repopath.SafeJoin(s.Root)
 	if err != nil {
 		return err
 	}
-	parent := filepath.Dir(dst)
-	if parent != root {
-		if _, err = os.Stat(filepath.Join(parent, "control.git")); err != nil {
-			return errors.New("destination parent group does not exist")
-		}
-	}
-	if err = os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return err
-	}
-	return os.Rename(src, dst)
+	reviews := review.NewStore(s.Root)
+	return reviews.MoveGroupLocked(
+		group,
+		newPath,
+		func() error {
+			destinationExists, existsErr := pathEntryExists(dst)
+			if existsErr != nil {
+				return existsErr
+			}
+			if destinationExists {
+				return errors.New("destination group exists")
+			}
+			parent := filepath.Dir(dst)
+			if parent != root {
+				if _, parentErr := os.Stat(
+					filepath.Join(parent, "control.git"),
+				); parentErr != nil {
+					return errors.New("destination parent group does not exist")
+				}
+			}
+			if mkdirErr := os.MkdirAll(parent, 0o750); mkdirErr != nil {
+				return mkdirErr
+			}
+			return os.Rename(src, dst)
+		},
+		func() error { return os.Rename(dst, src) },
+	)
 }

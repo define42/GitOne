@@ -15,7 +15,9 @@ import (
 
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
+	git "github.com/go-git/go-git/v5"
 )
 
 const maximumUploadBytes int64 = 100 << 30
@@ -72,11 +74,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.authorize(w, r, repo, r.Method == http.MethodPut) {
 			return
 		}
-		policy, ok := h.policy(w, r, repo)
+		_, ok := h.policy(w, r, repo)
 		if !ok {
 			return
 		}
-		h.object(w, r, repo, strings.TrimPrefix(suffix, "/info/lfs/objects/"), policy)
+		h.object(w, r, repo, strings.TrimPrefix(suffix, "/info/lfs/objects/"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -203,36 +205,64 @@ func (h Handler) object(
 	r *http.Request,
 	repo repopath.Repository,
 	oid string,
-	policy control.RepositoryPolicy,
 ) {
 	if !validOID(oid) {
 		http.Error(w, "invalid oid", 400)
 		return
 	}
-	p, e := h.objectPath(repo, oid)
-	if e != nil {
-		http.Error(w, "bad path", 400)
-		return
-	}
 	switch r.Method {
 	case http.MethodPut:
+		releaseOperation, err := review.NewStore(h.Storage.Root).AcquireOperationLock()
+		if err != nil {
+			http.Error(w, "could not lock repository operations", http.StatusInternalServerError)
+			return
+		}
+		defer func() {
+			_ = releaseOperation()
+		}()
+		if !h.authorize(w, r, repo, true) {
+			return
+		}
+		policy, ok := h.policy(w, r, repo)
+		if !ok {
+			return
+		}
+		gitPath, err := h.Storage.GitPath(repo)
+		if err != nil {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		if _, err = git.PlainOpen(gitPath); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		p, err := h.objectPath(repo, oid)
+		if err != nil {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
 		if policy.LFS.MaximumObjectBytes > 0 &&
 			r.ContentLength > policy.LFS.MaximumObjectBytes {
 			http.Error(w, "object exceeds the repository LFS object limit", http.StatusUnprocessableEntity)
 			return
 		}
-		if e = h.upload(r, repo, p, oid, policy.LFS); e != nil {
-			http.Error(w, e.Error(), http.StatusUnprocessableEntity)
+		if err = h.upload(r, repo, p, oid, policy.LFS); err != nil {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
 		w.WriteHeader(200)
 	case http.MethodGet, http.MethodHead:
-		f, e := os.Open(p)
-		if errors.Is(e, os.ErrNotExist) {
+		p, err := h.objectPath(repo, oid)
+		if err != nil {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		f, err := os.Open(p)
+		if errors.Is(err, os.ErrNotExist) {
 			http.NotFound(w, r)
 			return
 		}
-		if e != nil {
+		if err != nil {
 			http.Error(w, "storage error", 500)
 			return
 		}

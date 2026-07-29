@@ -14,6 +14,7 @@ import (
 
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -683,6 +684,117 @@ func TestNativeGitPushNotifiesRepositoryUpdate(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("repository update notification was not received")
+	}
+}
+
+func TestNativeGitPushWaitsForRepositoryOperationLock(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is not available")
+	}
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	receiveReached := make(chan struct{}, 1)
+	server := httptest.NewServer(Handler{
+		Storage: store,
+		Authorize: func(request *http.Request, _ repopath.Repository, _ bool) (bool, bool) {
+			if request.Method == http.MethodPost &&
+				strings.HasSuffix(request.URL.Path, "/git-receive-pack") {
+				select {
+				case receiveReached <- struct{}{}:
+				default:
+				}
+			}
+			return true, true
+		},
+	})
+	defer server.Close()
+
+	checkout := filepath.Join(t.TempDir(), "api")
+	runGit(t, "", "clone", server.URL+"/engineering/api.git", checkout)
+	runGit(t, checkout, "config", "user.name", "alice")
+	runGit(t, checkout, "config", "user.email", "alice@localhost")
+	if err := os.WriteFile(filepath.Join(checkout, "api.go"), []byte("package api\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, checkout, "add", "api.go")
+	runGit(t, checkout, "commit", "-m", "Add API")
+	expected := strings.TrimSpace(runGitOutput(t, checkout, "rev-parse", "HEAD"))
+
+	gitPath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := review.NewStore(store.Root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	type pushResult struct {
+		output []byte
+		err    error
+	}
+	pushDone := make(chan pushResult, 1)
+	go func() {
+		command := exec.Command("git", "push", "origin", "main")
+		command.Dir = checkout
+		command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		output, pushErr := command.CombinedOutput()
+		pushDone <- pushResult{output: output, err: pushErr}
+	}()
+	select {
+	case <-receiveReached:
+	case <-time.After(2 * time.Second):
+		_ = release()
+		t.Fatal("push did not reach receive-pack")
+	}
+	select {
+	case result := <-pushDone:
+		_ = release()
+		t.Fatalf("push completed while operation lock was held: %v\n%s", result.err, result.output)
+	case <-time.After(100 * time.Millisecond):
+	}
+	during, err := repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		_ = release()
+		t.Fatal(err)
+	}
+	if during.Hash() != before.Hash() {
+		_ = release()
+		t.Fatalf("main changed under operation lock: %s -> %s", before.Hash(), during.Hash())
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-pushDone:
+		if result.err != nil {
+			t.Fatalf("push failed after operation lock release: %v\n%s", result.err, result.output)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("push did not resume after operation lock release")
+	}
+	after, err := repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Hash().String() != expected {
+		t.Fatalf("main = %s, want %s", after.Hash(), expected)
 	}
 }
 

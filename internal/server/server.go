@@ -11,6 +11,7 @@ import (
 	"github.com/define42/GitOne/internal/httpapi"
 	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/runner"
 	"github.com/define42/GitOne/internal/storage"
 	"github.com/define42/GitOne/internal/webui"
@@ -75,6 +76,7 @@ func New(c Config) http.Handler {
 	}
 	mux := http.NewServeMux()
 	buildStore := runner.NewStore(c.Root)
+	reviewStore := review.NewStore(c.Root)
 	var scheduler runner.Scheduler
 	if c.Coordinator != nil {
 		buildStore = c.Coordinator.Store()
@@ -85,6 +87,7 @@ func New(c Config) http.Handler {
 		Resolver:    ar,
 		Sessions:    sessions,
 		Builds:      &buildStore,
+		Reviews:     reviewStore,
 		Scheduler:   scheduler,
 		Coordinator: c.Coordinator,
 		RunnerToken: c.RunnerToken,
@@ -122,8 +125,12 @@ func New(c Config) http.Handler {
 			repository repopath.Repository,
 			updates []githttp.ReferenceUpdate,
 		) {
+			schedule := scheduler.Schedule
+			if locked, ok := scheduler.(runner.LockedScheduler); ok {
+				schedule = locked.ScheduleLocked
+			}
 			for _, update := range updates {
-				if _, err := scheduler.Schedule(repository, update.Branch, update.Commit); err != nil {
+				if _, err := schedule(repository, update.Branch, update.Commit); err != nil {
 					log.Printf(
 						"could not schedule build for %s@%s: %v",
 						repository.Full(),

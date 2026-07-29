@@ -22,6 +22,13 @@ type Scheduler interface {
 	Schedule(repopath.Repository, string, plumbing.Hash) (*Job, error)
 }
 
+// LockedScheduler lets callers that already hold the repository operations
+// lock schedule a build without recursively acquiring the process-wide gate.
+type LockedScheduler interface {
+	Scheduler
+	ScheduleLocked(repopath.Repository, string, plumbing.Hash) (*Job, error)
+}
+
 type CoordinatorConfig struct {
 	Storage       storage.Store
 	State         Store
@@ -72,11 +79,24 @@ func (c *Coordinator) Schedule(
 	branch string,
 	commit plumbing.Hash,
 ) (*Job, error) {
-	gitPath, err := c.storage.GitPath(repositoryPath)
+	releaseOperation, err := acquireBuildOperationLock(c.storage.Root)
 	if err != nil {
 		return nil, err
 	}
-	repository, err := git.PlainOpen(gitPath)
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return c.ScheduleLocked(repositoryPath, branch, commit)
+}
+
+// ScheduleLocked persists a queued build while its caller holds the repository
+// operations lock.
+func (c *Coordinator) ScheduleLocked(
+	repositoryPath repopath.Repository,
+	branch string,
+	commit plumbing.Hash,
+) (*Job, error) {
+	repository, err := openRepositoryForBuild(c.storage, repositoryPath)
 	if err != nil {
 		return nil, err
 	}
@@ -113,6 +133,13 @@ func (c *Coordinator) Claim(runnerID string) (*Lease, error) {
 	if !validRunnerID(runnerID) {
 		return nil, errors.New("invalid runner ID")
 	}
+	releaseOperation, err := acquireBuildOperationLock(c.storage.Root)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -166,6 +193,13 @@ func (c *Coordinator) Heartbeat(
 	id string,
 	runnerID string,
 ) (time.Time, error) {
+	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	job, err := c.ownedRunningJob(repository, id, runnerID)
@@ -187,6 +221,13 @@ func (c *Coordinator) AppendLog(
 	offset int64,
 	contents []byte,
 ) (int64, error) {
+	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	job, err := c.ownedRunningJob(repository, id, runnerID)
@@ -211,6 +252,13 @@ func (c *Coordinator) Complete(
 	runnerID string,
 	buildError string,
 ) (Job, error) {
+	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository)
+	if err != nil {
+		return Job{}, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	job, err := c.ownedRunningJob(repository, id, runnerID)

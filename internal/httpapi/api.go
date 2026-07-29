@@ -13,6 +13,7 @@ import (
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/runner"
 	"github.com/define42/GitOne/internal/storage"
 )
@@ -22,6 +23,7 @@ type API struct {
 	Resolver    *auth.Resolver
 	Sessions    *auth.SessionManager
 	Builds      *runner.Store
+	Reviews     *review.Store
 	Scheduler   runner.Scheduler
 	Coordinator *runner.Coordinator
 	RunnerToken string
@@ -283,6 +285,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 
 	registerRepositoryBrowser(api, service)
 	registerBuildAPI(api, service)
+	registerReviewAPI(api, service)
 
 	return api
 }
@@ -428,6 +431,14 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	a.Resolver.Controls.Invalidate(path)
 	author, err := a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
 	if err != nil {
 		return nil, err
@@ -496,11 +507,11 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	}
 
 	if target == path {
-		if err = a.Storage.UpdateGroupControl(path, document, author); err != nil {
+		if err = a.Storage.UpdateGroupControlLocked(path, document, author); err != nil {
 			return nil, huma.Error500InternalServerError("could not update group settings", err)
 		}
 		a.Resolver.Controls.Invalidate(path)
-	} else if err = a.renameGroupControls(ctx, path, target, document, author); err != nil {
+	} else if err = a.renameGroupControlsLocked(ctx, path, target, document, author); err != nil {
 		return nil, huma.Error409Conflict("could not rename group", err)
 	}
 
@@ -518,6 +529,23 @@ type groupControlRename struct {
 }
 
 func (a API) renameGroupControls(
+	ctx context.Context,
+	path string,
+	target string,
+	current control.Document,
+	author string,
+) error {
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return a.renameGroupControlsLocked(ctx, path, target, current, author)
+}
+
+func (a API) renameGroupControlsLocked(
 	ctx context.Context,
 	path string,
 	target string,
@@ -556,15 +584,19 @@ func (a API) renameGroupControls(
 	if len(renames) == 0 {
 		return fmt.Errorf("group not found")
 	}
-	if err = a.Storage.RenameGroup(path, target); err != nil {
+	if err = a.Storage.RenameGroupLocked(path, target); err != nil {
 		return err
 	}
 	for _, rename := range renames {
-		if err = a.Storage.UpdateGroupControl(rename.newPath, rename.updated, author); err != nil {
-			rollbackErr := a.Storage.RenameGroup(target, path)
+		if err = a.Storage.UpdateGroupControlLocked(rename.newPath, rename.updated, author); err != nil {
+			rollbackErr := a.Storage.RenameGroupLocked(target, path)
 			if rollbackErr == nil {
 				for _, rollback := range renames {
-					_ = a.Storage.UpdateGroupControl(rollback.oldPath, rollback.original, author)
+					_ = a.Storage.UpdateGroupControlLocked(
+						rollback.oldPath,
+						rollback.original,
+						author,
+					)
 				}
 			}
 			a.invalidateGroupRenames(renames)
@@ -590,6 +622,14 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	a.Resolver.Controls.Invalidate(path)
 	owner := ""
 	if strings.Contains(path, "/") {
 		owner, err = a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
@@ -603,9 +643,10 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 		}
 		owner = identity.Name
 	}
-	if err = a.Storage.CreateGroup(path, owner, input.Description); err != nil {
+	if err = a.Storage.CreateGroupLocked(path, owner, input.Description); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
+	a.Resolver.Controls.Invalidate(path)
 	output := &createGroupOutput{}
 	output.Body.Path = path
 	return output, nil
@@ -620,6 +661,14 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	a.Resolver.Controls.Invalidate(path)
 	author, err := a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
 	if err != nil {
 		return nil, err
@@ -629,7 +678,7 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 		return nil, huma.Error500InternalServerError("could not load group settings", err)
 	}
 	document.Group = newPath
-	if err = a.renameGroupControls(ctx, path, newPath, document, author); err != nil {
+	if err = a.renameGroupControlsLocked(ctx, path, newPath, document, author); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
 	return &emptyOutput{}, nil
@@ -640,12 +689,21 @@ func (a API) deleteGroup(ctx context.Context, input *GroupPathInput) (*emptyOutp
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	a.Resolver.Controls.Invalidate(path)
 	if _, err = a.authorize(ctx, input.AuthInput, path, control.RoleAdmin); err != nil {
 		return nil, err
 	}
-	if err = a.Storage.DeleteGroup(path); err != nil {
+	if err = a.Storage.DeleteGroupLocked(path); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
+	a.Resolver.Controls.Invalidate(path)
 	return &emptyOutput{}, nil
 }
 
@@ -654,11 +712,19 @@ func (a API) createRepository(ctx context.Context, input *createRepositoryInput)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	a.Resolver.Controls.Invalidate(repository.Group())
 	principal, err := a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin)
 	if err != nil {
 		return nil, err
 	}
-	if err = a.Storage.CreateRepository(repository, storage.CreateRepositoryOptions{
+	if err = a.Storage.CreateRepositoryLocked(repository, storage.CreateRepositoryOptions{
 		InitializeReadme: input.InitializeReadme,
 		Author:           principal.Name,
 		Description:      input.Description,
@@ -676,10 +742,21 @@ func (a API) renameRepository(ctx context.Context, input *renameRepositoryInput)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	a.Resolver.Controls.Invalidate(repository.Group())
 	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin); err != nil {
 		return nil, err
 	}
-	if err = a.Storage.RenameRepository(repository, strings.TrimSuffix(input.Body.NewName, ".git")); err != nil {
+	if err = a.Storage.RenameRepositoryLocked(
+		repository,
+		strings.TrimSuffix(input.Body.NewName, ".git"),
+	); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
 	return &emptyOutput{}, nil
@@ -690,10 +767,18 @@ func (a API) deleteRepository(ctx context.Context, input *RepositoryPathInput) (
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	a.Resolver.Controls.Invalidate(repository.Group())
 	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin); err != nil {
 		return nil, err
 	}
-	if err = a.Storage.DeleteRepository(repository); err != nil {
+	if err = a.Storage.DeleteRepositoryLocked(repository); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
 	return &emptyOutput{}, nil

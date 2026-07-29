@@ -55,6 +55,7 @@ interface RepositoryBranch {
 interface RepositoryBranches {
   repository: string;
   defaultBranch: string;
+  canWrite: boolean;
   branches: RepositoryBranch[];
 }
 
@@ -177,12 +178,72 @@ interface RepositoryComparison {
   files: RepositoryComparisonFile[];
 }
 
-interface RepositoryMerge {
+type RepositoryMergeRequestState = "open" | "closed" | "merged";
+type RepositoryMergeRequestTab = "conversation" | "changes";
+
+interface RepositoryMergeRequestApproval {
+  author: string;
+  headCommit: string;
+  createdAt: string;
+  current: boolean;
+}
+
+interface RepositoryMergeRequestComment {
+  id: number;
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
+interface RepositoryMergeRequestThread {
+  id: number;
+  createdAt: string;
+  resolved: boolean;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  comments: RepositoryMergeRequestComment[];
+}
+
+interface RepositoryMergeRequest {
+  id: number;
   repository: string;
+  title: string;
+  description: string;
   target: string;
   source: string;
-  commit: string;
-  strategy: "already-up-to-date" | "fast-forward" | "merge-commit";
+  author: string;
+  state: RepositoryMergeRequestState;
+  createdAt: string;
+  updatedAt: string;
+  requiredApprovals: number;
+  currentApprovals: number;
+  staleApprovals: number;
+  unresolvedThreads: number;
+  headCommit: string;
+  targetCommit: string;
+  ahead: number;
+  behind: number;
+  mergeable: boolean;
+  conflicts: string[];
+  files: RepositoryComparisonFile[];
+  approvals: RepositoryMergeRequestApproval[];
+  threads: RepositoryMergeRequestThread[];
+  canApprove: boolean;
+  viewerApproved: boolean;
+  canMerge: boolean;
+  canUpdate: boolean;
+  mergeInProgress: boolean;
+  mergedCommit?: string;
+  mergedStrategy?: "already-up-to-date" | "fast-forward" | "merge-commit";
+  mergedBy?: string;
+  mergedAt?: string;
+  closedBy?: string;
+  closedAt?: string;
+}
+
+interface RepositoryMergeRequests {
+  repository: string;
+  mergeRequests: RepositoryMergeRequest[];
 }
 
 type RepositoryBuildStatus = "queued" | "running" | "succeeded" | "failed";
@@ -215,8 +276,11 @@ interface RepositoryBrowserRoute {
   ref: string;
   path: string;
   file: string | null;
-  view: "files" | "history" | "builds" | "blame";
+  view: "files" | "history" | "builds" | "blame" | "merge-requests";
   page: number;
+  mergeRequest?: number;
+  reviewTab: RepositoryMergeRequestTab;
+  mergeRequestState: RepositoryMergeRequestState;
 }
 
 interface Problem {
@@ -493,8 +557,11 @@ function repositoryBrowserURL(
     ref?: string;
     path?: string;
     file?: string;
-    view?: "files" | "history" | "builds" | "blame";
+    view?: RepositoryBrowserRoute["view"];
     page?: number;
+    mergeRequest?: number;
+    reviewTab?: RepositoryMergeRequestTab;
+    mergeRequestState?: RepositoryMergeRequestState;
   } = {},
 ): string {
   const encodedRepository = repository.split("/").map(encodeURIComponent).join("/");
@@ -513,6 +580,15 @@ function repositoryBrowserURL(
   }
   if (options.page && options.page > 1) {
     url.searchParams.set("page", String(options.page));
+  }
+  if (options.mergeRequest !== undefined) {
+    url.searchParams.set("request", String(options.mergeRequest));
+  }
+  if (options.reviewTab) {
+    url.searchParams.set("tab", options.reviewTab);
+  }
+  if (options.mergeRequestState) {
+    url.searchParams.set("state", options.mergeRequestState);
   }
   return `${url.pathname}${url.search}`;
 }
@@ -536,6 +612,49 @@ function repositoryComparisonAPIURL(
 
 function repositoryMergesAPIURL(repository: string): string {
   return `/api/repositories/${encodeURIComponent(repository)}/merges`;
+}
+
+function repositoryMergeRequestsAPIURL(
+  repository: string,
+  mergeRequest?: number,
+): string {
+  const collection = `/api/repositories/${encodeURIComponent(repository)}/merge-requests`;
+  return mergeRequest === undefined
+    ? collection
+    : `${collection}/${encodeURIComponent(String(mergeRequest))}`;
+}
+
+function repositoryMergeRequestThreadsAPIURL(
+  repository: string,
+  mergeRequest: number,
+  thread?: number,
+): string {
+  const collection = `${repositoryMergeRequestsAPIURL(repository, mergeRequest)}/threads`;
+  return thread === undefined
+    ? collection
+    : `${collection}/${encodeURIComponent(String(thread))}`;
+}
+
+function repositoryMergeRequestCommentsAPIURL(
+  repository: string,
+  mergeRequest: number,
+  thread: number,
+): string {
+  return `${repositoryMergeRequestThreadsAPIURL(repository, mergeRequest, thread)}/comments`;
+}
+
+function repositoryMergeRequestApprovalsAPIURL(
+  repository: string,
+  mergeRequest: number,
+): string {
+  return `${repositoryMergeRequestsAPIURL(repository, mergeRequest)}/approvals`;
+}
+
+function repositoryMergeRequestMergeAPIURL(
+  repository: string,
+  mergeRequest: number,
+): string {
+  return `${repositoryMergeRequestsAPIURL(repository, mergeRequest)}/merge`;
 }
 
 function repositoryCommitDiffAPIURL(repository: string, commit: string): string {
@@ -594,6 +713,9 @@ function currentRepository(): RepositoryBrowserRoute | null {
   const requestedView = parameters.get("view");
   const file = parameters.get("file");
   const requestedPage = Number.parseInt(parameters.get("page") ?? "1", 10);
+  const requestedMergeRequest = Number.parseInt(parameters.get("request") ?? "", 10);
+  const requestedReviewTab = parameters.get("tab");
+  const requestedMergeRequestState = parameters.get("state");
   const page = Number.isSafeInteger(requestedPage) && requestedPage > 0
     ? requestedPage
     : 1;
@@ -604,10 +726,19 @@ function currentRepository(): RepositoryBrowserRoute | null {
     file,
     view: requestedView === "history" ||
       requestedView === "builds" ||
+      requestedView === "merge-requests" ||
       (requestedView === "blame" && file !== null)
       ? requestedView
       : "files",
     page,
+    mergeRequest: Number.isSafeInteger(requestedMergeRequest) && requestedMergeRequest > 0
+      ? requestedMergeRequest
+      : undefined,
+    reviewTab: requestedReviewTab === "changes" ? "changes" : "conversation",
+    mergeRequestState: requestedMergeRequestState === "merged" ||
+      requestedMergeRequestState === "closed"
+      ? requestedMergeRequestState
+      : "open",
   };
 }
 
@@ -1623,6 +1754,24 @@ function repositoryBreadcrumbs(route: RepositoryBrowserRoute): HTMLElement {
     const buildsItem = element("li");
     buildsItem.append(element("span", "Builds"));
     list.append(buildsItem);
+  } else if (route.view === "merge-requests") {
+    const mergeRequestsItem = element("li");
+    if (route.mergeRequest === undefined) {
+      mergeRequestsItem.append(element("span", "Merge requests"));
+    } else {
+      const mergeRequests = element("a", "Merge requests");
+      mergeRequests.href = repositoryBrowserURL(route.repository, {
+        view: "merge-requests",
+        mergeRequestState: route.mergeRequestState,
+      });
+      mergeRequestsItem.append(mergeRequests);
+    }
+    list.append(mergeRequestsItem);
+    if (route.mergeRequest !== undefined) {
+      const mergeRequestItem = element("li");
+      mergeRequestItem.append(element("span", `!${route.mergeRequest}`));
+      list.append(mergeRequestItem);
+    }
   }
 
   const selectedPath = route.view === "files" || route.view === "blame"
@@ -2280,14 +2429,22 @@ function repositoryNavigation(route: RepositoryBrowserRoute): HTMLElement {
     ref: route.ref,
     view: "builds",
   });
+  const mergeRequests = element("a");
+  mergeRequests.append(icon("git-merge"), document.createTextNode("Merge requests"));
+  mergeRequests.href = repositoryBrowserURL(route.repository, {
+    view: "merge-requests",
+    mergeRequestState: "open",
+  });
   if (route.view === "history") {
     history.setAttribute("aria-current", "page");
   } else if (route.view === "builds") {
     builds.setAttribute("aria-current", "page");
+  } else if (route.view === "merge-requests") {
+    mergeRequests.setAttribute("aria-current", "page");
   } else {
     files.setAttribute("aria-current", "page");
   }
-  nav.append(files, history, builds);
+  nav.append(files, history, builds, mergeRequests);
   return nav;
 }
 
@@ -2301,6 +2458,11 @@ function repositoryBranchCreator(
   trigger.title = "New branch";
   const dialog = element("dialog");
   dialog.className = "action-dialog";
+  if (!data.canWrite) {
+    trigger.disabled = true;
+    trigger.title = "Write access is required to create a branch";
+    return {trigger, dialog};
+  }
   if (data.branches.length === 0) {
     trigger.disabled = true;
     trigger.title = "Create a commit before creating another branch";
@@ -2474,9 +2636,9 @@ function branchComparisonResult(
   const direction = element("div");
   direction.className = "comparison-direction";
   direction.append(
-    element("code", comparison.base),
-    icon("chevron-right"),
     element("code", comparison.head),
+    icon("chevron-right"),
+    element("code", comparison.base),
   );
   const stats = element("div");
   stats.className = "comparison-stats";
@@ -2519,78 +2681,100 @@ function branchComparisonResult(
       conflicts.append(element("li", path));
     }
     mergeStatus.append(conflicts);
-  } else if (comparison.canMerge && comparison.ahead > 0) {
-    const mergeAction = actionButton(
-      `Merge into ${comparison.base}`,
+  }
+  if (comparison.canMerge && comparison.ahead > 0) {
+    const createAction = actionButton(
+      "Create merge request",
       "git-merge",
       "primary",
     );
-    const confirmation = element("div");
-    confirmation.className = "merge-confirmation";
-    mergeAction.addEventListener("click", () => {
-      mergeAction.hidden = true;
-      const copy = element(
-        "span",
-        `Merge ${comparison.head} into ${comparison.base}?`,
-      );
-      const cancel = actionButton("Cancel", undefined, "secondary");
-      const confirm = actionButton("Merge branches", "git-merge", "primary");
-      cancel.addEventListener("click", () => {
-        confirmation.replaceChildren();
-        mergeAction.hidden = false;
-      });
-      confirm.addEventListener("click", async () => {
-        confirm.disabled = true;
-        cancel.disabled = true;
-        confirmation.setAttribute("aria-busy", "true");
-        try {
-          const merged = await request<RepositoryMerge>(
-            repositoryMergesAPIURL(route.repository),
-            {
-              method: "POST",
-              headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({
-                target: comparison.base,
-                source: comparison.head,
-              }),
-            },
-          );
-          dialog.close();
-          const nextRoute: RepositoryBrowserRoute = {
-            repository: route.repository,
-            ref: comparison.base,
-            path: "",
-            file: null,
-            view: "files",
-            page: 1,
-          };
-          window.history.pushState(
-            null,
-            "",
-            repositoryBrowserURL(route.repository, {ref: comparison.base}),
-          );
-          await renderRepositoryBrowser(nextRoute);
-          const action = merged.strategy === "fast-forward"
-            ? "fast-forwarded"
-            : merged.strategy === "already-up-to-date"
-              ? "was already up to date"
-              : "merged";
-          showStatus(
-            `${comparison.head} ${action} into ${comparison.base} at ${shortCommitHash(merged.commit)}.`,
-          );
-        } catch (reason) {
-          showStatus(
-            reason instanceof Error ? reason.message : "Could not merge the branches.",
-            true,
-          );
-          confirm.disabled = false;
-          cancel.disabled = false;
-          confirmation.removeAttribute("aria-busy");
-        }
-      });
-      confirmation.append(copy, cancel, confirm);
+    const creation = element("form");
+    creation.className = "merge-request-create";
+    creation.hidden = true;
+    const requestTitle = element("input");
+    requestTitle.name = "title";
+    requestTitle.required = true;
+    requestTitle.value = `Merge ${comparison.head} into ${comparison.base}`;
+    const description = element("textarea");
+    description.name = "description";
+    description.rows = 5;
+    description.placeholder = "Describe the change and anything reviewers should know.";
+    const actions = element("div");
+    actions.className = "merge-request-create-actions";
+    const submit = actionButton("Create merge request", "git-merge", "primary");
+    submit.type = "submit";
+    const cancel = actionButton("Cancel", undefined, "secondary");
+    actions.append(cancel, submit);
+    creation.append(
+      fieldLabel("Title", requestTitle),
+      fieldLabel("Description", description),
+      actions,
+    );
+    createAction.addEventListener("click", () => {
+      createAction.hidden = true;
+      creation.hidden = false;
+      requestTitle.focus();
+      requestTitle.select();
     });
-    mergeStatus.append(mergeAction, confirmation);
+    cancel.addEventListener("click", () => {
+      creation.hidden = true;
+      createAction.hidden = false;
+      createAction.focus();
+    });
+    creation.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      submit.disabled = true;
+      cancel.disabled = true;
+      creation.setAttribute("aria-busy", "true");
+      try {
+        const created = await request<RepositoryMergeRequest>(
+          repositoryMergeRequestsAPIURL(route.repository),
+          {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              title: requestTitle.value.trim(),
+              description: description.value,
+              target: comparison.base,
+              source: comparison.head,
+            }),
+          },
+        );
+        dialog.close();
+        const nextRoute: RepositoryBrowserRoute = {
+          repository: route.repository,
+          ref: comparison.base,
+          path: "",
+          file: null,
+          view: "merge-requests",
+          page: 1,
+          mergeRequest: created.id,
+          reviewTab: "conversation",
+          mergeRequestState: created.state,
+        };
+        window.history.pushState(
+          null,
+          "",
+          repositoryBrowserURL(route.repository, {
+            view: "merge-requests",
+            mergeRequest: created.id,
+            reviewTab: "conversation",
+            mergeRequestState: created.state,
+          }),
+        );
+        await renderRepositoryBrowser(nextRoute);
+        showStatus(`Merge request !${created.id} created.`);
+      } catch (reason) {
+        showStatus(
+          reason instanceof Error ? reason.message : "Could not create the merge request.",
+          true,
+        );
+        submit.disabled = false;
+        cancel.disabled = false;
+        creation.removeAttribute("aria-busy");
+      }
+    });
+    mergeStatus.append(createAction, creation);
   }
   result.append(mergeStatus);
 
@@ -2711,6 +2895,841 @@ function repositoryBranchComparison(
     }
   });
   return {trigger, dialog};
+}
+
+function mergeRequestStateBadge(state: RepositoryMergeRequestState): HTMLElement {
+  const badge = element("span");
+  badge.className = `merge-request-state merge-request-state-${state}`;
+  const label = state[0].toUpperCase() + state.slice(1);
+  badge.append(
+    icon(state === "merged" ? "git-merge" : state === "closed" ? "close" : "clock"),
+    document.createTextNode(label),
+  );
+  badge.setAttribute("aria-label", `Merge request state: ${label}`);
+  return badge;
+}
+
+function mergeRequestDirection(target: string, source: string): HTMLElement {
+  const direction = element("span");
+  direction.className = "merge-request-direction";
+  direction.append(
+    element("code", source),
+    icon("chevron-right"),
+    element("code", target),
+  );
+  direction.setAttribute("aria-label", `${source} into ${target}`);
+  return direction;
+}
+
+function mergeRequestBrowserURL(
+  route: RepositoryBrowserRoute,
+  options: {
+    mergeRequest?: number;
+    tab?: RepositoryMergeRequestTab;
+    state?: RepositoryMergeRequestState;
+  } = {},
+): string {
+  return repositoryBrowserURL(route.repository, {
+    view: "merge-requests",
+    mergeRequest: options.mergeRequest,
+    reviewTab: options.tab,
+    mergeRequestState: options.state ?? route.mergeRequestState,
+  });
+}
+
+async function showUpdatedMergeRequest(
+  route: RepositoryBrowserRoute,
+  updated: RepositoryMergeRequest,
+  message: string,
+): Promise<void> {
+  const nextRoute: RepositoryBrowserRoute = {
+    ...route,
+    mergeRequest: updated.id,
+    mergeRequestState: updated.state,
+  };
+  window.history.replaceState(
+    null,
+    "",
+    mergeRequestBrowserURL(nextRoute, {
+      mergeRequest: updated.id,
+      tab: nextRoute.reviewTab,
+      state: updated.state,
+    }),
+  );
+  await renderRepositoryBrowser(nextRoute);
+  showStatus(message);
+}
+
+function mergeRequestListItem(
+  route: RepositoryBrowserRoute,
+  mergeRequest: RepositoryMergeRequest,
+): HTMLLIElement {
+  const item = element("li");
+  const link = element("a");
+  link.className = "merge-request-list-item";
+  link.href = mergeRequestBrowserURL(route, {
+    mergeRequest: mergeRequest.id,
+    tab: "conversation",
+    state: route.mergeRequestState,
+  });
+
+  const header = element("div");
+  header.className = "merge-request-list-header";
+  const title = element("strong", mergeRequest.title);
+  const identity = element("span", `!${mergeRequest.id}`);
+  identity.className = "merge-request-number";
+  header.append(title, mergeRequestStateBadge(mergeRequest.state), identity);
+
+  const branches = mergeRequestDirection(mergeRequest.target, mergeRequest.source);
+  const metadata = element("div");
+  metadata.className = "merge-request-list-metadata";
+  const updated = element(
+    "span",
+    `${mergeRequest.author} updated ${relativeTime(mergeRequest.updatedAt)}`,
+  );
+  updated.title = new Date(mergeRequest.updatedAt).toLocaleString();
+  metadata.append(branches, updated);
+
+  const review = element("div");
+  review.className = "merge-request-list-review";
+  review.append(
+    element(
+      "span",
+      `${mergeRequest.currentApprovals}/${mergeRequest.requiredApprovals} approvals`,
+    ),
+    element(
+      "span",
+      `${mergeRequest.unresolvedThreads} unresolved`,
+    ),
+  );
+  if (mergeRequest.staleApprovals > 0) {
+    review.append(element("span", `${mergeRequest.staleApprovals} stale`));
+  }
+  if (!mergeRequest.mergeable && mergeRequest.state === "open") {
+    const conflicted = element("span", "Conflicts");
+    conflicted.className = "merge-request-conflict-label";
+    review.append(conflicted);
+  }
+
+  link.append(header, metadata, review);
+  item.append(link);
+  return item;
+}
+
+async function repositoryMergeRequestList(
+  route: RepositoryBrowserRoute,
+  compareTrigger: HTMLButtonElement,
+  canWrite: boolean,
+): Promise<HTMLElement> {
+  const data = await request<RepositoryMergeRequests>(
+    `${repositoryMergeRequestsAPIURL(route.repository)}?state=all`,
+  );
+  const mergeRequests = data.mergeRequests
+    .filter((mergeRequest) => mergeRequest.state === route.mergeRequestState)
+    .sort((left, right) =>
+      new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+    );
+
+  document.title = `Merge requests · ${route.repository} · GitOne`;
+  const section = element("section");
+  section.className = "content-section merge-request-list-view";
+  const actions: HTMLElement[] = [];
+  if (canWrite) {
+    const create = actionButton("New merge request", "git-merge", "primary");
+    create.disabled = compareTrigger.disabled;
+    create.title = compareTrigger.title;
+    create.addEventListener("click", () => compareTrigger.click());
+    actions.push(create);
+  }
+  section.append(sectionHeading("Merge requests", mergeRequests.length, actions));
+
+  const filters = element("nav");
+  filters.className = "merge-request-filters";
+  filters.setAttribute("aria-label", "Merge request state");
+  for (const state of ["open", "merged", "closed"] as RepositoryMergeRequestState[]) {
+    const count = data.mergeRequests.filter(
+      (mergeRequest) => mergeRequest.state === state,
+    ).length;
+    const label = state[0].toUpperCase() + state.slice(1);
+    const link = element("a", `${label} ${count}`);
+    link.href = mergeRequestBrowserURL(route, {state});
+    if (state === route.mergeRequestState) {
+      link.setAttribute("aria-current", "page");
+    }
+    filters.append(link);
+  }
+  section.append(filters);
+
+  if (mergeRequests.length === 0) {
+    section.append(emptyState(`No ${route.mergeRequestState} merge requests.`));
+    return section;
+  }
+  const list = element("ul");
+  list.className = "merge-request-list";
+  for (const mergeRequest of mergeRequests) {
+    list.append(mergeRequestListItem(route, mergeRequest));
+  }
+  section.append(list);
+  return section;
+}
+
+async function mergeRequestDescription(
+  mergeRequest: RepositoryMergeRequest,
+): Promise<HTMLElement> {
+  const card = element("section");
+  card.className = "merge-request-description";
+  const header = element("header");
+  const identity = element(
+    "span",
+    mergeRequest.author.slice(0, 1).toUpperCase() || "?",
+  );
+  identity.className = "commit-avatar";
+  const metadata = element("div");
+  const opened = element(
+    "span",
+    `opened ${relativeTime(mergeRequest.createdAt)}`,
+  );
+  opened.title = new Date(mergeRequest.createdAt).toLocaleString();
+  metadata.append(element("strong", mergeRequest.author), opened);
+  header.append(identity, metadata);
+  card.append(header);
+  if (mergeRequest.description.trim()) {
+    card.append(await markdownPreview(mergeRequest.description));
+  } else {
+    const empty = element("p", "No description provided.");
+    empty.className = "merge-request-empty-copy";
+    card.append(empty);
+  }
+  return card;
+}
+
+async function mergeRequestComment(
+  comment: RepositoryMergeRequestComment,
+): Promise<HTMLElement> {
+  const card = element("article");
+  card.className = "merge-request-comment";
+  const header = element("header");
+  const identity = element(
+    "span",
+    comment.author.slice(0, 1).toUpperCase() || "?",
+  );
+  identity.className = "commit-avatar";
+  const metadata = element("div");
+  const created = element("span", relativeTime(comment.createdAt));
+  created.title = new Date(comment.createdAt).toLocaleString();
+  metadata.append(element("strong", comment.author), created);
+  header.append(identity, metadata);
+  card.append(header, await markdownPreview(comment.body));
+  return card;
+}
+
+function mergeRequestReplyForm(
+  route: RepositoryBrowserRoute,
+  mergeRequest: RepositoryMergeRequest,
+  thread: RepositoryMergeRequestThread,
+): HTMLFormElement {
+  const form = element("form");
+  form.className = "merge-request-reply-form";
+  const body = element("textarea");
+  body.name = "body";
+  body.required = true;
+  body.rows = 3;
+  body.placeholder = "Reply with Markdown…";
+  const submit = actionButton("Reply", undefined, "secondary");
+  submit.type = "submit";
+  form.append(fieldLabel("Reply", body), submit);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    try {
+      await request<unknown>(
+        repositoryMergeRequestCommentsAPIURL(
+          route.repository,
+          mergeRequest.id,
+          thread.id,
+        ),
+        {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({body: body.value}),
+        },
+      );
+      await renderRepositoryBrowser(route);
+      showStatus("Reply added.");
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "Could not add the reply.",
+        true,
+      );
+      submit.disabled = false;
+      form.removeAttribute("aria-busy");
+    }
+  });
+  return form;
+}
+
+async function mergeRequestThread(
+  route: RepositoryBrowserRoute,
+  mergeRequest: RepositoryMergeRequest,
+  thread: RepositoryMergeRequestThread,
+): Promise<HTMLElement> {
+  const section = element("section");
+  section.className = thread.resolved
+    ? "merge-request-thread merge-request-thread-resolved"
+    : "merge-request-thread";
+  const header = element("header");
+  const title = element(
+    "strong",
+    thread.resolved ? "Resolved discussion" : "Discussion",
+  );
+  const metadata = element("span", relativeTime(thread.createdAt));
+  metadata.title = new Date(thread.createdAt).toLocaleString();
+  const heading = element("div");
+  heading.append(title, metadata);
+  header.append(heading);
+  const threadAuthor = thread.comments[0]?.author;
+  if (
+    mergeRequest.state === "open" &&
+    !mergeRequest.mergeInProgress &&
+    (
+      mergeRequest.canUpdate ||
+      threadAuthor === browserSession?.username ||
+      mergeRequest.author === browserSession?.username
+    )
+  ) {
+    const resolve = actionButton(
+      thread.resolved ? "Reopen" : "Resolve",
+      thread.resolved ? "refresh" : "check",
+      "secondary merge-request-thread-action",
+    );
+    resolve.addEventListener("click", async () => {
+      resolve.disabled = true;
+      try {
+        await request<unknown>(
+          repositoryMergeRequestThreadsAPIURL(
+            route.repository,
+            mergeRequest.id,
+            thread.id,
+          ),
+          {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({resolved: !thread.resolved}),
+          },
+        );
+        await renderRepositoryBrowser(route);
+        showStatus(thread.resolved ? "Discussion reopened." : "Discussion resolved.");
+      } catch (reason) {
+        showStatus(
+          reason instanceof Error ? reason.message : "Could not update the discussion.",
+          true,
+        );
+        resolve.disabled = false;
+      }
+    });
+    header.append(resolve);
+  }
+  section.append(header);
+
+  const comments = element("div");
+  comments.className = "merge-request-thread-comments";
+  for (const comment of thread.comments) {
+    comments.append(await mergeRequestComment(comment));
+  }
+  section.append(comments);
+  if (mergeRequest.state === "open" && !mergeRequest.mergeInProgress) {
+    section.append(mergeRequestReplyForm(route, mergeRequest, thread));
+  }
+  return section;
+}
+
+function mergeRequestNewThreadForm(
+  route: RepositoryBrowserRoute,
+  mergeRequest: RepositoryMergeRequest,
+): HTMLFormElement {
+  const form = element("form");
+  form.className = "merge-request-new-thread";
+  const body = element("textarea");
+  body.name = "body";
+  body.required = true;
+  body.rows = 5;
+  body.placeholder = "Start a discussion with Markdown…";
+  const submit = actionButton("Start discussion", undefined, "primary");
+  submit.type = "submit";
+  form.append(fieldLabel("New discussion", body), submit);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    try {
+      await request<unknown>(
+        repositoryMergeRequestThreadsAPIURL(route.repository, mergeRequest.id),
+        {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({body: body.value}),
+        },
+      );
+      await renderRepositoryBrowser(route);
+      showStatus("Discussion started.");
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "Could not start the discussion.",
+        true,
+      );
+      submit.disabled = false;
+      form.removeAttribute("aria-busy");
+    }
+  });
+  return form;
+}
+
+async function mergeRequestConversation(
+  route: RepositoryBrowserRoute,
+  mergeRequest: RepositoryMergeRequest,
+): Promise<HTMLElement> {
+  const conversation = element("div");
+  conversation.className = "merge-request-conversation";
+  conversation.append(await mergeRequestDescription(mergeRequest));
+
+  const discussions = element("section");
+  discussions.className = "merge-request-discussions";
+  discussions.append(
+    sectionHeading("Discussions", mergeRequest.threads.length),
+  );
+  if (mergeRequest.threads.length === 0) {
+    discussions.append(emptyState("No discussions yet."));
+  } else {
+    for (const thread of mergeRequest.threads) {
+      discussions.append(await mergeRequestThread(route, mergeRequest, thread));
+    }
+  }
+  if (mergeRequest.state === "open" && !mergeRequest.mergeInProgress) {
+    discussions.append(mergeRequestNewThreadForm(route, mergeRequest));
+  }
+  conversation.append(discussions);
+  return conversation;
+}
+
+function mergeRequestChanges(
+  mergeRequest: RepositoryMergeRequest,
+): HTMLElement {
+  const changes = element("div");
+  changes.className = "merge-request-changes";
+  const summary = element("section");
+  summary.className = "comparison-summary";
+  const additions = mergeRequest.files.reduce(
+    (total, file) => total + file.additions,
+    0,
+  );
+  const deletions = mergeRequest.files.reduce(
+    (total, file) => total + file.deletions,
+    0,
+  );
+  const stats = element("div");
+  stats.className = "comparison-stats";
+  stats.append(
+    comparisonStat("commits ahead", String(mergeRequest.ahead)),
+    comparisonStat("behind", String(mergeRequest.behind)),
+    comparisonStat("files changed", String(mergeRequest.files.length)),
+    comparisonStat("additions", `+${additions}`),
+    comparisonStat("deletions", `−${deletions}`),
+  );
+  summary.append(
+    mergeRequestDirection(mergeRequest.target, mergeRequest.source),
+    stats,
+  );
+  changes.append(summary);
+
+  const workflowReady = mergeRequest.state === "open" &&
+    mergeRequest.mergeable &&
+    mergeRequest.currentApprovals >= mergeRequest.requiredApprovals &&
+    mergeRequest.unresolvedThreads === 0;
+  let statusTitle: string;
+  let statusDetail: string;
+  if (mergeRequest.mergeInProgress) {
+    statusTitle = "Merge in progress";
+    statusDetail = "The approved source revision is being merged.";
+  } else if (mergeRequest.state === "merged") {
+    statusTitle = "Request merged";
+    statusDetail = `${mergeRequest.source} was merged into ${mergeRequest.target}.`;
+  } else if (mergeRequest.state === "closed") {
+    statusTitle = "Request closed";
+    statusDetail = "Reopen this request to continue its review.";
+  } else if (!mergeRequest.mergeable) {
+    statusTitle = "Merge conflicts detected";
+    statusDetail = "Resolve the conflicting files in a local checkout.";
+  } else if (mergeRequest.unresolvedThreads > 0) {
+    statusTitle = "Discussions must be resolved";
+    statusDetail = "Resolve every review thread before merging.";
+  } else if (mergeRequest.currentApprovals < mergeRequest.requiredApprovals) {
+    statusTitle = "Review required";
+    statusDetail = "The current source revision needs approval before merging.";
+  } else {
+    statusTitle = "Request is ready to merge";
+    statusDetail = `${mergeRequest.source} can be merged into ${mergeRequest.target}.`;
+  }
+  const status = element("section");
+  status.className = workflowReady ||
+    mergeRequest.state === "merged" ||
+    mergeRequest.mergeInProgress
+    ? "merge-status merge-ready"
+    : "merge-status merge-conflicted";
+  const statusCopy = element("div");
+  statusCopy.append(
+    element("strong", statusTitle),
+    element("span", statusDetail),
+  );
+  status.append(statusCopy);
+  if (!mergeRequest.mergeable && mergeRequest.conflicts.length > 0) {
+    const conflicts = element("ul");
+    conflicts.className = "conflict-list";
+    for (const path of mergeRequest.conflicts) {
+      conflicts.append(element("li", path));
+    }
+    status.append(conflicts);
+  }
+  changes.append(status);
+
+  const files = element("div");
+  files.className = "comparison-files";
+  if (mergeRequest.files.length === 0) {
+    files.append(emptyState("No file changes in this merge request."));
+  } else {
+    for (const file of mergeRequest.files) {
+      files.append(comparisonDiff(file));
+    }
+  }
+  changes.append(files);
+  return changes;
+}
+
+function mergeRequestApprovalList(
+  mergeRequest: RepositoryMergeRequest,
+): HTMLElement {
+  const list = element("ul");
+  list.className = "merge-request-approval-list";
+  for (const approval of mergeRequest.approvals) {
+    const item = element("li");
+    const copy = element("div");
+    const created = element("span", relativeTime(approval.createdAt));
+    created.title = new Date(approval.createdAt).toLocaleString();
+    copy.append(element("strong", approval.author), created);
+    const state = element("span", approval.current ? "Current" : "Stale");
+    state.className = approval.current
+      ? "merge-request-approval-current"
+      : "merge-request-approval-stale";
+    item.append(icon(approval.current ? "check" : "clock"), copy, state);
+    list.append(item);
+  }
+  return list;
+}
+
+function mergeRequestReviewPanel(
+  route: RepositoryBrowserRoute,
+  mergeRequest: RepositoryMergeRequest,
+): HTMLElement {
+  const sidebar = element("aside");
+  sidebar.className = "merge-request-sidebar";
+
+  const review = element("section");
+  review.className = "merge-request-panel";
+  review.append(element("h3", "Review status"));
+  const approvalSummary = element(
+    "strong",
+    `${mergeRequest.currentApprovals} of ${mergeRequest.requiredApprovals} approvals`,
+  );
+  const approvalDetail = element(
+    "p",
+    mergeRequest.currentApprovals >= mergeRequest.requiredApprovals
+      ? "The current source revision is approved."
+      : "Approval is required for the current source revision.",
+  );
+  review.append(approvalSummary, approvalDetail);
+  if (mergeRequest.staleApprovals > 0) {
+    const stale = element(
+      "p",
+      `${mergeRequest.staleApprovals} approval${mergeRequest.staleApprovals === 1 ? "" : "s"} became stale after the source changed.`,
+    );
+    stale.className = "merge-request-stale-copy";
+    review.append(stale);
+  }
+  if (mergeRequest.approvals.length > 0) {
+    review.append(mergeRequestApprovalList(mergeRequest));
+  }
+
+  if (mergeRequest.state === "open") {
+    if (mergeRequest.mergeInProgress) {
+      review.append(element("p", "Merge in progress…"));
+      const refresh = actionButton("Refresh status", "refresh", "secondary");
+      refresh.addEventListener("click", async () => {
+        refresh.disabled = true;
+        review.setAttribute("aria-busy", "true");
+        try {
+          await renderRepositoryBrowser(route);
+        } catch (reason) {
+          showStatus(
+            reason instanceof Error ? reason.message : "Could not refresh the request.",
+            true,
+          );
+          refresh.disabled = false;
+          review.removeAttribute("aria-busy");
+        }
+      });
+      review.append(refresh);
+    } else if (
+      mergeRequest.canMerge &&
+      mergeRequest.currentApprovals >= mergeRequest.requiredApprovals
+    ) {
+      const merge = actionButton("Retry merge", "git-merge", "primary");
+      merge.addEventListener("click", async () => {
+        merge.disabled = true;
+        review.setAttribute("aria-busy", "true");
+        try {
+          const updated = await request<RepositoryMergeRequest>(
+            repositoryMergeRequestMergeAPIURL(
+              route.repository,
+              mergeRequest.id,
+            ),
+            {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({
+                expectedHeadCommit: mergeRequest.headCommit,
+              }),
+            },
+          );
+          await showUpdatedMergeRequest(
+            route,
+            updated,
+            updated.state === "merged"
+              ? `Merge request !${updated.id} merged.`
+              : `Merge request !${updated.id} remains open.`,
+          );
+        } catch (reason) {
+          showStatus(
+            reason instanceof Error ? reason.message : "Could not merge the request.",
+            true,
+          );
+          merge.disabled = false;
+          review.removeAttribute("aria-busy");
+        }
+      });
+      review.append(merge);
+    } else if (mergeRequest.canApprove && !mergeRequest.viewerApproved) {
+      const approvalWillMerge = mergeRequest.mergeable &&
+        mergeRequest.unresolvedThreads === 0 &&
+        mergeRequest.currentApprovals + 1 >= mergeRequest.requiredApprovals;
+      const approve = actionButton(
+        approvalWillMerge ? "Approve and merge" : "Approve",
+        "check",
+        "primary",
+      );
+      approve.addEventListener("click", async () => {
+        approve.disabled = true;
+        review.setAttribute("aria-busy", "true");
+        try {
+          const updated = await request<RepositoryMergeRequest>(
+            repositoryMergeRequestApprovalsAPIURL(
+              route.repository,
+              mergeRequest.id,
+            ),
+            {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({
+                expectedHeadCommit: mergeRequest.headCommit,
+              }),
+            },
+          );
+          await showUpdatedMergeRequest(
+            route,
+            updated,
+            updated.state === "merged"
+              ? `Merge request !${updated.id} approved and merged.`
+              : `Merge request !${updated.id} approved.`,
+          );
+        } catch (reason) {
+          showStatus(
+            reason instanceof Error ? reason.message : "Could not approve the request.",
+            true,
+          );
+          approve.disabled = false;
+          review.removeAttribute("aria-busy");
+        }
+      });
+      review.append(approve);
+    } else if (mergeRequest.viewerApproved) {
+      const approved = element("p", "You approved the current revision.");
+      approved.className = "merge-request-viewer-approved";
+      review.append(approved);
+    }
+    if (
+      !mergeRequest.mergeable &&
+      mergeRequest.currentApprovals >= mergeRequest.requiredApprovals
+    ) {
+      const blocked = element(
+        "p",
+        "Approval is recorded, but conflicts must be resolved before merging.",
+      );
+      blocked.className = "merge-request-blocked-copy";
+      review.append(blocked);
+    }
+  }
+  sidebar.append(review);
+
+  const details = element("section");
+  details.className = "merge-request-panel";
+  details.append(element("h3", "Details"));
+  const definition = element("dl");
+  const sourceCommit = element("code", shortCommitHash(mergeRequest.headCommit));
+  sourceCommit.title = mergeRequest.headCommit;
+  const targetCommit = element("code", shortCommitHash(mergeRequest.targetCommit));
+  targetCommit.title = mergeRequest.targetCommit;
+  definition.append(
+    element("dt", "Source"),
+    element("dd", mergeRequest.source),
+    element("dt", "Target"),
+    element("dd", mergeRequest.target),
+    element("dt", "Source commit"),
+    element("dd"),
+    element("dt", "Target commit"),
+    element("dd"),
+    element("dt", "Unresolved"),
+    element("dd", String(mergeRequest.unresolvedThreads)),
+  );
+  definition.children[5]?.append(sourceCommit);
+  definition.children[7]?.append(targetCommit);
+  details.append(definition);
+
+  if (mergeRequest.state === "merged" && mergeRequest.mergedCommit) {
+    const merged = element(
+      "p",
+      `Merged by ${mergeRequest.mergedBy ?? "unknown"} at ${shortCommitHash(mergeRequest.mergedCommit)}.`,
+    );
+    if (mergeRequest.mergedAt) {
+      merged.append(document.createTextNode(` ${relativeTime(mergeRequest.mergedAt)}.`));
+      merged.title = new Date(mergeRequest.mergedAt).toLocaleString();
+    }
+    details.append(merged);
+  } else if (mergeRequest.state === "closed" && mergeRequest.closedAt) {
+    const closed = element(
+      "p",
+      `Closed by ${mergeRequest.closedBy ?? "unknown"} ${relativeTime(mergeRequest.closedAt)}.`,
+    );
+    closed.title = new Date(mergeRequest.closedAt).toLocaleString();
+    details.append(closed);
+  }
+
+  if (mergeRequest.canUpdate && mergeRequest.state !== "merged") {
+    const nextState: RepositoryMergeRequestState =
+      mergeRequest.state === "closed" ? "open" : "closed";
+    const update = actionButton(
+      nextState === "open" ? "Reopen request" : "Close request",
+      nextState === "open" ? "refresh" : "close",
+      nextState === "open" ? "primary" : "danger-secondary",
+    );
+    update.addEventListener("click", async () => {
+      update.disabled = true;
+      details.setAttribute("aria-busy", "true");
+      try {
+        const updated = await request<RepositoryMergeRequest>(
+          repositoryMergeRequestsAPIURL(route.repository, mergeRequest.id),
+          {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({state: nextState}),
+          },
+        );
+        await showUpdatedMergeRequest(
+          route,
+          updated,
+          nextState === "open"
+            ? `Merge request !${updated.id} reopened.`
+            : `Merge request !${updated.id} closed.`,
+        );
+      } catch (reason) {
+        showStatus(
+          reason instanceof Error ? reason.message : "Could not update the request.",
+          true,
+        );
+        update.disabled = false;
+        details.removeAttribute("aria-busy");
+      }
+    });
+    details.append(update);
+  }
+  sidebar.append(details);
+  return sidebar;
+}
+
+async function repositoryMergeRequestDetail(
+  route: RepositoryBrowserRoute,
+  mergeRequest: RepositoryMergeRequest,
+): Promise<HTMLElement> {
+  document.title = `!${mergeRequest.id} ${mergeRequest.title} · ${route.repository} · GitOne`;
+  const section = element("section");
+  section.className = "content-section merge-request-detail";
+
+  const header = element("header");
+  header.className = "merge-request-detail-header";
+  const heading = element("div");
+  const title = element("h2", mergeRequest.title);
+  const identity = element("span", `!${mergeRequest.id}`);
+  identity.className = "merge-request-number";
+  heading.append(title, identity, mergeRequestStateBadge(mergeRequest.state));
+  const opened = element(
+    "p",
+    `${mergeRequest.author} opened this request ${relativeTime(mergeRequest.createdAt)}`,
+  );
+  opened.title = new Date(mergeRequest.createdAt).toLocaleString();
+  header.append(heading, opened, mergeRequestDirection(
+    mergeRequest.target,
+    mergeRequest.source,
+  ));
+
+  const tabs = element("nav");
+  tabs.className = "merge-request-tabs";
+  tabs.setAttribute("aria-label", "Merge request");
+  for (const tab of ["conversation", "changes"] as RepositoryMergeRequestTab[]) {
+    const label = tab === "conversation"
+      ? `Conversation ${mergeRequest.threads.length}`
+      : `Changes ${mergeRequest.files.length}`;
+    const link = element("a", label);
+    link.href = mergeRequestBrowserURL(route, {
+      mergeRequest: mergeRequest.id,
+      tab,
+      state: route.mergeRequestState,
+    });
+    if (route.reviewTab === tab) {
+      link.setAttribute("aria-current", "page");
+    }
+    tabs.append(link);
+  }
+
+  const layout = element("div");
+  layout.className = "merge-request-detail-layout";
+  const main = route.reviewTab === "changes"
+    ? mergeRequestChanges(mergeRequest)
+    : await mergeRequestConversation(route, mergeRequest);
+  layout.append(main, mergeRequestReviewPanel(route, mergeRequest));
+  section.append(header, tabs, layout);
+  return section;
+}
+
+async function repositoryMergeRequestsView(
+  route: RepositoryBrowserRoute,
+  compareTrigger: HTMLButtonElement,
+  canWrite: boolean,
+): Promise<HTMLElement> {
+  if (route.mergeRequest === undefined) {
+    return await repositoryMergeRequestList(route, compareTrigger, canWrite);
+  }
+  const mergeRequest = await request<RepositoryMergeRequest>(
+    repositoryMergeRequestsAPIURL(route.repository, route.mergeRequest),
+  );
+  return await repositoryMergeRequestDetail(route, mergeRequest);
 }
 
 function cloneControl(
@@ -2908,6 +3927,8 @@ function repositoryFileCreator(
         file: created.path,
         view: "files",
         page: 1,
+        reviewTab: "conversation",
+        mergeRequestState: "open",
       };
       window.history.pushState(
         null,
@@ -3023,6 +4044,8 @@ function repositoryFileRenameControl(
         file: renamed.path,
         view: "files",
         page: 1,
+        reviewTab: "conversation",
+        mergeRequestState: "open",
       };
       window.history.pushState(
         null,
@@ -3129,6 +4152,8 @@ function repositoryFileDeleteControl(
         file: null,
         view: "files",
         page: 1,
+        reviewTab: "conversation",
+        mergeRequestState: "open",
       };
       window.history.pushState(
         null,
@@ -3610,7 +4635,9 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   );
   const contentRequest: Promise<
     RepositoryTree | RepositoryBlob | RepositoryBlame | null
-  > = route.view === "history" || route.view === "builds"
+  > = route.view === "history" ||
+      route.view === "builds" ||
+      route.view === "merge-requests"
       ? Promise.resolve(null)
       : route.view === "blame" && route.file !== null
         ? request<RepositoryBlame>(
@@ -3676,6 +4703,9 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
       path: route.file === null ? route.path : undefined,
       file: route.file ?? undefined,
       view: route.view,
+      mergeRequest: route.mergeRequest,
+      reviewTab: route.reviewTab,
+      mergeRequestState: route.mergeRequestState,
     });
   });
   branchLabel.append(branchSelect);
@@ -3724,6 +4754,16 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
       throw new Error("Repository builds are unavailable.");
     }
     app.append(repositoryBuildsView(route, builds));
+    return;
+  }
+  if (route.view === "merge-requests") {
+    app.append(
+      await repositoryMergeRequestsView(
+        route,
+        branchComparison.trigger,
+        branches.canWrite,
+      ),
+    );
     return;
   }
   if (route.view === "blame") {
@@ -4148,5 +5188,8 @@ logoutButton.addEventListener("click", async () => {
     logoutButton.disabled = false;
     renderLogin();
   }
+});
+window.addEventListener("popstate", () => {
+  void render();
 });
 void render();

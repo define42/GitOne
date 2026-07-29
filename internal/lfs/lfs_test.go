@@ -10,15 +10,20 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
+	git "github.com/go-git/go-git/v5"
 )
 
 func TestUploadAndDownload(t *testing.T) {
 	root := t.TempDir()
+	initializeLFSRepository(t, root)
 	st := storage.Store{Root: root}
 	if e := os.MkdirAll(root+"/g/r.lfs/objects", 0o750); e != nil {
 		t.Fatal(e)
@@ -43,6 +48,7 @@ func TestUploadAndDownload(t *testing.T) {
 
 func TestRejectWrongHash(t *testing.T) {
 	root := t.TempDir()
+	initializeLFSRepository(t, root)
 	_ = os.MkdirAll(root+"/g/r.lfs/objects", 0o750)
 	h := Handler{Storage: storage.Store{Root: root}, Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) { return true, true }}
 	oid := string(bytes.Repeat([]byte{'0'}, 64))
@@ -79,6 +85,7 @@ func TestPolicyDisablesLFS(t *testing.T) {
 
 func TestUploadEnforcesObjectAndStorageLimits(t *testing.T) {
 	root := t.TempDir()
+	initializeLFSRepository(t, root)
 	h := Handler{
 		Storage: storage.Store{Root: root},
 		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
@@ -116,6 +123,153 @@ func TestUploadEnforcesObjectAndStorageLimits(t *testing.T) {
 	}
 	if response := upload("7"); response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("storage overflow returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestUploadWaitsForRepositoryOperationLock(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	data := []byte("operation-locked LFS object")
+	sum := sha256.Sum256(data)
+	oid := hex.EncodeToString(sum[:])
+	var authorizationCalls atomic.Int32
+	firstAuthorization := make(chan struct{}, 1)
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			authorizationCalls.Add(1)
+			select {
+			case firstAuthorization <- struct{}{}:
+			default:
+			}
+			return true, true
+		},
+	}
+	release, err := review.NewStore(root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(
+			recorder,
+			httptest.NewRequest(
+				http.MethodPut,
+				"/g/r.git/info/lfs/objects/"+oid,
+				bytes.NewReader(data),
+			),
+		)
+		response <- recorder
+	}()
+	select {
+	case <-firstAuthorization:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload did not reach initial authorization")
+	}
+	select {
+	case recorder := <-response:
+		t.Fatalf("upload completed while operation lock was held: %d", recorder.Code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("upload returned %d: %s", recorder.Code, recorder.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload did not resume after operation lock release")
+	}
+	if authorizationCalls.Load() != 2 {
+		t.Fatalf("authorization calls = %d, want 2", authorizationCalls.Load())
+	}
+}
+
+func TestUploadReopensRepositoryAfterOperationLock(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	store := storage.Store{Root: root}
+	repository := repopath.Repository{Groups: []string{"g"}, Name: "r"}
+	data := []byte("stale repository upload")
+	sum := sha256.Sum256(data)
+	oid := hex.EncodeToString(sum[:])
+	firstAuthorization := make(chan struct{}, 1)
+	handler := Handler{
+		Storage: store,
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			select {
+			case firstAuthorization <- struct{}{}:
+			default:
+			}
+			return true, true
+		},
+	}
+	release, err := review.NewStore(root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(
+			recorder,
+			httptest.NewRequest(
+				http.MethodPut,
+				"/g/r.git/info/lfs/objects/"+oid,
+				bytes.NewReader(data),
+			),
+		)
+		response <- recorder
+	}()
+	select {
+	case <-firstAuthorization:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload did not reach initial authorization")
+	}
+	gitPath, err := store.GitPath(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Rename(gitPath, gitPath+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("stale upload returned %d: %s", recorder.Code, recorder.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale upload did not finish")
+	}
+	objectPath, err := handler.objectPath(repository, oid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(objectPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale LFS object exists: %v", err)
+	}
+}
+
+func initializeLFSRepository(t *testing.T, root string) {
+	t.Helper()
+	path, err := (storage.Store{Root: root}).GitPath(repopath.Repository{
+		Groups: []string{"g"},
+		Name:   "r",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = git.PlainInit(path, true); err != nil {
+		t.Fatal(err)
 	}
 }
 

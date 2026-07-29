@@ -10,6 +10,7 @@ import (
 
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
 	"github.com/go-git/go-billy/v5/osfs"
 	git "github.com/go-git/go-git/v5"
@@ -49,17 +50,8 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write := suffix == "/git-receive-pack" || (suffix == "/info/refs" && r.URL.Query().Get("service") == "git-receive-pack")
-	if h.Authorize != nil {
-		authenticated, allowed := h.Authorize(r, repo, write)
-		if !allowed {
-			if !authenticated {
-				w.Header().Set("WWW-Authenticate", `Basic realm="GitOne"`)
-				http.Error(w, "authentication required", http.StatusUnauthorized)
-			} else {
-				http.Error(w, "forbidden", http.StatusForbidden)
-			}
-			return
-		}
+	if !h.authorize(w, r, repo, write) {
+		return
 	}
 	switch {
 	case suffix == "/info/refs":
@@ -71,6 +63,28 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (h Handler) authorize(
+	w http.ResponseWriter,
+	r *http.Request,
+	repository repopath.Repository,
+	write bool,
+) bool {
+	if h.Authorize == nil {
+		return true
+	}
+	authenticated, allowed := h.Authorize(r, repository, write)
+	if allowed {
+		return true
+	}
+	if !authenticated {
+		w.Header().Set("WWW-Authenticate", `Basic realm="GitOne"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	} else {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}
+	return false
 }
 
 func (h Handler) transport(repo repopath.Repository) (transport.Transport, *transport.Endpoint, error) {
@@ -174,25 +188,15 @@ func (h Handler) uploadPack(w http.ResponseWriter, r *http.Request, repo repopat
 }
 
 func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
-	path, err := h.Storage.GitPath(repo)
-	if err != nil {
-		http.Error(w, "not found", 404)
-		return
-	}
-	repository, err := git.PlainOpen(path)
-	if err != nil {
-		http.Error(w, "not found", 404)
-		return
-	}
 	req := packp.NewReferenceUpdateRequest()
-	if err = req.Decode(r.Body); err != nil {
+	if err := req.Decode(r.Body); err != nil {
 		http.Error(w, "bad receive-pack request", 400)
 		return
 	}
 	defer func() {
 		_ = req.Packfile.Close()
 	}()
-	if err = validateReceiveCapabilities(req.Capabilities); err != nil {
+	if err := validateReceiveCapabilities(req.Capabilities); err != nil {
 		h.writeReceiveError(w, req, "ok", err)
 		return
 	}
@@ -202,6 +206,28 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 			h.writeReceiveError(w, req, "ok", err)
 			return
 		}
+	}
+
+	releaseOperation, err := review.NewStore(h.Storage.Root).AcquireOperationLock()
+	if err != nil {
+		h.writeReceiveError(w, req, err.Error(), err)
+		return
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	if !h.authorize(w, r, repo, true) {
+		return
+	}
+	path, err := h.Storage.GitPath(repo)
+	if err != nil {
+		http.Error(w, "not found", 404)
+		return
+	}
+	repository, err := git.PlainOpen(path)
+	if err != nil {
+		http.Error(w, "not found", 404)
+		return
 	}
 
 	mu := h.ReceiveMu

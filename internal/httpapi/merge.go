@@ -12,11 +12,13 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	gitstorage "github.com/go-git/go-git/v5/storage"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
@@ -71,7 +73,12 @@ func (a API) compareRepositoryBranches(
 		return nil, huma.Error500InternalServerError("could not create branch diff", err)
 	}
 
-	_, canMergeErr := a.authorize(ctx, input.AuthInput, parsed.Group(), control.RoleWrite)
+	_, canMergeErr := a.authorizeRepository(
+		ctx,
+		input.AuthInput,
+		parsed,
+		control.RoleWrite,
+	)
 	output := &compareRepositoryBranchesOutput{}
 	output.Body.Repository = parsed.Full()
 	output.Body.Base = baseName
@@ -94,91 +101,233 @@ func (a API) mergeRepositoryBranches(
 	ctx context.Context,
 	input *mergeRepositoryBranchesInput,
 ) (*mergeRepositoryBranchesOutput, error) {
-	repository, parsed, err := a.openRepository(ctx, input.AuthInput, input.Repository, control.RoleWrite)
+	parsed, err := parseRepositoryPath(input.Repository)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	releaseOperationLock, err := a.reviewStore().AcquireOperationLock()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not lock repository operations", err)
+	}
+	defer func() {
+		_ = releaseOperationLock()
+	}()
+	releaseRepositoryLock, err := a.reviewStore().AcquireMergeLock(parsed)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not lock repository merge", err)
+	}
+	defer func() {
+		_ = releaseRepositoryLock()
+	}()
+	principal, err := a.authorizeRepository(
+		ctx,
+		input.AuthInput,
+		parsed,
+		control.RoleWrite,
+	)
 	if err != nil {
 		return nil, err
 	}
-	targetName, targetRef, targetCommit, err := resolveBranch(repository, input.Body.Target)
+	author := principal.Name
+	repositoryPath, err := a.Storage.GitPath(parsed)
 	if err != nil {
-		return nil, huma.Error404NotFound("target branch not found", err)
+		return nil, huma.Error500InternalServerError("could not resolve repository", err)
 	}
-	sourceName, sourceRef, sourceCommit, err := resolveBranch(repository, input.Body.Source)
+	repository, err := git.PlainOpen(repositoryPath)
 	if err != nil {
-		return nil, huma.Error404NotFound("source branch not found", err)
+		return nil, huma.Error404NotFound("repository not found", err)
 	}
-	if targetName == sourceName {
-		return nil, huma.Error400BadRequest("source and target branches must be different")
+
+	merged, err := a.mergeRepositoryBranchesAtSource(
+		repository,
+		parsed,
+		input.Body.Target,
+		input.Body.Source,
+		author,
+		input.Body.Message,
+		"",
+		nil,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	output := &mergeRepositoryBranchesOutput{}
-	output.Body.Repository = parsed.Full()
-	output.Body.Target = targetName
-	output.Body.Source = sourceName
+	output.Body.Repository = merged.Repository
+	output.Body.Target = merged.Target
+	output.Body.Source = merged.Source
+	output.Body.Commit = merged.Commit
+	output.Body.Strategy = merged.Strategy
+	return output, nil
+}
+
+type repositoryMergeResult struct {
+	Repository     string
+	Target         string
+	Source         string
+	PreviousTarget string
+	Commit         string
+	Strategy       string
+}
+
+type mergeNotAppliedError struct {
+	cause error
+}
+
+func (e *mergeNotAppliedError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *mergeNotAppliedError) Unwrap() error {
+	return e.cause
+}
+
+func targetReferenceUpdateError(err error) error {
+	cause := huma.Error409Conflict(
+		"target branch changed while it was being merged",
+		err,
+	)
+	if errors.Is(err, gitstorage.ErrReferenceHasChanged) {
+		return &mergeNotAppliedError{cause: cause}
+	}
+	return cause
+}
+
+func (a API) mergeRepositoryBranchesAtSource(
+	repository *git.Repository,
+	parsed repopath.Repository,
+	target string,
+	source string,
+	author string,
+	message string,
+	expectedSourceCommit string,
+	beforeTargetUpdate func(repositoryMergeResult) error,
+) (repositoryMergeResult, error) {
+	targetName, targetRef, targetCommit, err := resolveBranch(repository, target)
+	if err != nil {
+		return repositoryMergeResult{}, huma.Error404NotFound("target branch not found", err)
+	}
+	sourceName, sourceRef, sourceCommit, err := resolveBranch(repository, source)
+	if err != nil {
+		return repositoryMergeResult{}, huma.Error404NotFound("source branch not found", err)
+	}
+	if targetName == sourceName {
+		return repositoryMergeResult{}, huma.Error400BadRequest(
+			"source and target branches must be different",
+		)
+	}
+	if expectedSourceCommit != "" && expectedSourceCommit != sourceCommit.Hash.String() {
+		return repositoryMergeResult{}, huma.Error409Conflict(
+			"source branch changed since it was approved",
+		)
+	}
+
+	result := repositoryMergeResult{
+		Repository:     parsed.Full(),
+		Target:         targetName,
+		Source:         sourceName,
+		PreviousTarget: targetRef.Hash().String(),
+	}
 
 	sourceIsAncestor, err := sourceCommit.IsAncestor(targetCommit)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not inspect branch history", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not inspect branch history",
+			err,
+		)
 	}
 	if sourceIsAncestor {
-		output.Body.Commit = targetCommit.Hash.String()
-		output.Body.Strategy = "already-up-to-date"
-		return output, nil
+		result.Commit = targetCommit.Hash.String()
+		result.Strategy = "already-up-to-date"
+		if beforeTargetUpdate != nil {
+			if err = beforeTargetUpdate(result); err != nil {
+				return repositoryMergeResult{}, err
+			}
+		}
+		return result, nil
 	}
 	targetIsAncestor, err := targetCommit.IsAncestor(sourceCommit)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not inspect branch history", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not inspect branch history",
+			err,
+		)
 	}
 	if targetIsAncestor {
+		result.Commit = sourceRef.Hash().String()
+		result.Strategy = "fast-forward"
+		if beforeTargetUpdate != nil {
+			if err = beforeTargetUpdate(result); err != nil {
+				return repositoryMergeResult{}, err
+			}
+		}
 		updated := plumbing.NewHashReference(targetRef.Name(), sourceRef.Hash())
 		if err = repository.Storer.CheckAndSetReference(updated, targetRef); err != nil {
-			return nil, huma.Error409Conflict("target branch changed while it was being merged", err)
+			return repositoryMergeResult{}, targetReferenceUpdateError(err)
 		}
 		a.scheduleBuild(parsed, targetName, sourceRef.Hash())
-		output.Body.Commit = sourceRef.Hash().String()
-		output.Body.Strategy = "fast-forward"
-		return output, nil
+		return result, nil
 	}
 
 	bases, err := targetCommit.MergeBase(sourceCommit)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not find a merge base", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not find a merge base",
+			err,
+		)
 	}
 	if len(bases) != 1 {
-		return nil, huma.Error409Conflict("branches do not have a single merge base")
+		return repositoryMergeResult{}, huma.Error409Conflict(
+			"branches do not have a single merge base",
+		)
 	}
 	baseTree, err := bases[0].Tree()
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not load merge base", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not load merge base",
+			err,
+		)
 	}
 	targetTree, err := targetCommit.Tree()
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not load target branch", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not load target branch",
+			err,
+		)
 	}
 	sourceTree, err := sourceCommit.Tree()
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not load source branch", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not load source branch",
+			err,
+		)
 	}
 
 	_, conflicts, err := mergeTrees(repository, baseTree, targetTree, sourceTree, "", false)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not assess branch merge", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not assess branch merge",
+			err,
+		)
 	}
 	if len(conflicts) > 0 {
-		return nil, huma.Error409Conflict("branches have merge conflicts: " + strings.Join(conflicts, ", "))
+		return repositoryMergeResult{}, huma.Error409Conflict(
+			"branches have merge conflicts: " + strings.Join(conflicts, ", "),
+		)
 	}
 	treeHash, conflicts, err := mergeTrees(repository, baseTree, targetTree, sourceTree, "", true)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not merge branch trees", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not merge branch trees",
+			err,
+		)
 	}
 	if len(conflicts) > 0 {
-		return nil, huma.Error409Conflict("branches have merge conflicts: " + strings.Join(conflicts, ", "))
+		return repositoryMergeResult{}, huma.Error409Conflict(
+			"branches have merge conflicts: " + strings.Join(conflicts, ", "),
+		)
 	}
-
-	author, err := a.credentialUsername(input.AuthInput)
-	if err != nil {
-		return nil, huma.Error401Unauthorized("valid credentials are required")
-	}
-	message := strings.TrimSpace(input.Body.Message)
+	message = strings.TrimSpace(message)
 	if message == "" {
 		message = fmt.Sprintf("Merge branch '%s' into %s", sourceName, targetName)
 	}
@@ -196,21 +345,31 @@ func (a API) mergeRepositoryBranches(
 	}
 	encodedCommit := &plumbing.MemoryObject{}
 	if err = commit.Encode(encodedCommit); err != nil {
-		return nil, huma.Error500InternalServerError("could not encode merge commit", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not encode merge commit",
+			err,
+		)
 	}
 	commitHash, err := repository.Storer.SetEncodedObject(encodedCommit)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not store merge commit", err)
+		return repositoryMergeResult{}, huma.Error500InternalServerError(
+			"could not store merge commit",
+			err,
+		)
+	}
+	result.Commit = commitHash.String()
+	result.Strategy = "merge-commit"
+	if beforeTargetUpdate != nil {
+		if err = beforeTargetUpdate(result); err != nil {
+			return repositoryMergeResult{}, err
+		}
 	}
 	updated := plumbing.NewHashReference(targetRef.Name(), commitHash)
 	if err = repository.Storer.CheckAndSetReference(updated, targetRef); err != nil {
-		return nil, huma.Error409Conflict("target branch changed while it was being merged", err)
+		return repositoryMergeResult{}, targetReferenceUpdateError(err)
 	}
 	a.scheduleBuild(parsed, targetName, commitHash)
-
-	output.Body.Commit = commitHash.String()
-	output.Body.Strategy = "merge-commit"
-	return output, nil
+	return result, nil
 }
 
 func resolveBranch(

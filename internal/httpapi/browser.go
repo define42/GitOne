@@ -175,6 +175,7 @@ type repositoryBranchesOutput struct {
 	Body struct {
 		Repository    string             `json:"repository"`
 		DefaultBranch string             `json:"defaultBranch"`
+		CanWrite      bool               `json:"canWrite" doc:"Whether the authenticated user can create branches and merge requests"`
 		Branches      []repositoryBranch `json:"branches"`
 	}
 }
@@ -474,15 +475,13 @@ func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranch
 	output := &repositoryBranchesOutput{}
 	output.Body.Repository = parsed.Full()
 	output.Body.DefaultBranch = "main"
+	_, writeErr := a.authorizeRepository(ctx, input.AuthInput, parsed, control.RoleWrite)
+	output.Body.CanWrite = writeErr == nil
 	output.Body.Branches = branches
 	return output, nil
 }
 
 func (a API) createRepositoryBranch(ctx context.Context, input *createRepositoryBranchInput) (*createRepositoryBranchOutput, error) {
-	repository, parsed, err := a.openRepository(ctx, input.AuthInput, input.Repository, control.RoleWrite)
-	if err != nil {
-		return nil, err
-	}
 	branchName, err := validatedBranchReference(input.Branch)
 	if err != nil {
 		return nil, huma.Error400BadRequest("invalid new branch name", err)
@@ -490,6 +489,25 @@ func (a API) createRepositoryBranch(ctx context.Context, input *createRepository
 	sourceName, err := validatedBranchReference(input.From)
 	if err != nil {
 		return nil, huma.Error400BadRequest("invalid source branch name", err)
+	}
+	releaseOperation, err := a.reviewStore().AcquireOperationLock()
+	if err != nil {
+		return nil, huma.Error500InternalServerError(
+			"could not lock repository operations",
+			err,
+		)
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	repository, parsed, err := a.openRepository(
+		ctx,
+		input.AuthInput,
+		input.Repository,
+		control.RoleWrite,
+	)
+	if err != nil {
+		return nil, err
 	}
 	if _, err = repository.Reference(branchName, false); err == nil {
 		return nil, huma.Error409Conflict("branch already exists")

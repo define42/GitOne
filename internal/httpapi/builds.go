@@ -119,7 +119,11 @@ func (a API) scheduleBuild(
 	if a.Scheduler == nil {
 		return
 	}
-	if _, err := a.Scheduler.Schedule(repository, branch, commit); err != nil {
+	schedule := a.Scheduler.Schedule
+	if locked, ok := a.Scheduler.(runner.LockedScheduler); ok {
+		schedule = locked.ScheduleLocked
+	}
+	if _, err := schedule(repository, branch, commit); err != nil {
 		log.Printf(
 			"could not schedule build for %s@%s: %v",
 			repository.Full(),

@@ -49,6 +49,9 @@ func New(config Config) (*Runner, error) {
 	if config.Executor == nil {
 		return nil, errors.New("build executor is required")
 	}
+	if config.Storage.Root == "" {
+		return nil, errors.New("repository storage root is required")
+	}
 	if config.State.Root == "" {
 		return nil, errors.New("build state root is required")
 	}
@@ -93,11 +96,24 @@ func (r *Runner) Schedule(
 	branch string,
 	commit plumbing.Hash,
 ) (*Job, error) {
-	gitPath, err := r.storage.GitPath(repositoryPath)
+	releaseOperation, err := acquireBuildOperationLock(r.storage.Root)
 	if err != nil {
 		return nil, err
 	}
-	repository, err := git.PlainOpen(gitPath)
+	defer func() {
+		_ = releaseOperation()
+	}()
+	return r.ScheduleLocked(repositoryPath, branch, commit)
+}
+
+// ScheduleLocked queues a build while its caller holds the repository
+// operations lock.
+func (r *Runner) ScheduleLocked(
+	repositoryPath repopath.Repository,
+	branch string,
+	commit plumbing.Hash,
+) (*Job, error) {
+	repository, err := openRepositoryForBuild(r.storage, repositoryPath)
 	if err != nil {
 		return nil, err
 	}
@@ -165,18 +181,30 @@ func (r *Runner) run(parent context.Context, request buildRequest) {
 	started := time.Now().UTC()
 	job.Status = StatusRunning
 	job.StartedAt = &started
-	if err := r.state.save(request.repository, job); err != nil {
+	releaseOperation, _, err := acquireRepositoryBuildLock(r.storage, request.repository)
+	if err != nil {
+		return
+	}
+	if err = r.state.save(request.repository, job); err != nil {
+		_ = releaseOperation()
 		return
 	}
 	logFile, err := r.state.createLog(request.repository, job.ID)
 	if err != nil {
+		_ = releaseOperation()
 		r.finish(request.repository, job, err)
 		return
 	}
-	defer func() {
-		_ = logFile.Close()
-	}()
-	buildLog := newCappedLogWriter(logFile, MaximumStoredLogBytes)
+	err = errors.Join(logFile.Close(), releaseOperation())
+	if err != nil {
+		r.finish(request.repository, job, err)
+		return
+	}
+	buildLog := newCappedLogWriter(&operationBuildLogWriter{
+		runner:     r,
+		repository: request.repository,
+		id:         job.ID,
+	}, MaximumStoredLogBytes)
 	if _, err = fmt.Fprintf(
 		buildLog,
 		"GitOne build %s\nrepository: %s\nbranch: %s\ncommit: %s\nimage: %s\n\n",
@@ -253,6 +281,13 @@ func (r *Runner) checkout(
 }
 
 func (r *Runner) finish(repository repopath.Repository, job Job, buildErr error) {
+	releaseOperation, _, err := acquireRepositoryBuildLock(r.storage, repository)
+	if err != nil {
+		return
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	finished := time.Now().UTC()
 	job.FinishedAt = &finished
 	if buildErr == nil {
@@ -262,6 +297,39 @@ func (r *Runner) finish(repository repopath.Repository, job Job, buildErr error)
 		job.Error = buildErr.Error()
 	}
 	_ = r.state.save(repository, job)
+}
+
+type operationBuildLogWriter struct {
+	runner     *Runner
+	repository repopath.Repository
+	id         string
+	offset     int64
+}
+
+func (w *operationBuildLogWriter) Write(contents []byte) (int, error) {
+	releaseOperation, _, err := acquireRepositoryBuildLock(
+		w.runner.storage,
+		w.repository,
+	)
+	if err != nil {
+		return 0, err
+	}
+	nextOffset, writeErr := w.runner.state.appendLog(
+		w.repository,
+		w.id,
+		w.offset,
+		contents,
+	)
+	releaseErr := releaseOperation()
+	if writeErr != nil {
+		return 0, errors.Join(writeErr, releaseErr)
+	}
+	written := nextOffset - w.offset
+	w.offset = nextOffset
+	if written != int64(len(contents)) {
+		return int(written), errors.Join(io.ErrShortWrite, releaseErr)
+	}
+	return len(contents), releaseErr
 }
 
 func (r *Runner) failedConfigurationJob(

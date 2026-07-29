@@ -10,6 +10,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -198,6 +199,80 @@ func TestRepositoryFileMutationsRejectConflictsAndInvalidPaths(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if err := call(); err == nil {
 				t.Fatal("invalid file mutation succeeded")
+			}
+		})
+	}
+}
+
+func TestRepositoryBranchAndFileWritesWaitForOperationLock(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		call func(API, AuthInput, string) error
+	}{
+		{
+			name: "branch",
+			call: func(service API, credentials AuthInput, _ string) error {
+				_, err := service.createRepositoryBranch(
+					context.Background(),
+					&createRepositoryBranchInput{
+						AuthInput:  credentials,
+						Repository: "engineering/api",
+						Branch:     "operation-locked",
+						From:       "main",
+					},
+				)
+				return err
+			},
+		},
+		{
+			name: "file",
+			call: func(service API, credentials AuthInput, head string) error {
+				_, err := service.createRepositoryFile(
+					context.Background(),
+					&createRepositoryFileInput{
+						AuthInput:  credentials,
+						Repository: "engineering/api",
+						Ref:        "main",
+						Path:       "operation-locked.txt",
+						Body: createRepositoryFileBody{
+							Content:        "serialized\n",
+							ExpectedCommit: head,
+						},
+					},
+				)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, credentials, head := repositoryAPIFixture(t)
+			release, err := service.reviewStore().AcquireOperationLock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := make(chan struct{})
+			result := make(chan error, 1)
+			go func() {
+				close(started)
+				result <- test.call(service, credentials, head)
+			}()
+			<-started
+			select {
+			case err = <-result:
+				_ = release()
+				t.Fatalf("write completed while operation lock was held: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if err = release(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err = <-result:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("write did not resume after operation lock release")
 			}
 		})
 	}

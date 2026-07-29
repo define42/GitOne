@@ -270,6 +270,71 @@ func TestUpdateGroupSettingsRenamesGroupAndRepository(t *testing.T) {
 	}
 }
 
+func TestUpdateGroupSettingsWaitsAndReauthorizesUnderOperationLock(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	current, err := service.Resolver.Controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := service.reviewStore().AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		_, updateErr := service.updateGroupSettings(
+			context.Background(),
+			&updateGroupSettingsInput{
+				GroupPathInput: GroupPathInput{
+					AuthInput: credentials,
+					Path:      "engineering",
+				},
+				Body: updateGroupSettingsBody{
+					Name:        "engineering",
+					Description: "must not be committed",
+					Members:     map[string]control.Role{"alice": control.RoleOwner},
+				},
+			},
+		)
+		result <- updateErr
+	}()
+	<-started
+	select {
+	case err = <-result:
+		_ = release()
+		t.Fatalf("group update completed while operation lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	current.Members = map[string]control.Role{"bob": control.RoleOwner}
+	if err = service.Storage.UpdateGroupControlLocked("engineering", current, "bob"); err != nil {
+		_ = release()
+		t.Fatal(err)
+	}
+	service.Resolver.Controls.Invalidate("engineering")
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-result:
+		if err == nil {
+			t.Fatal("group update retained stale authorization after waiting")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("group update did not resume after operation lock release")
+	}
+	persisted, err := service.Resolver.Controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Description == "must not be committed" ||
+		persisted.Members["bob"] != control.RoleOwner {
+		t.Fatalf("stale group update changed control state: %#v", persisted)
+	}
+}
+
 func TestSessionEndpointsRejectMissingConfigurationAndCredentials(t *testing.T) {
 	ctx := context.Background()
 	service := API{}

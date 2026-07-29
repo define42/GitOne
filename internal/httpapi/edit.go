@@ -22,6 +22,21 @@ func (a API) updateRepositoryFile(
 	ctx context.Context,
 	input *updateRepositoryFileInput,
 ) (*updateRepositoryFileOutput, error) {
+	cleanPath, err := cleanRepositoryPath(input.Path)
+	if err != nil || cleanPath == "" {
+		return nil, huma.Error400BadRequest("invalid file path", err)
+	}
+	content, err := validatedRepositoryFileContent(input.Body.Content)
+	if err != nil {
+		return nil, err
+	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	change, err := a.prepareRepositoryFileChange(
 		ctx,
 		input.AuthInput,
@@ -29,14 +44,6 @@ func (a API) updateRepositoryFile(
 		input.Ref,
 		input.Body.ExpectedCommit,
 	)
-	if err != nil {
-		return nil, err
-	}
-	cleanPath, err := cleanRepositoryPath(input.Path)
-	if err != nil || cleanPath == "" {
-		return nil, huma.Error400BadRequest("invalid file path", err)
-	}
-	content, err := validatedRepositoryFileContent(input.Body.Content)
 	if err != nil {
 		return nil, err
 	}
@@ -78,6 +85,21 @@ func (a API) createRepositoryFile(
 	ctx context.Context,
 	input *createRepositoryFileInput,
 ) (*updateRepositoryFileOutput, error) {
+	cleanPath, err := cleanRepositoryPath(input.Path)
+	if err != nil || cleanPath == "" {
+		return nil, huma.Error400BadRequest("invalid file path", err)
+	}
+	content, err := validatedRepositoryFileContent(input.Body.Content)
+	if err != nil {
+		return nil, err
+	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	change, err := a.prepareRepositoryFileChange(
 		ctx,
 		input.AuthInput,
@@ -85,14 +107,6 @@ func (a API) createRepositoryFile(
 		input.Ref,
 		input.Body.ExpectedCommit,
 	)
-	if err != nil {
-		return nil, err
-	}
-	cleanPath, err := cleanRepositoryPath(input.Path)
-	if err != nil || cleanPath == "" {
-		return nil, huma.Error400BadRequest("invalid file path", err)
-	}
-	content, err := validatedRepositoryFileContent(input.Body.Content)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +144,17 @@ func (a API) deleteRepositoryFile(
 	ctx context.Context,
 	input *deleteRepositoryFileInput,
 ) (*updateRepositoryFileOutput, error) {
+	cleanPath, err := cleanRepositoryPath(input.Path)
+	if err != nil || cleanPath == "" {
+		return nil, huma.Error400BadRequest("invalid file path", err)
+	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	change, err := a.prepareRepositoryFileChange(
 		ctx,
 		input.AuthInput,
@@ -139,10 +164,6 @@ func (a API) deleteRepositoryFile(
 	)
 	if err != nil {
 		return nil, err
-	}
-	cleanPath, err := cleanRepositoryPath(input.Path)
-	if err != nil || cleanPath == "" {
-		return nil, huma.Error400BadRequest("invalid file path", err)
 	}
 	entry, err := change.rootTree.FindEntry(cleanPath)
 	if err != nil {
@@ -175,16 +196,6 @@ func (a API) renameRepositoryFile(
 	ctx context.Context,
 	input *renameRepositoryFileInput,
 ) (*updateRepositoryFileOutput, error) {
-	change, err := a.prepareRepositoryFileChange(
-		ctx,
-		input.AuthInput,
-		input.Repository,
-		input.Ref,
-		input.Body.ExpectedCommit,
-	)
-	if err != nil {
-		return nil, err
-	}
 	cleanPath, err := cleanRepositoryPath(input.Path)
 	if err != nil || cleanPath == "" {
 		return nil, huma.Error400BadRequest("invalid file path", err)
@@ -195,6 +206,23 @@ func (a API) renameRepositoryFile(
 	}
 	if cleanPath == newPath {
 		return nil, huma.Error400BadRequest("new file path must be different")
+	}
+	releaseOperation, err := a.acquireOperationLock()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	change, err := a.prepareRepositoryFileChange(
+		ctx,
+		input.AuthInput,
+		input.Repository,
+		input.Ref,
+		input.Body.ExpectedCommit,
+	)
+	if err != nil {
+		return nil, err
 	}
 	entry, err := change.rootTree.FindEntry(cleanPath)
 	if err != nil {
@@ -248,6 +276,17 @@ type repositoryFileChange struct {
 	branchRef  *plumbing.Reference
 	parent     *object.Commit
 	rootTree   *object.Tree
+}
+
+func (a API) acquireOperationLock() (func() error, error) {
+	release, err := a.reviewStore().AcquireOperationLock()
+	if err != nil {
+		return nil, huma.Error500InternalServerError(
+			"could not lock repository operations",
+			err,
+		)
+	}
+	return release, nil
 }
 
 func (a API) prepareRepositoryFileChange(

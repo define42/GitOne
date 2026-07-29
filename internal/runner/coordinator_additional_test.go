@@ -9,6 +9,7 @@ import (
 
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -151,6 +152,151 @@ func TestCoordinatorScheduleOutcomes(t *testing.T) {
 
 	if _, err = os.Stat(root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCoordinatorScheduleOperationLockVariants(t *testing.T) {
+	root, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+	})
+
+	release, err := review.NewStore(root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockedResult := make(chan error, 1)
+	go func() {
+		_, scheduleErr := coordinator.ScheduleLocked(repositoryPath, "main", commit)
+		lockedResult <- scheduleErr
+	}()
+	select {
+	case err = <-lockedResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		_ = release()
+		t.Fatal("ScheduleLocked recursively acquired the operation lock")
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+
+	release, err = review.NewStore(root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduleResult := make(chan error, 1)
+	go func() {
+		_, scheduleErr := coordinator.Schedule(repositoryPath, "main", commit)
+		scheduleResult <- scheduleErr
+	}()
+	select {
+	case err = <-scheduleResult:
+		_ = release()
+		t.Fatalf("standalone schedule completed while operation lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-scheduleResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("standalone schedule did not resume after operation lock release")
+	}
+}
+
+func TestCoordinatorBuildMutationWaitsAndRevalidatesRepository(t *testing.T) {
+	root, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+	})
+	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := coordinator.Claim("runner-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease == nil || lease.Job.ID != job.ID {
+		t.Fatalf("lease = %#v, want job %s", lease, job.ID)
+	}
+
+	release, err := review.NewStore(root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendResult := make(chan error, 1)
+	go func() {
+		_, appendErr := coordinator.AppendLog(
+			repositoryPath,
+			job.ID,
+			"runner-one",
+			0,
+			[]byte("build output\n"),
+		)
+		appendResult <- appendErr
+	}()
+	select {
+	case err = <-appendResult:
+		_ = release()
+		t.Fatalf("log append completed while operation lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-appendResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("log append did not resume after operation lock release")
+	}
+
+	release, err = review.NewStore(root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeatResult := make(chan error, 1)
+	go func() {
+		_, heartbeatErr := coordinator.Heartbeat(repositoryPath, job.ID, "runner-one")
+		heartbeatResult <- heartbeatErr
+	}()
+	gitPath, err := repositoryStore.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildPath, err := repositoryStore.BuildPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Rename(gitPath, gitPath+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Rename(buildPath, buildPath+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-heartbeatResult:
+		if err == nil {
+			t.Fatal("heartbeat accepted a repository that moved while waiting")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat did not finish after operation lock release")
+	}
+	if _, err = os.Stat(buildPath); !os.IsNotExist(err) {
+		t.Fatalf("heartbeat recreated the moved build directory: %v", err)
 	}
 }
 

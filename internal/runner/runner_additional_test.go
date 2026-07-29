@@ -12,7 +12,9 @@ import (
 
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
+	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
@@ -124,6 +126,85 @@ func TestEmbeddedRunnerScheduleErrorsAndFullQueue(t *testing.T) {
 	}
 }
 
+func TestEmbeddedRunnerBuildWritesUseRepositoryOperationLock(t *testing.T) {
+	root, repositoryPath, repositoryStore, _ := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+	})
+	buildRunner := &Runner{
+		storage: repositoryStore,
+		state:   NewStore(root),
+		jobs:    make(chan buildRequest, 4),
+	}
+	release, err := review.NewStore(root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockedResult := make(chan error, 1)
+	go func() {
+		_, scheduleErr := buildRunner.ScheduleLocked(repositoryPath, "main", commit)
+		lockedResult <- scheduleErr
+	}()
+	select {
+	case err = <-lockedResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		_ = release()
+		t.Fatal("embedded ScheduleLocked recursively acquired the operation lock")
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile, err := buildRunner.state.createLog(repositoryPath, "operation-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = logFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writer := &operationBuildLogWriter{
+		runner:     buildRunner,
+		repository: repositoryPath,
+		id:         "operation-log",
+	}
+	release, err = review.NewStore(root).AcquireOperationLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeResult := make(chan error, 1)
+	go func() {
+		_, writeErr := writer.Write([]byte("serialized log\n"))
+		writeResult <- writeErr
+	}()
+	select {
+	case err = <-writeResult:
+		_ = release()
+		t.Fatalf("embedded log write completed while operation lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err = release(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-writeResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("embedded log write did not resume after operation lock release")
+	}
+	logContents, err := buildRunner.state.Log(repositoryPath, "operation-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logContents != "serialized log\n" {
+		t.Fatalf("build log = %q", logContents)
+	}
+}
+
 func TestEmbeddedRunnerRunReportsPreparationAndExecutorFailures(t *testing.T) {
 	request := buildRequest{
 		repository: repopath.Repository{Groups: []string{"engineering"}, Name: "api"},
@@ -142,7 +223,8 @@ func TestEmbeddedRunnerRunReportsPreparationAndExecutorFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		buildRunner := &Runner{
-			state: NewStore(stateFile),
+			storage: initializeRunTestRepository(t, t.TempDir(), request.repository),
+			state:   NewStore(stateFile),
 			executor: executorFunc(func(context.Context, ExecuteRequest, io.Writer) error {
 				return nil
 			}),
@@ -164,7 +246,8 @@ func TestEmbeddedRunnerRunReportsPreparationAndExecutorFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		buildRunner := &Runner{
-			state: state,
+			storage: initializeRunTestRepository(t, root, request.repository),
+			state:   state,
 			executor: executorFunc(func(context.Context, ExecuteRequest, io.Writer) error {
 				return nil
 			}),
@@ -187,7 +270,8 @@ func TestEmbeddedRunnerRunReportsPreparationAndExecutorFailures(t *testing.T) {
 		}
 		state := NewStore(root)
 		buildRunner := &Runner{
-			state: state,
+			storage: initializeRunTestRepository(t, root, request.repository),
+			state:   state,
 			executor: executorFunc(func(context.Context, ExecuteRequest, io.Writer) error {
 				return nil
 			}),
@@ -203,7 +287,7 @@ func TestEmbeddedRunnerRunReportsPreparationAndExecutorFailures(t *testing.T) {
 		root := t.TempDir()
 		state := NewStore(root)
 		buildRunner := &Runner{
-			storage: storage.Store{Root: root},
+			storage: initializeRunTestRepository(t, root, request.repository),
 			state:   state,
 			executor: executorFunc(func(context.Context, ExecuteRequest, io.Writer) error {
 				return nil
@@ -216,6 +300,26 @@ func TestEmbeddedRunnerRunReportsPreparationAndExecutorFailures(t *testing.T) {
 			t.Fatalf("checkout build = %#v, %v", job, err)
 		}
 	})
+}
+
+func initializeRunTestRepository(
+	t *testing.T,
+	root string,
+	repository repopath.Repository,
+) storage.Store {
+	t.Helper()
+	store := storage.Store{Root: root}
+	path, err := store.GitPath(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = git.PlainInit(path, true); err != nil {
+		t.Fatal(err)
+	}
+	return store
 }
 
 func TestEmbeddedRunnerCheckoutAndCappedWriterErrors(t *testing.T) {

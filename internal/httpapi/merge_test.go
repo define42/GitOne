@@ -3,15 +3,21 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/define42/GitOne/internal/auth"
+	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	gitstorage "github.com/go-git/go-git/v5/storage"
 )
 
 func storeTestBlob(t *testing.T, repository *git.Repository, content []byte) plumbing.Hash {
@@ -92,6 +98,214 @@ func storeTestCommit(
 		t.Fatal(err)
 	}
 	return stored
+}
+
+func TestMergeRepositoryBranchesAtSourceRejectsMovedSource(t *testing.T) {
+	repository, err := git.PlainInit(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := storeTestCommit(t, repository, storeTestTree(
+		t,
+		repository,
+		object.TreeEntry{
+			Name: "notes.txt",
+			Mode: filemode.Regular,
+			Hash: storeTestBlob(t, repository, []byte("base\n")),
+		},
+	))
+	firstSource := storeTestCommit(t, repository, storeTestTree(
+		t,
+		repository,
+		object.TreeEntry{
+			Name: "notes.txt",
+			Mode: filemode.Regular,
+			Hash: storeTestBlob(t, repository, []byte("first\n")),
+		},
+	), base.Hash)
+	currentSource := storeTestCommit(t, repository, storeTestTree(
+		t,
+		repository,
+		object.TreeEntry{
+			Name: "notes.txt",
+			Mode: filemode.Regular,
+			Hash: storeTestBlob(t, repository, []byte("current\n")),
+		},
+	), firstSource.Hash)
+	targetReference := plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("main"),
+		base.Hash,
+	)
+	if err = repository.Storer.SetReference(targetReference); err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("feature"),
+		currentSource.Hash,
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	parsed := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	service := API{}
+	_, err = service.mergeRepositoryBranchesAtSource(
+		repository,
+		parsed,
+		"main",
+		"feature",
+		"alice",
+		"",
+		firstSource.Hash.String(),
+		nil,
+	)
+	var statusError huma.StatusError
+	if !errors.As(err, &statusError) || statusError.GetStatus() != http.StatusConflict {
+		t.Fatalf("moved source returned %v, want HTTP 409", err)
+	}
+	unchanged, err := repository.Reference(targetReference.Name(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Hash() != base.Hash {
+		t.Fatalf("stale approval moved target to %s", unchanged.Hash())
+	}
+
+	var planned repositoryMergeResult
+	result, err := service.mergeRepositoryBranchesAtSource(
+		repository,
+		parsed,
+		"main",
+		"feature",
+		"alice",
+		"",
+		currentSource.Hash.String(),
+		func(plan repositoryMergeResult) error {
+			beforeUpdate, referenceErr := repository.Reference(targetReference.Name(), false)
+			if referenceErr != nil {
+				return referenceErr
+			}
+			if beforeUpdate.Hash() != base.Hash {
+				t.Errorf("target moved before the merge plan was persisted")
+			}
+			planned = plan
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Repository != parsed.Full() ||
+		result.Target != "main" ||
+		result.Source != "feature" ||
+		result.Commit != currentSource.Hash.String() ||
+		result.Strategy != "fast-forward" {
+		t.Fatalf("unexpected merge result: %#v", result)
+	}
+	if planned.PreviousTarget != base.Hash.String() ||
+		planned.Commit != currentSource.Hash.String() ||
+		planned.Strategy != "fast-forward" {
+		t.Fatalf("unexpected persisted merge plan: %#v", planned)
+	}
+	updated, err := repository.Reference(targetReference.Name(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Hash() != currentSource.Hash {
+		t.Fatalf("target = %s, want %s", updated.Hash(), currentSource.Hash)
+	}
+}
+
+func TestTargetReferenceUpdateErrorMarksOnlyKnownCASConflict(t *testing.T) {
+	err := targetReferenceUpdateError(gitstorage.ErrReferenceHasChanged)
+	var notApplied *mergeNotAppliedError
+	if !errors.As(err, &notApplied) {
+		t.Fatal("reference mismatch was not marked as conclusively unapplied")
+	}
+	var statusError huma.StatusError
+	if !errors.As(err, &statusError) || statusError.GetStatus() != http.StatusConflict {
+		t.Fatalf("marked conflict lost its HTTP status: %v", err)
+	}
+
+	err = targetReferenceUpdateError(errors.New("ambiguous storage failure"))
+	notApplied = nil
+	if errors.As(err, &notApplied) {
+		t.Fatal("ambiguous reference failure was marked as conclusively unapplied")
+	}
+}
+
+func TestCompareCanMergeWithRepositoryScopedWriteToken(t *testing.T) {
+	service, _, head := repositoryAPIFixture(t)
+	parsed := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	repositoryPath, err := service.Storage.GitPath(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("feature"),
+		plumbing.NewHash(head),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	document, err := service.Resolver.Controls.Load(context.Background(), parsed.Group())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash, err := auth.HashSecret("token-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tokens = append(document.Tokens, control.Token{
+		Name:         "review automation",
+		Key:          "reviewer",
+		Hash:         tokenHash,
+		Role:         control.RoleWrite,
+		Repositories: []string{parsed.Name},
+	})
+	if err = service.Storage.UpdateGroupControl(parsed.Group(), document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	service.Resolver.Controls.Invalidate(parsed.Group())
+	request, err := http.NewRequest(http.MethodGet, "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SetBasicAuth("reviewer", "token-secret")
+	credentials := AuthInput{
+		Authorization: request.Header.Get("Authorization"),
+	}
+
+	comparison, err := service.compareRepositoryBranches(
+		context.Background(),
+		&compareRepositoryBranchesInput{
+			AuthInput:  credentials,
+			Repository: parsed.Full(),
+			Base:       "main",
+			Head:       "feature",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !comparison.Body.CanMerge {
+		t.Fatal("repository-scoped write token was not allowed to merge")
+	}
+	branches, err := service.listRepositoryBranches(
+		context.Background(),
+		&repositoryBranchesInput{
+			AuthInput:  credentials,
+			Repository: parsed.Full(),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !branches.Body.CanWrite {
+		t.Fatal("repository-scoped write token was not reported as writable")
+	}
 }
 
 func TestMergeTextLines(t *testing.T) {
