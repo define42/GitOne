@@ -2423,10 +2423,15 @@ function repositoryCommitDiff(data: RepositoryCommitDiff): HTMLElement {
   return content;
 }
 
-function repositoryNavigation(route: RepositoryBrowserRoute): HTMLElement {
+function repositoryNavigation(
+  route: RepositoryBrowserRoute,
+  action?: HTMLButtonElement,
+): HTMLElement {
   const nav = element("nav");
   nav.className = "repository-navigation";
   nav.setAttribute("aria-label", "Repository");
+  const tabs = element("div");
+  tabs.className = "repository-tabs";
   const files = element("a");
   files.append(icon("repository"), document.createTextNode("Files"));
   files.href = repositoryBrowserURL(route.repository, {ref: route.ref});
@@ -2457,7 +2462,12 @@ function repositoryNavigation(route: RepositoryBrowserRoute): HTMLElement {
   } else {
     files.setAttribute("aria-current", "page");
   }
-  nav.append(files, history, builds, mergeRequests);
+  tabs.append(files, history, builds, mergeRequests);
+  nav.append(tabs);
+  if (action) {
+    action.classList.add("repository-navigation-action");
+    nav.append(action);
+  }
   return nav;
 }
 
@@ -4757,13 +4767,17 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   repositoryActions.append(archive.trigger, clone.trigger);
   toolbar.append(branchControl, repositoryActions);
   overview.append(toolbar);
+  const fileCreator = content !== null && "entries" in content && content.canEdit
+    ? repositoryFileCreator(route, content)
+    : null;
   app.append(
     overview,
-    repositoryNavigation(route),
+    repositoryNavigation(route, fileCreator?.trigger),
     branchCreator.dialog,
     branchComparison.dialog,
     archive.dialog,
     clone.dialog,
+    ...(fileCreator ? [fileCreator.dialog] : []),
   );
 
   if (route.view === "history") {
@@ -4804,15 +4818,6 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   if ("entries" in content) {
     const section = element("section");
     section.className = "content-section";
-    const fileCreator = content.canEdit
-      ? repositoryFileCreator(route, content)
-      : null;
-    if (fileCreator) {
-      const treeActions = element("div");
-      treeActions.className = "repository-tree-actions";
-      treeActions.append(fileCreator.trigger);
-      section.append(treeActions);
-    }
     if (builds === null) {
       throw new Error("Repository builds are unavailable.");
     }
@@ -4866,9 +4871,6 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
       }
       table.append(head, body);
       section.append(table);
-    }
-    if (fileCreator) {
-      section.append(fileCreator.dialog);
     }
     app.append(section);
     const readme = await repositoryReadme(route, content);

@@ -2209,12 +2209,6 @@ textarea:focus {
   justify-content: flex-end;
 }
 
-.repository-tree-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 0.8rem;
-}
-
 .branch-control {
   align-items: flex-end;
   display: flex;
@@ -2264,13 +2258,21 @@ textarea:focus {
 }
 
 .repository-navigation {
+  align-items: stretch;
   border-bottom: 1px solid var(--border);
   display: flex;
-  gap: 0.25rem;
+  gap: 0.75rem;
   margin-top: 1rem;
 }
 
-.repository-navigation a {
+.repository-tabs {
+  display: flex;
+  gap: 0.25rem;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.repository-tabs a {
   align-items: center;
   border-bottom: 3px solid transparent;
   color: var(--muted);
@@ -2282,14 +2284,20 @@ textarea:focus {
   text-decoration: none;
 }
 
-.repository-navigation a:hover {
+.repository-tabs a:hover {
   color: var(--text);
 }
 
-.repository-navigation a[aria-current="page"] {
+.repository-tabs a[aria-current="page"] {
   border-bottom-color: var(--brand-orange);
   color: var(--text);
   font-weight: 700;
+}
+
+.repository-navigation-action {
+  align-self: center;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .latest-commit {
@@ -3567,13 +3575,9 @@ table {
     display: none;
   }
 
-  .repository-navigation a {
+  .repository-tabs a {
     flex: 0 0 auto;
     justify-content: center;
-  }
-
-  .repository-navigation {
-    overflow-x: auto;
   }
 
   .build-refresh-state {
