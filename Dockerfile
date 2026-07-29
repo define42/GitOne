@@ -16,6 +16,6 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /gitone ./cmd/gitone
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates docker-cli git
 COPY --from=build /gitone /gitone
-VOLUME ["/data"]
 EXPOSE 8080
-ENTRYPOINT ["/gitone","-root","/data","-listen",":8080"]
+ENTRYPOINT ["/gitone"]
+CMD ["-root","/data","-listen",":8080"]

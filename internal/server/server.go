@@ -21,6 +21,8 @@ type Config struct {
 	Directory       auth.IdentityProvider
 	Sessions        *auth.SessionManager
 	Runner          *runner.Runner
+	Coordinator     *runner.Coordinator
+	RunnerToken     string
 }
 
 func New(c Config) http.Handler {
@@ -74,11 +76,23 @@ func New(c Config) http.Handler {
 	}
 	mux := http.NewServeMux()
 	buildStore := runner.NewStore(c.Root)
+	var scheduler runner.Scheduler
 	if c.Runner != nil {
 		buildStore = c.Runner.Store()
+		scheduler = c.Runner
+	}
+	if c.Coordinator != nil {
+		buildStore = c.Coordinator.Store()
+		scheduler = c.Coordinator
 	}
 	httpapi.Register(mux, httpapi.API{
-		Storage: st, Resolver: ar, Sessions: sessions, Builds: &buildStore, Runner: c.Runner,
+		Storage:     st,
+		Resolver:    ar,
+		Sessions:    sessions,
+		Builds:      &buildStore,
+		Scheduler:   scheduler,
+		Coordinator: c.Coordinator,
+		RunnerToken: c.RunnerToken,
 	})
 	ui := webui.Handler{}
 	mux.Handle("GET /{$}", ui)
@@ -108,13 +122,13 @@ func New(c Config) http.Handler {
 		ReceiveMu:      &sync.Mutex{},
 		ControlUpdated: cs.Invalidate,
 	}
-	if c.Runner != nil {
+	if scheduler != nil {
 		gh.RepositoryUpdated = func(
 			repository repopath.Repository,
 			updates []githttp.ReferenceUpdate,
 		) {
 			for _, update := range updates {
-				if _, err := c.Runner.Schedule(repository, update.Branch, update.Commit); err != nil {
+				if _, err := scheduler.Schedule(repository, update.Branch, update.Commit); err != nil {
 					log.Printf(
 						"could not schedule build for %s@%s: %v",
 						repository.Full(),

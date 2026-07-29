@@ -13,6 +13,7 @@ func setValidEnvironment(t *testing.T) {
 	t.Setenv("LDAP_BASE_DN", "dc=example,dc=com")
 	t.Setenv("GITONE_SESSION_HASH_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("h", 64))))
 	t.Setenv("GITONE_SESSION_BLOCK_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("b", 32))))
+	t.Setenv("GITONE_RUNNER_TOKEN", "")
 }
 
 func TestNewServer(t *testing.T) {

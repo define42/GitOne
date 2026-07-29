@@ -20,7 +20,7 @@ Implemented:
 - Stale-ref rejection and validated fast-forward-only control updates
 - Repository visibility and LFS policy enforcement
 - Go and TypeScript build validation plus a multi-stage Dockerfile
-- Opt-in container runner driven by `.gitone.json`, with branch filters, timeouts, persistent status/logs, build APIs, and a live Builds UI
+- API-connected container runner driven by `.gitone.json`, with durable leases, exact-commit source archives, remote log streaming, branch filters, timeouts, build APIs, and a live Builds UI
 
 Not production-complete yet:
 
@@ -29,6 +29,6 @@ Not production-complete yet:
 - Cross-process locking and atomic multi-path rename/delete transactions
 - Complete Git compatibility matrix and protocol-v2 testing
 - TLS termination, rate limits, audit logs, and observability
-- Distributed runner coordination, cancellation, secrets, artifacts, caches, and log-retention policies
+- Build cancellation, secrets, artifacts, caches, runner capability matching, and log-retention policies
 
 Run `make test` to compile the TypeScript UI and execute the complete Go test suite.

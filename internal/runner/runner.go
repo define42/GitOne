@@ -270,26 +270,7 @@ func (r *Runner) failedConfigurationJob(
 	commit plumbing.Hash,
 	configurationErr error,
 ) (*Job, error) {
-	finished := time.Now().UTC()
-	job := Job{
-		ID:         newJobID(),
-		Repository: repository.Full(),
-		Branch:     branch,
-		Commit:     commit.String(),
-		Status:     StatusFailed,
-		CreatedAt:  finished,
-		FinishedAt: &finished,
-		Error:      "invalid .gitone.json build: " + configurationErr.Error(),
-	}
-	if err := r.state.save(repository, job); err != nil {
-		return nil, errors.Join(configurationErr, err)
-	}
-	logFile, err := r.state.createLog(repository, job.ID)
-	if err == nil {
-		_, _ = fmt.Fprintln(logFile, job.Error)
-		_ = logFile.Close()
-	}
-	return &job, nil
+	return failedConfigurationJob(r.state, repository, branch, commit, configurationErr)
 }
 
 func newJobID() string {

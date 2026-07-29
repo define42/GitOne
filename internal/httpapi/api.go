@@ -18,11 +18,13 @@ import (
 )
 
 type API struct {
-	Storage  storage.Store
-	Resolver *auth.Resolver
-	Sessions *auth.SessionManager
-	Builds   *runner.Store
-	Runner   *runner.Runner
+	Storage     storage.Store
+	Resolver    *auth.Resolver
+	Sessions    *auth.SessionManager
+	Builds      *runner.Store
+	Scheduler   runner.Scheduler
+	Coordinator *runner.Coordinator
+	RunnerToken string
 }
 
 type AuthInput struct {
@@ -171,6 +173,11 @@ func Register(mux *http.ServeMux, service API) huma.API {
 			Name:        auth.SessionCookieName,
 			Description: "GitOne signed and encrypted browser session",
 		},
+		"runnerAuth": {
+			Type:        "http",
+			Scheme:      "bearer",
+			Description: "GitOne remote runner token",
+		},
 	}
 	api := humago.New(mux, config)
 
@@ -183,6 +190,10 @@ func Register(mux *http.ServeMux, service API) huma.API {
 	}, service.health)
 
 	registerSessionAPI(api, service)
+	registerRunnerAPI(api, service)
+	if service.Coordinator != nil {
+		mux.HandleFunc("GET /api/runner/source", service.runnerSource)
+	}
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-groups",

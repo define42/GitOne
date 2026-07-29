@@ -217,6 +217,166 @@ func TestBuildStoreUsesRepositoryLocalDirectory(t *testing.T) {
 	}
 }
 
+func TestCoordinatorLeasesAndCompletesDurableBuild(t *testing.T) {
+	root := t.TempDir()
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	repositoryStore := storage.Store{Root: root}
+	if err := repositoryStore.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := repositoryStore.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{
+			Image: "golang:1.25", Script: []string{"go test ./..."}, Branches: []string{"main"},
+		},
+	})
+	state := NewStore(root)
+	coordinator, err := NewCoordinator(CoordinatorConfig{
+		Storage: repositoryStore, State: state, LeaseDuration: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job == nil || job.Status != StatusQueued {
+		t.Fatalf("scheduled job = %#v", job)
+	}
+
+	lease, err := coordinator.Claim("runner-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease == nil ||
+		lease.Job.ID != job.ID ||
+		lease.Job.Status != StatusRunning ||
+		lease.Job.Attempt != 1 ||
+		lease.Config.Image != "golang:1.25" {
+		t.Fatalf("lease = %#v", lease)
+	}
+	if another, claimErr := coordinator.Claim("runner-two"); claimErr != nil || another != nil {
+		t.Fatalf("second claim = %#v, %v", another, claimErr)
+	}
+	if _, err = coordinator.AppendLog(
+		repositoryPath,
+		job.ID,
+		"runner-one",
+		0,
+		[]byte("tests passed\n"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = coordinator.AppendLog(
+		repositoryPath,
+		job.ID,
+		"runner-one",
+		0,
+		[]byte("duplicate"),
+	); err == nil || !strings.Contains(err.Error(), "offset") {
+		t.Fatalf("mismatched log offset error = %v", err)
+	}
+	if _, err = coordinator.Heartbeat(repositoryPath, job.ID, "runner-two"); err == nil {
+		t.Fatal("another runner extended the lease")
+	}
+	completed, err := coordinator.Complete(repositoryPath, job.ID, "runner-one", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != StatusSucceeded || completed.FinishedAt == nil {
+		t.Fatalf("completed job = %#v", completed)
+	}
+	log, err := state.Log(repositoryPath, job.ID)
+	if err != nil || log != "tests passed\n" {
+		t.Fatalf("stored remote log = %q, %v", log, err)
+	}
+}
+
+func TestCoordinatorReclaimsExpiredLease(t *testing.T) {
+	root := t.TempDir()
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	repositoryStore := storage.Store{Root: root}
+	if err := repositoryStore.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := repositoryStore.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+	})
+	state := NewStore(root)
+	coordinator, err := NewCoordinator(CoordinatorConfig{
+		Storage: repositoryStore, State: state, LeaseDuration: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := coordinator.Claim("runner-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().UTC().Add(-time.Second)
+	first.Job.LeaseExpiresAt = &expired
+	if err = state.save(repositoryPath, first.Job); err != nil {
+		t.Fatal(err)
+	}
+	second, err := coordinator.Claim("runner-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == nil || second.Job.ID != job.ID ||
+		second.Job.RunnerID != "runner-two" || second.Job.Attempt != 2 {
+		t.Fatalf("reclaimed lease = %#v", second)
+	}
+}
+
+func TestSourceArchiveRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	repositoryStore := storage.Store{Root: root}
+	if err := repositoryStore.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := repositoryStore.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+	})
+	var archive bytes.Buffer
+	if err := WriteSourceArchive(repositoryStore, repositoryPath, commit, &archive); err != nil {
+		t.Fatal(err)
+	}
+	destination := t.TempDir()
+	if err := ExtractSourceArchive(&archive, destination); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(destination, "source.txt"))
+	if err != nil || string(contents) != "source at scheduled commit\n" {
+		t.Fatalf("archived source = %q, %v", contents, err)
+	}
+	if _, err = os.Stat(filepath.Join(destination, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("source archive contains Git metadata: %v", err)
+	}
+}
+
 func TestBuildLogIsCappedWithoutStoppingTheWriter(t *testing.T) {
 	var output bytes.Buffer
 	writer := newCappedLogWriter(&output, 64)

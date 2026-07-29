@@ -116,10 +116,10 @@ func (a API) scheduleBuild(
 	branch string,
 	commit plumbing.Hash,
 ) {
-	if a.Runner == nil {
+	if a.Scheduler == nil {
 		return
 	}
-	if _, err := a.Runner.Schedule(repository, branch, commit); err != nil {
+	if _, err := a.Scheduler.Schedule(repository, branch, commit); err != nil {
 		log.Printf(
 			"could not schedule build for %s@%s: %v",
 			repository.Full(),

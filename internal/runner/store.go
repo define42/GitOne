@@ -24,16 +24,19 @@ const (
 )
 
 type Job struct {
-	ID         string     `json:"id"`
-	Repository string     `json:"repository"`
-	Branch     string     `json:"branch"`
-	Commit     string     `json:"commit"`
-	Image      string     `json:"image,omitempty"`
-	Status     Status     `json:"status"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	StartedAt  *time.Time `json:"startedAt,omitempty"`
-	FinishedAt *time.Time `json:"finishedAt,omitempty"`
-	Error      string     `json:"error,omitempty"`
+	ID             string     `json:"id"`
+	Repository     string     `json:"repository"`
+	Branch         string     `json:"branch"`
+	Commit         string     `json:"commit"`
+	Image          string     `json:"image,omitempty"`
+	Status         Status     `json:"status"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	StartedAt      *time.Time `json:"startedAt,omitempty"`
+	FinishedAt     *time.Time `json:"finishedAt,omitempty"`
+	Error          string     `json:"error,omitempty"`
+	RunnerID       string     `json:"runnerId,omitempty"`
+	Attempt        int        `json:"attempt,omitempty"`
+	LeaseExpiresAt *time.Time `json:"leaseExpiresAt,omitempty"`
 }
 
 type Store struct {
@@ -174,6 +177,68 @@ func (s Store) createLog(repository repopath.Repository, id string) (*os.File, e
 		return nil, err
 	}
 	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+}
+
+func (s Store) logSize(repository repopath.Repository, id string) (int64, error) {
+	path, err := s.jobPath(repository, id, ".log")
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func (s Store) appendLog(
+	repository repopath.Repository,
+	id string,
+	offset int64,
+	contents []byte,
+) (int64, error) {
+	path, err := s.jobPath(repository, id, ".log")
+	if err != nil {
+		return 0, err
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return 0, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o640)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if info.Size() != offset {
+		return info.Size(), fmt.Errorf(
+			"build log offset is %d, not %d",
+			info.Size(),
+			offset,
+		)
+	}
+	if info.Size() >= MaximumStoredLogBytes {
+		return info.Size(), nil
+	}
+	remaining := MaximumStoredLogBytes - info.Size()
+	if int64(len(contents)) > remaining {
+		contents = contents[:remaining]
+	}
+	if _, err = file.Seek(0, io.SeekEnd); err != nil {
+		return 0, err
+	}
+	if _, err = file.Write(contents); err != nil {
+		return 0, err
+	}
+	return info.Size() + int64(len(contents)), nil
 }
 
 func (s Store) workRoot() (string, error) {

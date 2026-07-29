@@ -1,13 +1,11 @@
 services:
   gitone:
+    image: gitone:local
     build:
       context: ./
-    command:
-      - -runner
-      - -runner-workers
-      - "1"
     environment:
       - BASE_IMAGE_DIR=/data/baseimages
+      - GITONE_RUNNER_TOKEN=${GITONE_RUNNER_TOKEN:-gitone-development-runner-token}
       - LDAP_URL=ldaps://ldap:389
       - LDAP_BASE_DN=dc=glauth,dc=com
       - LDAP_USER_DOMAIN=example.com
@@ -19,6 +17,25 @@ services:
       - "8080:8080"
     volumes:
       - /data/:/data/
+  runner:
+    image: gitone:local
+    command:
+      - -runner-remote
+      - -runner-url
+      - http://gitone:8080
+      - -runner-id
+      - docker-runner
+      - -runner-workers
+      - "1"
+      - -runner-work-root
+      - /var/lib/gitone-runner
+    environment:
+      - GITONE_RUNNER_TOKEN=${GITONE_RUNNER_TOKEN:-gitone-development-runner-token}
+    depends_on:
+      - gitone
+    restart: unless-stopped
+    volumes:
+      - /var/lib/gitone-runner:/var/lib/gitone-runner
       - /var/run/docker.sock:/var/run/docker.sock
   ldap:
     image: glauth/glauth
