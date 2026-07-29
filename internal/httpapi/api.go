@@ -445,7 +445,7 @@ func (a API) getGroupSettings(ctx context.Context, input *GroupPathInput) (*grou
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorize(ctx, input.AuthInput, path, control.RoleAdmin); err != nil {
+	if _, err = a.authorize(ctx, input.AuthInput, path, control.RoleMaintainer); err != nil {
 		return nil, err
 	}
 	document, err := a.Resolver.Controls.Load(ctx, path)
@@ -484,7 +484,7 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 		ctx,
 		input.AuthInput,
 		path,
-		control.RoleAdmin,
+		control.RoleMaintainer,
 	)
 	if err != nil {
 		return nil, err
@@ -724,7 +724,7 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 	owner := ""
 	if strings.Contains(path, "/") {
 		parent := path[:strings.LastIndex(path, "/")]
-		owner, err = a.authorize(ctx, input.AuthInput, parent, control.RoleAdmin)
+		owner, err = a.authorize(ctx, input.AuthInput, parent, control.RoleMaintainer)
 		if err != nil {
 			return nil, err
 		}
@@ -761,7 +761,7 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 		_ = releaseOperation()
 	}()
 	a.Resolver.Controls.Invalidate(path)
-	author, err := a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
+	author, err := a.authorize(ctx, input.AuthInput, path, control.RoleMaintainer)
 	if err != nil {
 		return nil, err
 	}
@@ -777,7 +777,7 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 				ctx,
 				input.AuthInput,
 				parent,
-				control.RoleAdmin,
+				control.RoleMaintainer,
 			); err != nil {
 				return nil, err
 			}
@@ -807,7 +807,7 @@ func (a API) deleteGroup(ctx context.Context, input *GroupPathInput) (*emptyOutp
 		_ = releaseOperation()
 	}()
 	a.Resolver.Controls.Invalidate(path)
-	if _, err = a.authorize(ctx, input.AuthInput, path, control.RoleAdmin); err != nil {
+	if _, err = a.authorize(ctx, input.AuthInput, path, control.RoleMaintainer); err != nil {
 		return nil, err
 	}
 	if err = a.Storage.DeleteGroupLocked(path); err != nil {
@@ -830,7 +830,7 @@ func (a API) createRepository(ctx context.Context, input *createRepositoryInput)
 		_ = releaseOperation()
 	}()
 	a.Resolver.Controls.Invalidate(repository.Group())
-	principal, err := a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin)
+	principal, err := a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleMaintainer)
 	if err != nil {
 		return nil, err
 	}
@@ -868,7 +868,7 @@ func (a API) importRepository(ctx context.Context, input *importRepositoryInput)
 		ctx,
 		input.AuthInput,
 		repository,
-		control.RoleAdmin,
+		control.RoleMaintainer,
 	); err != nil {
 		return nil, err
 	}
@@ -882,7 +882,7 @@ func (a API) importRepository(ctx context.Context, input *importRepositoryInput)
 			ctx,
 			input.AuthInput,
 			repository,
-			control.RoleAdmin,
+			control.RoleMaintainer,
 		)
 		return authorizeErr
 	})
@@ -917,7 +917,7 @@ func (a API) renameRepository(ctx context.Context, input *renameRepositoryInput)
 		_ = releaseOperation()
 	}()
 	a.Resolver.Controls.Invalidate(repository.Group())
-	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin); err != nil {
+	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleMaintainer); err != nil {
 		return nil, err
 	}
 	if err = a.Storage.RenameRepositoryLocked(
@@ -942,7 +942,7 @@ func (a API) deleteRepository(ctx context.Context, input *RepositoryPathInput) (
 		_ = releaseOperation()
 	}()
 	a.Resolver.Controls.Invalidate(repository.Group())
-	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleAdmin); err != nil {
+	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleMaintainer); err != nil {
 		return nil, err
 	}
 	if err = a.Storage.DeleteRepositoryLocked(repository); err != nil {

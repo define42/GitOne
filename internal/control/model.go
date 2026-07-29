@@ -6,15 +6,15 @@ import (
 	"time"
 )
 
-const CurrentVersion = 2
+const CurrentVersion = 3
 
 type Role string
 
 const (
-	RoleRead  Role = "read"
-	RoleWrite Role = "write"
-	RoleAdmin Role = "admin"
-	RoleOwner Role = "owner"
+	RoleRead       Role = "read"
+	RoleWrite      Role = "write"
+	RoleMaintainer Role = "maintainer"
+	RoleOwner      Role = "owner"
 )
 
 type Document struct {
@@ -42,7 +42,7 @@ type LFSPolicy struct {
 }
 
 func (r Role) Allows(need Role) bool {
-	rank := map[Role]int{RoleRead: 1, RoleWrite: 2, RoleAdmin: 3, RoleOwner: 4}
+	rank := map[Role]int{RoleRead: 1, RoleWrite: 2, RoleMaintainer: 3, RoleOwner: 4}
 	return rank[r] >= rank[need]
 }
 

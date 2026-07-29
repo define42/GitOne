@@ -992,7 +992,7 @@ function sectionHeading(title, count, actions = []) {
 }
 function roleSelect(value, canSelectOwner = true) {
     const select = element("select");
-    for (const role of ["read", "write", "admin", "owner"]) {
+    for (const role of ["read", "write", "maintainer", "owner"]) {
         const option = element("option", role[0].toUpperCase() + role.slice(1));
         option.value = role;
         option.selected = role === value;

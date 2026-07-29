@@ -6,6 +6,12 @@ func TestRoleAllows(t *testing.T) {
 	if !RoleOwner.Allows(RoleWrite) {
 		t.Fatal("owner should write")
 	}
+	if !RoleMaintainer.Allows(RoleWrite) {
+		t.Fatal("maintainer should write")
+	}
+	if RoleMaintainer.Allows(RoleOwner) {
+		t.Fatal("maintainer should not have owner access")
+	}
 	if RoleRead.Allows(RoleWrite) {
 		t.Fatal("read should not write")
 	}
@@ -68,6 +74,12 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			},
 		},
 		{
+			name: "legacy admin member role",
+			mutate: func(document *Document) {
+				document.Members["bob"] = Role("admin")
+			},
+		},
+		{
 			name: "token without name",
 			mutate: func(document *Document) {
 				document.Tokens = []Token{{Key: "deploy", Hash: "hash", Role: RoleWrite}}
@@ -89,6 +101,12 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			name: "invalid token role",
 			mutate: func(document *Document) {
 				document.Tokens = []Token{{Name: "ci", Key: "deploy", Hash: "hash", Role: Role("superuser")}}
+			},
+		},
+		{
+			name: "legacy admin token role",
+			mutate: func(document *Document) {
+				document.Tokens = []Token{{Name: "ci", Key: "deploy", Hash: "hash", Role: Role("admin")}}
 			},
 		},
 		{

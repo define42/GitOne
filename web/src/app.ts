@@ -294,7 +294,7 @@ interface BrowserSession {
   username: string;
 }
 
-type GroupRole = "read" | "write" | "admin" | "owner";
+type GroupRole = "read" | "write" | "maintainer" | "owner";
 
 interface GroupToken {
   name: string;
@@ -1531,7 +1531,7 @@ function roleSelect(
   canSelectOwner = true,
 ): HTMLSelectElement {
   const select = element("select");
-  for (const role of ["read", "write", "admin", "owner"] as GroupRole[]) {
+  for (const role of ["read", "write", "maintainer", "owner"] as GroupRole[]) {
     const option = element("option", role[0].toUpperCase() + role.slice(1));
     option.value = role;
     option.selected = role === value;

@@ -100,7 +100,7 @@ func (a API) importRepositoryArchiveHTTP(w http.ResponseWriter, request *http.Re
 		request.Context(),
 		credentials,
 		repository,
-		control.RoleAdmin,
+		control.RoleMaintainer,
 	); err != nil {
 		writeArchiveImportAPIError(w, err)
 		return
@@ -173,7 +173,7 @@ func (a API) importRepositoryArchiveHTTP(w http.ResponseWriter, request *http.Re
 				request.Context(),
 				credentials,
 				repository,
-				control.RoleAdmin,
+				control.RoleMaintainer,
 			)
 			return authorizeErr
 		},

@@ -300,7 +300,7 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 				Name: "automation",
 				Key:  token.Key,
 				Hash: token.Hash,
-				Role: control.RoleAdmin,
+				Role: control.RoleMaintainer,
 			}},
 		},
 	})
@@ -319,7 +319,7 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current.Members["bob"] = control.RoleAdmin
+	current.Members["bob"] = control.RoleMaintainer
 	if err = service.Storage.UpdateGroupControl("engineering", current, "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.SetBasicAuth("bob", "bob-secret")
-	adminCredentials := AuthInput{Authorization: request.Header.Get("Authorization")}
+	maintainerCredentials := AuthInput{Authorization: request.Header.Get("Authorization")}
 
 	settingsBody := func() updateGroupSettingsBody {
 		t.Helper()
@@ -374,16 +374,16 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 		return updateErr
 	}
 
-	adminUpdate := settingsBody()
-	adminUpdate.Description = "Admins may change ordinary settings"
-	adminUpdate.Tokens = append(adminUpdate.Tokens, groupTokenInput{
+	maintainerUpdate := settingsBody()
+	maintainerUpdate.Description = "Maintainers may change ordinary settings"
+	maintainerUpdate.Tokens = append(maintainerUpdate.Tokens, groupTokenInput{
 		Name:      "automation",
 		Key:       "ci",
 		NewSecret: "ci-secret",
-		Role:      control.RoleAdmin,
+		Role:      control.RoleMaintainer,
 	})
-	if err = update(adminCredentials, adminUpdate); err != nil {
-		t.Fatalf("admin ordinary settings update failed: %v", err)
+	if err = update(maintainerCredentials, maintainerUpdate); err != nil {
+		t.Fatalf("maintainer ordinary settings update failed: %v", err)
 	}
 
 	for _, test := range []struct {
@@ -423,8 +423,8 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			body := settingsBody()
 			test.change(&body)
-			if updateErr := update(adminCredentials, body); updateErr == nil {
-				t.Fatalf("admin changed owner-only setting %s", test.name)
+			if updateErr := update(maintainerCredentials, body); updateErr == nil {
+				t.Fatalf("maintainer changed owner-only setting %s", test.name)
 			}
 			persisted, loadErr := service.Resolver.Controls.Load(ctx, "engineering")
 			if loadErr != nil {
@@ -434,7 +434,7 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 				persisted.Visibility != current.Visibility ||
 				persisted.LFS != current.LFS ||
 				len(persisted.Tokens) != 1 ||
-				persisted.Tokens[0].Role != control.RoleAdmin {
+				persisted.Tokens[0].Role != control.RoleMaintainer {
 				t.Fatalf("denied update changed settings: %#v", persisted)
 			}
 		})
@@ -755,7 +755,7 @@ func TestGroupLifecycleEndpoints(t *testing.T) {
 	}
 }
 
-func TestRenameGroupRequiresAdminAccessToChangedParents(t *testing.T) {
+func TestRenameGroupRequiresMaintainerAccessToChangedParents(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	store := storage.Store{Root: root}
@@ -817,24 +817,24 @@ func TestRenameGroupRequiresAdminAccessToChangedParents(t *testing.T) {
 		controls.Invalidate(group)
 	}
 
-	setRole("destination", "alice", control.RoleAdmin)
+	setRole("destination", "alice", control.RoleMaintainer)
 	if err = move(); err == nil {
-		t.Fatal("group moved without source-parent admin access")
+		t.Fatal("group moved without source-parent maintainer access")
 	}
 	if _, err = controls.Load(ctx, "source/team"); err != nil {
 		t.Fatalf("source group changed after denied move: %v", err)
 	}
 
-	setRole("source", "alice", control.RoleAdmin)
+	setRole("source", "alice", control.RoleMaintainer)
 	setRole("destination", "alice", "")
 	if err = move(); err == nil {
-		t.Fatal("group moved without destination-parent admin access")
+		t.Fatal("group moved without destination-parent maintainer access")
 	}
 	if _, err = controls.Load(ctx, "source/team"); err != nil {
 		t.Fatalf("source group changed after denied move: %v", err)
 	}
 
-	setRole("destination", "alice", control.RoleAdmin)
+	setRole("destination", "alice", control.RoleMaintainer)
 	if err = move(); err != nil {
 		t.Fatalf("group move with both parent permissions failed: %v", err)
 	}

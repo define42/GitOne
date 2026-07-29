@@ -302,7 +302,7 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 		Name: "deploy",
 		Key:  "ci",
 		Hash: tokenHash,
-		Role: control.RoleAdmin,
+		Role: control.RoleMaintainer,
 	}}
 	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
 		t.Fatal(err)
