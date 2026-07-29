@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
-	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
 	"github.com/go-git/go-billy/v5/osfs"
 	git "github.com/go-git/go-git/v5"
@@ -25,9 +24,6 @@ import (
 
 const noThinCapability capability.Capability = "no-thin"
 
-//nolint:gochecknoglobals // The fallback must serialize receives across all handler instances.
-var fallbackReceiveMu sync.Mutex
-
 type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 
 type ReferenceUpdate struct {
@@ -38,7 +34,6 @@ type ReferenceUpdate struct {
 type Handler struct {
 	Storage           storage.Store
 	Authorize         Authorizer
-	ReceiveMu         *sync.Mutex
 	ControlUpdated    func(string)
 	RepositoryUpdated func(repopath.Repository, []ReferenceUpdate)
 }
@@ -208,13 +203,19 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		}
 	}
 
-	releaseOperation, err := review.NewStore(h.Storage.Root).AcquireOperationLock()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(
+			h.Storage.Root,
+			[]repopath.Repository{repo},
+			lockmgr.Exclusive,
+		)...,
+	)
 	if err != nil {
 		h.writeReceiveError(w, req, err.Error(), err)
 		return
 	}
 	defer func() {
-		_ = releaseOperation()
+		releaseOperation()
 	}()
 	if !h.authorize(w, r, repo, true) {
 		return
@@ -229,13 +230,6 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		http.Error(w, "not found", 404)
 		return
 	}
-
-	mu := h.ReceiveMu
-	if mu == nil {
-		mu = &fallbackReceiveMu
-	}
-	mu.Lock()
-	defer mu.Unlock()
 
 	if err = validateReferenceCommands(repository, req); err != nil {
 		h.writeReceiveError(w, req, "ok", err)

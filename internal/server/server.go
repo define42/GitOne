@@ -3,7 +3,6 @@ package server
 import (
 	"log"
 	"net/http"
-	"sync"
 
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
@@ -107,12 +106,10 @@ func New(c Config) http.Handler {
 			}
 			return document.LFS, nil
 		},
-		UploadMu: &sync.Mutex{},
 	}
 	gh := githttp.Handler{
 		Storage:        st,
 		Authorize:      authorizeRepo,
-		ReceiveMu:      &sync.Mutex{},
 		ControlUpdated: cs.Invalidate,
 	}
 	if scheduler != nil {

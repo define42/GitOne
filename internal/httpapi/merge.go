@@ -105,7 +105,7 @@ func (a API) mergeRepositoryBranches(
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperationLock, err := a.reviewStore().AcquireOperationLock()
+	releaseOperationLock, err := a.acquireRepositoryOperationLocks(parsed)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not lock repository operations", err)
 	}

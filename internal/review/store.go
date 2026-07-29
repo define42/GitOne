@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/define42/GitOne/internal/repopath"
@@ -24,27 +23,18 @@ const maximumRecordBytes = 8 << 20
 var (
 	ErrNotFound  = errors.New("merge request not found")
 	ErrDuplicate = errors.New("an open merge request already exists for these branches")
-	storeLocks   sync.Map //nolint:gochecknoglobals // Coordinates stores opened for the same root.
 )
 
 type Store struct {
 	Root string
-	mu   *sync.Mutex
 }
 
 func NewStore(root string) *Store {
-	key, err := filepath.Abs(root)
-	if err != nil {
-		key = filepath.Clean(root)
-	} else if resolved, resolveErr := filepath.EvalSymlinks(key); resolveErr == nil {
-		key = resolved
-	}
-	lock, _ := storeLocks.LoadOrStore(key, &sync.Mutex{})
-	return &Store{Root: root, mu: lock.(*sync.Mutex)}
+	return &Store{Root: root}
 }
 
 func (s *Store) List(repository repopath.Repository) ([]MergeRequest, error) {
-	unlock, err := s.lockStore()
+	unlock, err := s.lockRepositories(repository)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +49,7 @@ func (s *Store) Get(repository repopath.Repository, id uint64) (MergeRequest, er
 	if id == 0 {
 		return MergeRequest{}, errors.New("merge request ID must be greater than zero")
 	}
-	unlock, err := s.lockStore()
+	unlock, err := s.lockRepositories(repository)
 	if err != nil {
 		return MergeRequest{}, err
 	}
@@ -77,7 +67,7 @@ func (s *Store) Create(
 	if request == nil {
 		return errors.New("merge request is required")
 	}
-	unlock, err := s.lockStore()
+	unlock, err := s.lockRepositories(repository)
 	if err != nil {
 		return err
 	}
@@ -154,7 +144,7 @@ func (s *Store) Update(
 	if update == nil {
 		return MergeRequest{}, errors.New("merge request update is required")
 	}
-	unlock, err := s.lockStore()
+	unlock, err := s.lockRepositories(repository)
 	if err != nil {
 		return MergeRequest{}, err
 	}
@@ -198,7 +188,7 @@ func (s *Store) Relocate(
 	repository repopath.Repository,
 	destination repopath.Repository,
 ) error {
-	unlock, err := s.lockStore()
+	unlock, err := s.lockRepositories(repository, destination)
 	if err != nil {
 		return err
 	}
@@ -280,7 +270,7 @@ func (s *Store) relocate(
 }
 
 func (s *Store) RewriteGroup(sourceGroup, destinationGroup string) error {
-	unlock, err := s.lockStore()
+	unlock, err := s.lockGroups(sourceGroup, destinationGroup)
 	if err != nil {
 		return err
 	}

@@ -806,7 +806,7 @@ func (a API) mergeStoredRequest(
 	expectedCreatedAt time.Time,
 	expectedHeadCommit string,
 ) (mergeRequestView, error) {
-	releaseOperationLock, err := a.reviewStore().AcquireOperationLock()
+	releaseOperationLock, err := a.acquireRepositoryOperationLocks(parsed)
 	if err != nil {
 		return mergeRequestView{}, huma.Error500InternalServerError(
 			"could not lock repository operations",
@@ -1086,7 +1086,7 @@ func (a API) recoverInterruptedMergeClaim(
 		}
 	}
 
-	releaseOperationLock, err := a.reviewStore().AcquireOperationLock()
+	releaseOperationLock, err := a.acquireRepositoryOperationLocks(parsed)
 	if err != nil {
 		return review.MergeRequest{}, huma.Error500InternalServerError(
 			"could not lock repository operations",
@@ -1239,7 +1239,7 @@ func (a API) openLockedReviewRepository(
 	if err != nil {
 		return nil, repopath.Repository{}, auth.Principal{}, nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperationLock, err := a.reviewStore().AcquireOperationLock()
+	releaseOperationLock, err := a.acquireRepositoryOperationLocks(parsed)
 	if err != nil {
 		return nil, repopath.Repository{}, auth.Principal{}, nil, huma.Error500InternalServerError(
 			"could not lock repository operations",

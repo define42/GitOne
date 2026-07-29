@@ -459,7 +459,17 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	name := strings.TrimSpace(input.Body.Name)
+	if name == "" || strings.Contains(name, "/") {
+		return nil, huma.Error400BadRequest("group name must be one path segment")
+	}
+	parts := strings.Split(path, "/")
+	parts[len(parts)-1] = name
+	target, err := canonicalGroup(strings.Join(parts, "/"))
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	releaseOperation, err := a.acquireGroupOperationLocks(path, target)
 	if err != nil {
 		return nil, err
 	}
@@ -474,16 +484,6 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	current, err := a.Resolver.Controls.Load(ctx, path)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not load current group settings", err)
-	}
-	name := strings.TrimSpace(input.Body.Name)
-	if name == "" || strings.Contains(name, "/") {
-		return nil, huma.Error400BadRequest("group name must be one path segment")
-	}
-	parts := strings.Split(path, "/")
-	parts[len(parts)-1] = name
-	target, err := canonicalGroup(strings.Join(parts, "/"))
-	if err != nil {
-		return nil, huma.Error400BadRequest(err.Error())
 	}
 	document := control.Document{
 		Version:     control.CurrentVersion,
@@ -560,7 +560,7 @@ func (a API) renameGroupControls(
 	current control.Document,
 	author string,
 ) error {
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireGroupOperationLocks(path, target)
 	if err != nil {
 		return err
 	}
@@ -647,7 +647,7 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireGroupOperationLocks(path)
 	if err != nil {
 		return nil, err
 	}
@@ -687,7 +687,7 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireGroupOperationLocks(path, newPath)
 	if err != nil {
 		return nil, err
 	}
@@ -715,7 +715,7 @@ func (a API) deleteGroup(ctx context.Context, input *GroupPathInput) (*emptyOutp
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireGroupOperationLocks(path)
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +738,7 @@ func (a API) createRepository(ctx context.Context, input *createRepositoryInput)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireRepositoryOperationLocks(repository)
 	if err != nil {
 		return nil, err
 	}
@@ -779,13 +779,6 @@ func (a API) importRepository(ctx context.Context, input *importRepositoryInput)
 		)
 	}
 
-	releaseOperation, err := a.acquireOperationLock()
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = releaseOperation()
-	}()
 	a.Resolver.Controls.Invalidate(repository.Group())
 	if _, err = a.authorizeRepository(
 		ctx,
@@ -795,10 +788,19 @@ func (a API) importRepository(ctx context.Context, input *importRepositoryInput)
 	); err != nil {
 		return nil, err
 	}
-	err = a.Storage.ImportRepositoryLocked(ctx, repository, storage.ImportRepositoryOptions{
+	err = a.Storage.ImportRepositoryValidated(ctx, repository, storage.ImportRepositoryOptions{
 		URL:      remoteURL,
 		Username: username,
 		Password: input.Body.Password,
+	}, func() error {
+		a.Resolver.Controls.Invalidate(repository.Group())
+		_, authorizeErr := a.authorizeRepository(
+			ctx,
+			input.AuthInput,
+			repository,
+			control.RoleAdmin,
+		)
+		return authorizeErr
 	})
 	if err != nil {
 		var remoteError *storage.RemoteImportError
@@ -818,7 +820,12 @@ func (a API) renameRepository(ctx context.Context, input *renameRepositoryInput)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	newName := strings.TrimSuffix(input.Body.NewName, ".git")
+	destination, err := parseRepositoryPath(repository.Group() + "/" + newName)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	releaseOperation, err := a.acquireRepositoryOperationLocks(repository, destination)
 	if err != nil {
 		return nil, err
 	}
@@ -831,7 +838,7 @@ func (a API) renameRepository(ctx context.Context, input *renameRepositoryInput)
 	}
 	if err = a.Storage.RenameRepositoryLocked(
 		repository,
-		strings.TrimSuffix(input.Body.NewName, ".git"),
+		newName,
 	); err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
@@ -843,7 +850,7 @@ func (a API) deleteRepository(ctx context.Context, input *RepositoryPathInput) (
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireRepositoryOperationLocks(repository)
 	if err != nil {
 		return nil, err
 	}

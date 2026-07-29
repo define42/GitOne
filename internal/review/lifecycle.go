@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 )
 
@@ -29,7 +30,40 @@ func (s *Store) WithLifecycleLockHeld(action func() error) error {
 	if action == nil {
 		return errors.New("review lifecycle action is required")
 	}
-	unlock, err := s.lockStore()
+	release, err := lockmgr.Process.Acquire(
+		lockmgr.ReviewCatalogRequest(s.Root, lockmgr.Exclusive),
+	)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		release()
+	}()
+	return action()
+}
+
+func (s *Store) WithRepositoryLocks(
+	repositories []repopath.Repository,
+	action func() error,
+) error {
+	if action == nil {
+		return errors.New("review repository action is required")
+	}
+	unlock, err := s.lockRepositories(repositories...)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = unlock()
+	}()
+	return action()
+}
+
+func (s *Store) WithGroupLocks(groups []string, action func() error) error {
+	if action == nil {
+		return errors.New("review group action is required")
+	}
+	unlock, err := s.lockGroups(groups...)
 	if err != nil {
 		return err
 	}
@@ -50,14 +84,20 @@ func (s *Store) MoveRepository(
 	if move == nil || rollback == nil {
 		return errors.New("repository move and rollback actions are required")
 	}
-	unlock, err := s.lockLifecycle()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(
+			s.Root,
+			[]repopath.Repository{source, destination},
+			lockmgr.Exclusive,
+		)...,
+	)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = unlock()
+		releaseOperation()
 	}()
-	return s.moveRepository(source, destination, move, rollback)
+	return s.MoveRepositoryLocked(source, destination, move, rollback)
 }
 
 // MoveRepositoryLocked moves repository state while its caller holds the
@@ -71,7 +111,7 @@ func (s *Store) MoveRepositoryLocked(
 	if move == nil || rollback == nil {
 		return errors.New("repository move and rollback actions are required")
 	}
-	unlock, err := s.lockStore()
+	unlock, err := s.lockRepositories(source, destination)
 	if err != nil {
 		return err
 	}
@@ -116,14 +156,20 @@ func (s *Store) MoveGroup(
 	if move == nil || rollback == nil {
 		return errors.New("group move and rollback actions are required")
 	}
-	unlock, err := s.lockLifecycle()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.GroupRequests(
+			s.Root,
+			[]string{sourceGroup, destinationGroup},
+			lockmgr.Exclusive,
+		)...,
+	)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = unlock()
+		releaseOperation()
 	}()
-	return s.moveGroup(sourceGroup, destinationGroup, move, rollback)
+	return s.MoveGroupLocked(sourceGroup, destinationGroup, move, rollback)
 }
 
 // MoveGroupLocked moves group and review state while its caller holds the
@@ -137,7 +183,7 @@ func (s *Store) MoveGroupLocked(
 	if move == nil || rollback == nil {
 		return errors.New("group move and rollback actions are required")
 	}
-	unlock, err := s.lockStore()
+	unlock, err := s.lockGroups(sourceGroup, destinationGroup)
 	if err != nil {
 		return err
 	}
@@ -166,16 +212,15 @@ func (s *Store) moveGroup(
 }
 
 func (s *Store) lockLifecycle() (func() error, error) {
-	releaseOperation, err := s.AcquireOperationLock()
+	release, err := lockmgr.Process.Acquire(
+		lockmgr.CatalogRequest(s.Root, lockmgr.Exclusive),
+		lockmgr.ReviewCatalogRequest(s.Root, lockmgr.Exclusive),
+	)
 	if err != nil {
-		return nil, err
-	}
-	unlockStore, err := s.lockStore()
-	if err != nil {
-		_ = releaseOperation()
 		return nil, err
 	}
 	return func() error {
-		return errors.Join(unlockStore(), releaseOperation())
+		release()
+		return nil
 	}, nil
 }

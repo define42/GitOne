@@ -490,7 +490,11 @@ func (a API) createRepositoryBranch(ctx context.Context, input *createRepository
 	if err != nil {
 		return nil, huma.Error400BadRequest("invalid source branch name", err)
 	}
-	releaseOperation, err := a.reviewStore().AcquireOperationLock()
+	parsed, err := parseRepositoryPath(input.Repository)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	releaseOperation, err := a.acquireRepositoryOperationLocks(parsed)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(
 			"could not lock repository operations",

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
@@ -169,13 +170,13 @@ func (s Store) ListGroups() ([]GroupInfo, error) {
 }
 
 func (s Store) CreateRepository(r repopath.Repository, options CreateRepositoryOptions) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(s.Root, []repopath.Repository{r}, lockmgr.Exclusive)...,
+	)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
+	defer releaseOperation()
 	return s.CreateRepositoryLocked(r, options)
 }
 
@@ -188,7 +189,7 @@ func (s Store) CreateRepositoryLocked(
 	if r.Name == "control" {
 		return errors.New("reserved repository name")
 	}
-	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+	return review.NewStore(s.Root).WithRepositoryLocks([]repopath.Repository{r}, func() error {
 		return s.createRepository(r, options)
 	})
 }
@@ -198,14 +199,55 @@ func (s Store) ImportRepository(
 	r repopath.Repository,
 	options ImportRepositoryOptions,
 ) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	return s.ImportRepositoryValidated(ctx, r, options, nil)
+}
+
+// ImportRepositoryValidated stages the remote clone without holding a
+// repository lock. Once staging is complete, it locks and revalidates the
+// destination, calls validate, and atomically publishes the repository.
+func (s Store) ImportRepositoryValidated(
+	ctx context.Context,
+	r repopath.Repository,
+	options ImportRepositoryOptions,
+	validate func() error,
+) error {
+	if r.Name == "control" {
+		return errors.New("reserved repository name")
+	}
+	if err := s.checkImportDestination(r); err != nil {
+		return err
+	}
+	temporaryPath, err := s.stageRemoteRepository(ctx, options)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = releaseOperation()
+		_ = os.RemoveAll(temporaryPath)
 	}()
-	return s.ImportRepositoryLocked(ctx, r, options)
+
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(s.Root, []repopath.Repository{r}, lockmgr.Exclusive)...,
+	)
+	if err != nil {
+		return err
+	}
+	defer releaseOperation()
+	if validate != nil {
+		if err = validate(); err != nil {
+			return err
+		}
+	}
+	return review.NewStore(s.Root).WithRepositoryLocks([]repopath.Repository{r}, func() error {
+		destination, prepareErr := s.prepareImportDestination(r)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		return adoptImportedRepository(
+			temporaryPath,
+			destination.gitPath,
+			destination.lfsPath,
+		)
+	})
 }
 
 // ImportRepositoryLocked mirrors a remote HTTP(S) repository into a bare
@@ -218,7 +260,7 @@ func (s Store) ImportRepositoryLocked(
 	if r.Name == "control" {
 		return errors.New("reserved repository name")
 	}
-	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+	return review.NewStore(s.Root).WithRepositoryLocks([]repopath.Repository{r}, func() error {
 		return s.importRepository(ctx, r, options)
 	})
 }
@@ -232,11 +274,7 @@ func (s Store) importRepository(
 	if err != nil {
 		return err
 	}
-
-	temporaryPath, err := os.MkdirTemp(
-		destination.groupPath,
-		".gitone-import-*.build",
-	)
+	temporaryPath, err := s.stageRemoteRepository(ctx, options)
 	if err != nil {
 		return err
 	}
@@ -244,6 +282,21 @@ func (s Store) importRepository(
 		_ = os.RemoveAll(temporaryPath)
 	}()
 
+	return adoptImportedRepository(
+		temporaryPath,
+		destination.gitPath,
+		destination.lfsPath,
+	)
+}
+
+func (s Store) stageRemoteRepository(
+	ctx context.Context,
+	options ImportRepositoryOptions,
+) (string, error) {
+	temporaryPath, err := s.newImportStagingDirectory()
+	if err != nil {
+		return "", err
+	}
 	cloneOptions := &git.CloneOptions{
 		URL:    options.URL,
 		Mirror: true,
@@ -255,13 +308,22 @@ func (s Store) importRepository(
 		}
 	}
 	if _, err = git.PlainCloneContext(ctx, temporaryPath, true, cloneOptions); err != nil {
-		return &RemoteImportError{Err: err}
+		_ = os.RemoveAll(temporaryPath)
+		return "", &RemoteImportError{Err: err}
 	}
-	return adoptImportedRepository(
-		temporaryPath,
-		destination.gitPath,
-		destination.lfsPath,
+	return temporaryPath, nil
+}
+
+func (s Store) checkImportDestination(r repopath.Repository) error {
+	release, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(s.Root, []repopath.Repository{r}, lockmgr.Exclusive)...,
 	)
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = s.prepareImportDestination(r)
+	return err
 }
 
 func (s Store) createRepository(r repopath.Repository, options CreateRepositoryOptions) error {
@@ -434,20 +496,20 @@ func plumbingSymbolicMain() *plumbing.Reference {
 }
 
 func (s Store) CreateGroup(group, owner, description string) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.GroupRequests(s.Root, []string{group}, lockmgr.Exclusive)...,
+	)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
+	defer releaseOperation()
 	return s.CreateGroupLocked(group, owner, description)
 }
 
 // CreateGroupLocked creates a group while its caller holds the repository
 // operations lock.
 func (s Store) CreateGroupLocked(group, owner, description string) error {
-	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+	return review.NewStore(s.Root).WithGroupLocks([]string{group}, func() error {
 		return s.createGroup(group, owner, description)
 	})
 }
@@ -536,13 +598,13 @@ func (s Store) createGroup(group, owner, description string) error {
 }
 
 func (s Store) UpdateGroupControl(group string, document control.Document, author string) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.GroupRequests(s.Root, []string{group}, lockmgr.Exclusive)...,
+	)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
+	defer releaseOperation()
 	return s.UpdateGroupControlLocked(group, document, author)
 }
 
@@ -662,13 +724,13 @@ func (s Store) updateGroupControl(group string, document control.Document, autho
 }
 
 func (s Store) DeleteRepository(r repopath.Repository) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(s.Root, []repopath.Repository{r}, lockmgr.Exclusive)...,
+	)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
+	defer releaseOperation()
 	return s.DeleteRepositoryLocked(r)
 }
 
@@ -696,7 +758,7 @@ func (s Store) DeleteRepositoryLocked(r repopath.Repository) error {
 		return err
 	}
 	reviews := review.NewStore(s.Root)
-	return reviews.WithLifecycleLockHeld(func() error {
+	return reviews.WithRepositoryLocks([]repopath.Repository{r}, func() error {
 		if err = os.MkdirAll(trash, 0o750); err != nil {
 			return err
 		}
@@ -751,13 +813,24 @@ func (s Store) DeleteRepositoryLocked(r repopath.Repository) error {
 }
 
 func (s Store) RenameRepository(r repopath.Repository, newName string) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	if newName == "" || newName == "control" || filepath.Base(newName) != newName {
+		return errors.New("invalid repository name")
+	}
+	renamed := repopath.Repository{
+		Groups: append([]string(nil), r.Groups...),
+		Name:   newName,
+	}
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(
+			s.Root,
+			[]repopath.Repository{r, renamed},
+			lockmgr.Exclusive,
+		)...,
+	)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
+	defer releaseOperation()
 	return s.RenameRepositoryLocked(r, newName)
 }
 
@@ -882,20 +955,20 @@ func (s Store) RenameRepositoryLocked(r repopath.Repository, newName string) err
 }
 
 func (s Store) DeleteGroup(group string) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.GroupRequests(s.Root, []string{group}, lockmgr.Exclusive)...,
+	)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
+	defer releaseOperation()
 	return s.DeleteGroupLocked(group)
 }
 
 // DeleteGroupLocked deletes a group while its caller holds the repository
 // operations lock.
 func (s Store) DeleteGroupLocked(group string) error {
-	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+	return review.NewStore(s.Root).WithGroupLocks([]string{group}, func() error {
 		return s.deleteGroup(group)
 	})
 }
@@ -925,13 +998,17 @@ func (s Store) deleteGroup(group string) error {
 }
 
 func (s Store) RenameGroup(group, newPath string) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.GroupRequests(
+			s.Root,
+			[]string{group, newPath},
+			lockmgr.Exclusive,
+		)...,
+	)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
+	defer releaseOperation()
 	return s.RenameGroupLocked(group, newPath)
 }
 

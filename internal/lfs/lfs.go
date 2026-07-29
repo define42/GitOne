@@ -11,11 +11,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
-	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
 )
@@ -27,7 +26,6 @@ type Handler struct {
 	PublicURL string
 	Authorize func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 	Policy    func(*http.Request, repopath.Repository) (control.LFSPolicy, error)
-	UploadMu  *sync.Mutex
 }
 type batchRequest struct {
 	Operation string   `json:"operation"`
@@ -212,18 +210,42 @@ func (h Handler) object(
 	}
 	switch r.Method {
 	case http.MethodPut:
-		releaseOperation, err := review.NewStore(h.Storage.Root).AcquireOperationLock()
+		policy, ok := h.policy(w, r, repo)
+		if !ok {
+			return
+		}
+		if policy.MaximumObjectBytes > 0 &&
+			r.ContentLength > policy.MaximumObjectBytes {
+			http.Error(w, "object exceeds the group LFS object limit", http.StatusUnprocessableEntity)
+			return
+		}
+		stagedPath, stagedSize, err := h.stageUpload(r, oid, policy)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		defer func() {
+			_ = os.Remove(stagedPath)
+		}()
+
+		requests := lockmgr.RepositoryRequests(
+			h.Storage.Root,
+			[]repopath.Repository{repo},
+			lockmgr.Shared,
+		)
+		requests = append(requests, lockmgr.LFSRequests(h.Storage.Root, repo.Group())...)
+		releaseOperation, err := lockmgr.Process.Acquire(requests...)
 		if err != nil {
 			http.Error(w, "could not lock repository operations", http.StatusInternalServerError)
 			return
 		}
 		defer func() {
-			_ = releaseOperation()
+			releaseOperation()
 		}()
 		if !h.authorize(w, r, repo, true) {
 			return
 		}
-		policy, ok := h.policy(w, r, repo)
+		policy, ok = h.policy(w, r, repo)
 		if !ok {
 			return
 		}
@@ -242,11 +264,11 @@ func (h Handler) object(
 			return
 		}
 		if policy.MaximumObjectBytes > 0 &&
-			r.ContentLength > policy.MaximumObjectBytes {
+			stagedSize > policy.MaximumObjectBytes {
 			http.Error(w, "object exceeds the group LFS object limit", http.StatusUnprocessableEntity)
 			return
 		}
-		if err = h.upload(r, repo, p, oid, policy); err != nil {
+		if err = h.publishUpload(repo, p, stagedPath, stagedSize, policy); err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
@@ -281,59 +303,66 @@ func (h Handler) object(
 	}
 }
 
-func (h Handler) upload(
+func (h Handler) stageUpload(
 	r *http.Request,
-	repo repopath.Repository,
-	p string,
 	oid string,
 	policy control.LFSPolicy,
-) error {
-	mu := h.UploadMu
-	if mu == nil {
-		mu = &fallbackUploadMu
+) (string, int64, error) {
+	root, err := repopath.SafeJoin(h.Storage.Root, ".gitone", "uploads")
+	if err != nil {
+		return "", 0, err
 	}
-	mu.Lock()
-	defer mu.Unlock()
-
-	if _, err := os.Stat(p); err == nil {
-		return nil
+	if err = os.MkdirAll(root, 0o750); err != nil {
+		return "", 0, err
 	}
-	if e := os.MkdirAll(filepath.Dir(p), 0o750); e != nil {
-		return e
+	temporary, err := os.CreateTemp(root, "object-*")
+	if err != nil {
+		return "", 0, err
 	}
-	tmp, e := os.CreateTemp(filepath.Dir(p), ".upload-")
-	if e != nil {
-		return e
-	}
-	name := tmp.Name()
+	name := temporary.Name()
 	defer func() {
-		_ = os.Remove(name)
+		_ = temporary.Close()
 	}()
 	hash := sha256.New()
 	limit := maximumUploadBytes
 	if policy.MaximumObjectBytes > 0 && policy.MaximumObjectBytes < limit {
 		limit = policy.MaximumObjectBytes
 	}
-	n, e := io.Copy(io.MultiWriter(tmp, hash), io.LimitReader(r.Body, limit+1))
-	if e != nil {
-		_ = tmp.Close()
-		return e
+	n, err := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		_ = temporary.Close()
+		_ = os.Remove(name)
+		return "", 0, err
 	}
 	if n > limit {
-		_ = tmp.Close()
-		return errors.New("object exceeds the group LFS object limit")
+		_ = temporary.Close()
+		_ = os.Remove(name)
+		return "", 0, errors.New("object exceeds the group LFS object limit")
 	}
-	if e = tmp.Sync(); e != nil {
-		_ = tmp.Close()
-		return e
+	if err = temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		_ = os.Remove(name)
+		return "", 0, err
 	}
-	if e = tmp.Close(); e != nil {
-		return e
+	if err = temporary.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", 0, err
 	}
 	if hex.EncodeToString(hash.Sum(nil)) != oid {
-		return errors.New("sha256 mismatch")
+		_ = os.Remove(name)
+		return "", 0, errors.New("sha256 mismatch")
 	}
-	if _, e = os.Stat(p); e == nil {
+	return name, n, nil
+}
+
+func (h Handler) publishUpload(
+	repo repopath.Repository,
+	p string,
+	stagedPath string,
+	stagedSize int64,
+	policy control.LFSPolicy,
+) error {
+	if _, err := os.Stat(p); err == nil {
 		return nil
 	}
 	if policy.MaximumStorageBytes > 0 {
@@ -341,11 +370,17 @@ func (h Handler) upload(
 		if usageErr != nil {
 			return usageErr
 		}
-		if usage+n > policy.MaximumStorageBytes {
+		if usage+stagedSize > policy.MaximumStorageBytes {
 			return errors.New("object exceeds the group LFS storage limit")
 		}
 	}
-	return os.Rename(name, p)
+	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+		return err
+	}
+	if _, err := os.Stat(p); err == nil {
+		return nil
+	}
+	return os.Rename(stagedPath, p)
 }
 
 func (h Handler) groupStorageUsage(group string) (int64, error) {
@@ -417,6 +452,3 @@ func validOID(s string) bool {
 	_, e := hex.DecodeString(s)
 	return e == nil && strings.ToLower(s) == s
 }
-
-//nolint:gochecknoglobals // The fallback must serialize uploads across all handler instances.
-var fallbackUploadMu sync.Mutex

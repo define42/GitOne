@@ -162,29 +162,21 @@ func (a API) importRepositoryArchiveHTTP(w http.ResponseWriter, request *http.Re
 		return
 	}
 
-	releaseOperation, err := a.acquireOperationLock()
-	if err != nil {
-		writeArchiveImportAPIError(w, err)
-		return
-	}
-	defer func() {
-		_ = releaseOperation()
-	}()
-	a.Resolver.Controls.Invalidate(repository.Group())
-	if _, err = a.authorizeRepository(
-		request.Context(),
-		credentials,
-		repository,
-		control.RoleAdmin,
-	); err != nil {
-		writeArchiveImportAPIError(w, err)
-		return
-	}
-	err = a.Storage.ImportRepositoryArchiveLocked(
+	err = a.Storage.ImportRepositoryArchiveValidated(
 		request.Context(),
 		repository,
 		filename,
 		uploadPath,
+		func() error {
+			a.Resolver.Controls.Invalidate(repository.Group())
+			_, authorizeErr := a.authorizeRepository(
+				request.Context(),
+				credentials,
+				repository,
+				control.RoleAdmin,
+			)
+			return authorizeErr
+		},
 	)
 	if err != nil {
 		var archiveError *storage.ArchiveImportError

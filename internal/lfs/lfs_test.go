@@ -58,6 +58,13 @@ func TestRejectWrongHash(t *testing.T) {
 	if w.Code != 422 {
 		t.Fatalf("expected 422, got %d", w.Code)
 	}
+	entries, err := os.ReadDir(filepath.Join(root, ".gitone", "uploads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed upload left %d staged object(s)", len(entries))
+	}
 }
 
 func TestPolicyDisablesLFS(t *testing.T) {
@@ -218,6 +225,18 @@ func TestUploadWaitsForRepositoryOperationLock(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("upload did not reach initial authorization")
 	}
+	stagingDirectory := filepath.Join(root, ".gitone", "uploads")
+	stagingDeadline := time.Now().Add(2 * time.Second)
+	for {
+		entries, readErr := os.ReadDir(stagingDirectory)
+		if readErr == nil && len(entries) == 1 {
+			break
+		}
+		if time.Now().After(stagingDeadline) {
+			t.Fatalf("upload was not staged before waiting for its lock: %v", readErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	select {
 	case recorder := <-response:
 		t.Fatalf("upload completed while operation lock was held: %d", recorder.Code)
@@ -236,6 +255,13 @@ func TestUploadWaitsForRepositoryOperationLock(t *testing.T) {
 	}
 	if authorizationCalls.Load() != 2 {
 		t.Fatalf("authorization calls = %d, want 2", authorizationCalls.Load())
+	}
+	entries, err := os.ReadDir(stagingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("successful upload left %d staged object(s)", len(entries))
 	}
 }
 

@@ -38,6 +38,13 @@ The complete development stack can be started with:
 docker compose up --build
 ```
 
+GitOne currently supports exactly one web-server process for each storage root.
+Mutation coordination is in memory and is scoped to the affected group,
+repository, LFS quota, queue, or build job so unrelated work can proceed in
+parallel. Do not run multiple GitOne web instances against the same root or
+modify that root from another process. Remote `gitone-runner` workers remain
+supported because they mutate server state only through the web API.
+
 ## Web UI
 
 Open [http://localhost:8080](http://localhost:8080) and sign in with LDAP credentials. After LDAP validation, GitOne stores only the username in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner; creating a subgroup still requires admin access inherited from its parent. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -30,7 +31,7 @@ func (a API) updateRepositoryFile(
 	if err != nil {
 		return nil, err
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireRepositoryOperationLock(input.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +94,7 @@ func (a API) createRepositoryFile(
 	if err != nil {
 		return nil, err
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireRepositoryOperationLock(input.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +149,7 @@ func (a API) deleteRepositoryFile(
 	if err != nil || cleanPath == "" {
 		return nil, huma.Error400BadRequest("invalid file path", err)
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireRepositoryOperationLock(input.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +208,7 @@ func (a API) renameRepositoryFile(
 	if cleanPath == newPath {
 		return nil, huma.Error400BadRequest("new file path must be different")
 	}
-	releaseOperation, err := a.acquireOperationLock()
+	releaseOperation, err := a.acquireRepositoryOperationLock(input.Repository)
 	if err != nil {
 		return nil, err
 	}
@@ -278,15 +279,43 @@ type repositoryFileChange struct {
 	rootTree   *object.Tree
 }
 
-func (a API) acquireOperationLock() (func() error, error) {
-	release, err := a.reviewStore().AcquireOperationLock()
+func (a API) acquireRepositoryOperationLock(value string) (func() error, error) {
+	repository, err := parseRepositoryPath(value)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	return a.acquireRepositoryOperationLocks(repository)
+}
+
+func (a API) acquireRepositoryOperationLocks(
+	repositories ...repopath.Repository,
+) (func() error, error) {
+	release, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(a.Storage.Root, repositories, lockmgr.Exclusive)...,
+	)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(
 			"could not lock repository operations",
 			err,
 		)
 	}
-	return release, nil
+	return func() error {
+		release()
+		return nil
+	}, nil
+}
+
+func (a API) acquireGroupOperationLocks(groups ...string) (func() error, error) {
+	release, err := lockmgr.Process.Acquire(
+		lockmgr.GroupRequests(a.Storage.Root, groups, lockmgr.Exclusive)...,
+	)
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not lock group operations", err)
+	}
+	return func() error {
+		release()
+		return nil
+	}, nil
 }
 
 func (a API) prepareRepositoryFileChange(

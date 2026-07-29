@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	git "github.com/go-git/go-git/v5"
@@ -40,9 +41,8 @@ func (e *ArchiveImportError) Unwrap() error {
 }
 
 type importDestination struct {
-	groupPath string
-	gitPath   string
-	lfsPath   string
+	gitPath string
+	lfsPath string
 }
 
 // IsSupportedImportArchive reports whether a filename has one of the archive
@@ -63,14 +63,59 @@ func (s Store) ImportRepositoryArchive(
 	filename string,
 	archivePath string,
 ) error {
-	releaseOperation, err := review.NewStore(s.Root).AcquireOperationLock()
+	return s.ImportRepositoryArchiveValidated(ctx, r, filename, archivePath, nil)
+}
+
+// ImportRepositoryArchiveValidated extracts and validates the archive without
+// holding a repository lock. It locks only for final validation and publish.
+func (s Store) ImportRepositoryArchiveValidated(
+	ctx context.Context,
+	r repopath.Repository,
+	filename string,
+	archivePath string,
+	validate func() error,
+) error {
+	if r.Name == "control" {
+		return errors.New("reserved repository name")
+	}
+	if err := s.checkImportDestination(r); err != nil {
+		return err
+	}
+	temporaryPath, repositoryPath, err := s.stageRepositoryArchive(
+		ctx,
+		filename,
+		archivePath,
+	)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = releaseOperation()
+		_ = os.RemoveAll(temporaryPath)
 	}()
-	return s.ImportRepositoryArchiveLocked(ctx, r, filename, archivePath)
+
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(s.Root, []repopath.Repository{r}, lockmgr.Exclusive)...,
+	)
+	if err != nil {
+		return err
+	}
+	defer releaseOperation()
+	if validate != nil {
+		if err = validate(); err != nil {
+			return err
+		}
+	}
+	return review.NewStore(s.Root).WithRepositoryLocks([]repopath.Repository{r}, func() error {
+		destination, prepareErr := s.prepareImportDestination(r)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		return adoptImportedRepository(
+			repositoryPath,
+			destination.gitPath,
+			destination.lfsPath,
+		)
+	})
 }
 
 // ImportRepositoryArchiveLocked imports an archive while its caller holds the
@@ -84,7 +129,7 @@ func (s Store) ImportRepositoryArchiveLocked(
 	if r.Name == "control" {
 		return errors.New("reserved repository name")
 	}
-	return review.NewStore(s.Root).WithLifecycleLockHeld(func() error {
+	return review.NewStore(s.Root).WithRepositoryLocks([]repopath.Repository{r}, func() error {
 		return s.importRepositoryArchive(ctx, r, filename, archivePath)
 	})
 }
@@ -99,22 +144,10 @@ func (s Store) importRepositoryArchive(
 	if err != nil {
 		return err
 	}
-	if !IsSupportedImportArchive(filename) {
-		return &ArchiveImportError{
-			Err: errors.New("supported formats are .zip, .tar, .tar.gz, and .tgz"),
-		}
-	}
-	archiveInfo, err := os.Stat(archivePath)
-	if err != nil {
-		return err
-	}
-	if archiveInfo.Size() > MaximumImportArchiveBytes {
-		return &ArchiveImportError{Err: errors.New("archive exceeds the 1 GiB limit")}
-	}
-
-	temporaryPath, err := os.MkdirTemp(
-		destination.groupPath,
-		".gitone-import-*.build",
+	temporaryPath, repositoryPath, err := s.stageRepositoryArchive(
+		ctx,
+		filename,
+		archivePath,
 	)
 	if err != nil {
 		return err
@@ -122,27 +155,56 @@ func (s Store) importRepositoryArchive(
 	defer func() {
 		_ = os.RemoveAll(temporaryPath)
 	}()
-
-	if err = extractRepositoryArchive(ctx, archivePath, filename, temporaryPath); err != nil {
-		return &ArchiveImportError{Err: err}
-	}
-	repositoryPath, err := findArchivedBareRepository(temporaryPath)
-	if err != nil {
-		return &ArchiveImportError{Err: err}
-	}
-	if err = sanitizeArchivedRepository(repositoryPath); err != nil {
-		return &ArchiveImportError{Err: err}
-	}
-	if !isBareRepository(repositoryPath) {
-		return &ArchiveImportError{
-			Err: errors.New("archive does not contain a valid bare Git repository"),
-		}
-	}
 	return adoptImportedRepository(
 		repositoryPath,
 		destination.gitPath,
 		destination.lfsPath,
 	)
+}
+
+func (s Store) stageRepositoryArchive(
+	ctx context.Context,
+	filename string,
+	archivePath string,
+) (string, string, error) {
+	if !IsSupportedImportArchive(filename) {
+		return "", "", &ArchiveImportError{
+			Err: errors.New("supported formats are .zip, .tar, .tar.gz, and .tgz"),
+		}
+	}
+	archiveInfo, err := os.Stat(archivePath)
+	if err != nil {
+		return "", "", err
+	}
+	if archiveInfo.Size() > MaximumImportArchiveBytes {
+		return "", "", &ArchiveImportError{Err: errors.New("archive exceeds the 1 GiB limit")}
+	}
+
+	temporaryPath, err := s.newImportStagingDirectory()
+	if err != nil {
+		return "", "", err
+	}
+
+	if err = extractRepositoryArchive(ctx, archivePath, filename, temporaryPath); err != nil {
+		_ = os.RemoveAll(temporaryPath)
+		return "", "", &ArchiveImportError{Err: err}
+	}
+	repositoryPath, err := findArchivedBareRepository(temporaryPath)
+	if err != nil {
+		_ = os.RemoveAll(temporaryPath)
+		return "", "", &ArchiveImportError{Err: err}
+	}
+	if err = sanitizeArchivedRepository(repositoryPath); err != nil {
+		_ = os.RemoveAll(temporaryPath)
+		return "", "", &ArchiveImportError{Err: err}
+	}
+	if !isBareRepository(repositoryPath) {
+		_ = os.RemoveAll(temporaryPath)
+		return "", "", &ArchiveImportError{
+			Err: errors.New("archive does not contain a valid bare Git repository"),
+		}
+	}
+	return temporaryPath, repositoryPath, nil
 }
 
 func (s Store) prepareImportDestination(r repopath.Repository) (importDestination, error) {
@@ -179,10 +241,20 @@ func (s Store) prepareImportDestination(r repopath.Repository) (importDestinatio
 		}
 	}
 	return importDestination{
-		groupPath: groupPath,
-		gitPath:   gitPath,
-		lfsPath:   lfsPath,
+		gitPath: gitPath,
+		lfsPath: lfsPath,
 	}, nil
+}
+
+func (s Store) newImportStagingDirectory() (string, error) {
+	root, err := repopath.SafeJoin(s.Root, ".gitone", "imports")
+	if err != nil {
+		return "", err
+	}
+	if err = os.MkdirAll(root, 0o750); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(root, "repository-*")
 }
 
 func adoptImportedRepository(sourcePath, gitPath, lfsPath string) error {

@@ -6,9 +6,9 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
@@ -23,7 +23,7 @@ type Scheduler interface {
 }
 
 // LockedScheduler lets callers that already hold the repository operations
-// lock schedule a build without recursively acquiring the process-wide gate.
+// lock schedule a build without recursively acquiring that resource lock.
 type LockedScheduler interface {
 	Scheduler
 	ScheduleLocked(repopath.Repository, string, plumbing.Hash) (*Job, error)
@@ -39,7 +39,6 @@ type Coordinator struct {
 	storage       storage.Store
 	state         Store
 	leaseDuration time.Duration
-	mu            sync.Mutex
 }
 
 type Lease struct {
@@ -79,7 +78,7 @@ func (c *Coordinator) Schedule(
 	branch string,
 	commit plumbing.Hash,
 ) (*Job, error) {
-	releaseOperation, err := acquireBuildOperationLock(c.storage.Root)
+	releaseOperation, err := acquireBuildOperationLock(c.storage.Root, repositoryPath)
 	if err != nil {
 		return nil, err
 	}
@@ -133,16 +132,16 @@ func (c *Coordinator) Claim(runnerID string) (*Lease, error) {
 	if !validRunnerID(runnerID) {
 		return nil, errors.New("invalid runner ID")
 	}
-	releaseOperation, err := acquireBuildOperationLock(c.storage.Root)
+	releaseOperation, err := lockmgr.Process.Acquire(
+		lockmgr.CatalogRequest(c.storage.Root, lockmgr.Exclusive),
+		lockmgr.QueueRequest(c.storage.Root),
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_ = releaseOperation()
+		releaseOperation()
 	}()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	candidates, err := c.candidates(time.Now().UTC())
 	if err != nil {
 		return nil, err
@@ -193,15 +192,13 @@ func (c *Coordinator) Heartbeat(
 	id string,
 	runnerID string,
 ) (time.Time, error) {
-	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository)
+	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository, id)
 	if err != nil {
 		return time.Time{}, err
 	}
 	defer func() {
 		_ = releaseOperation()
 	}()
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	job, err := c.ownedRunningJob(repository, id, runnerID)
 	if err != nil {
 		return time.Time{}, err
@@ -221,15 +218,13 @@ func (c *Coordinator) AppendLog(
 	offset int64,
 	contents []byte,
 ) (int64, error) {
-	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository)
+	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository, id)
 	if err != nil {
 		return 0, err
 	}
 	defer func() {
 		_ = releaseOperation()
 	}()
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	job, err := c.ownedRunningJob(repository, id, runnerID)
 	if err != nil {
 		return 0, err
@@ -252,15 +247,13 @@ func (c *Coordinator) Complete(
 	runnerID string,
 	buildError string,
 ) (Job, error) {
-	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository)
+	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository, id)
 	if err != nil {
 		return Job{}, err
 	}
 	defer func() {
 		_ = releaseOperation()
 	}()
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	job, err := c.ownedRunningJob(repository, id, runnerID)
 	if err != nil {
 		return Job{}, err
@@ -286,8 +279,13 @@ func (c *Coordinator) SourceJob(
 	id string,
 	runnerID string,
 ) (Job, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository, id)
+	if err != nil {
+		return Job{}, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
 	return c.ownedRunningJob(repository, id, runnerID)
 }
 

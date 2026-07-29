@@ -96,7 +96,7 @@ func (r *Runner) Schedule(
 	branch string,
 	commit plumbing.Hash,
 ) (*Job, error) {
-	releaseOperation, err := acquireBuildOperationLock(r.storage.Root)
+	releaseOperation, err := acquireBuildOperationLock(r.storage.Root, repositoryPath)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +181,11 @@ func (r *Runner) run(parent context.Context, request buildRequest) {
 	started := time.Now().UTC()
 	job.Status = StatusRunning
 	job.StartedAt = &started
-	releaseOperation, _, err := acquireRepositoryBuildLock(r.storage, request.repository)
+	releaseOperation, _, err := acquireRepositoryBuildLock(
+		r.storage,
+		request.repository,
+		job.ID,
+	)
 	if err != nil {
 		return
 	}
@@ -281,7 +285,7 @@ func (r *Runner) checkout(
 }
 
 func (r *Runner) finish(repository repopath.Repository, job Job, buildErr error) {
-	releaseOperation, _, err := acquireRepositoryBuildLock(r.storage, repository)
+	releaseOperation, _, err := acquireRepositoryBuildLock(r.storage, repository, job.ID)
 	if err != nil {
 		return
 	}
@@ -310,6 +314,7 @@ func (w *operationBuildLogWriter) Write(contents []byte) (int, error) {
 	releaseOperation, _, err := acquireRepositoryBuildLock(
 		w.runner.storage,
 		w.repository,
+		w.id,
 	)
 	if err != nil {
 		return 0, err

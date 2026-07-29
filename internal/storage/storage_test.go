@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	git "github.com/go-git/go-git/v5"
@@ -335,6 +336,99 @@ func TestImportRepositoryCleansUpFailedRemote(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".gitone-import-") {
 			t.Fatalf("failed import left temporary data %q", entry.Name())
 		}
+	}
+	staged, err := os.ReadDir(filepath.Join(root, ".gitone", "imports"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staged) != 0 {
+		t.Fatalf("failed import left %d staged repositories", len(staged))
+	}
+}
+
+func TestImportRepositoryLocksOnlyFinalPublishAndRevalidates(t *testing.T) {
+	sourceRoot := t.TempDir()
+	sourceStore := Store{Root: sourceRoot}
+	if err := sourceStore.CreateGroup("source", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	source := repopath.Repository{Groups: []string{"source"}, Name: "api"}
+	if err := sourceStore.CreateRepository(source, CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath, err := sourceStore.GitPath(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err = store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	target := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	unrelated := repopath.Repository{Groups: []string{"engineering"}, Name: "web"}
+	validationStarted := make(chan struct{})
+	releaseValidation := make(chan struct{})
+	rejected := errors.New("authorization changed")
+	importDone := make(chan error, 1)
+	go func() {
+		importDone <- store.ImportRepositoryValidated(
+			context.Background(),
+			target,
+			ImportRepositoryOptions{URL: sourcePath},
+			func() error {
+				close(validationStarted)
+				<-releaseValidation
+				return rejected
+			},
+		)
+	}()
+	select {
+	case <-validationStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("import did not reach final validation")
+	}
+
+	unrelatedDone := make(chan error, 1)
+	go func() {
+		unrelatedDone <- store.CreateRepository(unrelated, CreateRepositoryOptions{})
+	}()
+	select {
+	case err = <-unrelatedDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrelated repository creation was blocked by final import validation")
+	}
+
+	targetDone := make(chan error, 1)
+	go func() {
+		targetDone <- store.CreateRepository(target, CreateRepositoryOptions{})
+	}()
+	select {
+	case err = <-targetDone:
+		close(releaseValidation)
+		t.Fatalf("target repository bypassed the import publication lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseValidation)
+	if err = <-importDone; !errors.Is(err, rejected) {
+		t.Fatalf("import error = %v, want validation rejection", err)
+	}
+	if err = <-targetDone; err != nil {
+		t.Fatal(err)
+	}
+	staged, err := os.ReadDir(filepath.Join(root, ".gitone", "imports"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staged) != 0 {
+		t.Fatalf("rejected import left %d staged repositories", len(staged))
 	}
 }
 
@@ -1241,6 +1335,60 @@ func TestDeleteRepositoryWaitsForRepositoryOperationLock(t *testing.T) {
 	}
 	if err := <-deleteDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRepositoryMutationsOnDifferentRepositoriesProceedConcurrently(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	api := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	web := repopath.Repository{Groups: []string{"engineering"}, Name: "web"}
+	for _, repository := range []repopath.Repository{api, web} {
+		if err := store.CreateRepository(repository, CreateRepositoryOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	releaseAPI, err := lockmgr.Process.Acquire(
+		lockmgr.RepositoryRequests(root, []repopath.Repository{api}, lockmgr.Exclusive)...,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webDeleted := make(chan error, 1)
+	go func() {
+		webDeleted <- store.DeleteRepository(web)
+	}()
+	select {
+	case err = <-webDeleted:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrelated repository mutation was blocked")
+	}
+
+	apiDeleted := make(chan error, 1)
+	go func() {
+		apiDeleted <- store.DeleteRepository(api)
+	}()
+	select {
+	case err = <-apiDeleted:
+		releaseAPI()
+		t.Fatalf("same repository mutation bypassed its lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseAPI()
+	select {
+	case err = <-apiDeleted:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("same repository mutation did not resume")
 	}
 }
 
