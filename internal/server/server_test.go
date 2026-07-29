@@ -89,6 +89,73 @@ func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {
 	}
 }
 
+func TestGitAndLFSRoutingAllowsLFSGroupNames(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	for _, group := range []string{
+		"info",
+		"info/lfs",
+		"info/lfs/objects",
+		"info/lfs/objects/team",
+	} {
+		if err := store.CreateGroup(group, "alice", ""); err != nil {
+			t.Fatalf("create group %q: %v", group, err)
+		}
+	}
+	repositories := []repopath.Repository{
+		{Groups: []string{"info", "lfs"}, Name: "service"},
+		{Groups: []string{"info", "lfs", "objects", "team"}, Name: "service"},
+	}
+	for _, repository := range repositories {
+		if err := store.CreateRepository(repository, storage.CreateRepositoryOptions{
+			InitializeReadme: true,
+			Author:           "alice",
+		}); err != nil {
+			t.Fatalf("create repository %q: %v", repository.Full(), err)
+		}
+	}
+	handler := New(Config{
+		Root:      root,
+		Directory: testLDAPDirectory(),
+	})
+
+	for _, repository := range repositories {
+		t.Run(repository.Full(), func(t *testing.T) {
+			gitRequest := httptest.NewRequest(
+				http.MethodGet,
+				"/"+repository.Full()+".git/info/refs?service=git-upload-pack",
+				nil,
+			)
+			gitRequest.SetBasicAuth("alice", "secret")
+			gitResponse := httptest.NewRecorder()
+			handler.ServeHTTP(gitResponse, gitRequest)
+			if gitResponse.Code != http.StatusOK {
+				t.Fatalf(
+					"Git route returned %d: %s",
+					gitResponse.Code,
+					gitResponse.Body.String(),
+				)
+			}
+
+			lfsRequest := httptest.NewRequest(
+				http.MethodPost,
+				"/"+repository.Full()+".git/info/lfs/objects/batch",
+				strings.NewReader(`{"operation":"download","objects":[]}`),
+			)
+			lfsRequest.SetBasicAuth("alice", "secret")
+			lfsResponse := httptest.NewRecorder()
+			handler.ServeHTTP(lfsResponse, lfsRequest)
+			if lfsResponse.Code != http.StatusOK {
+				t.Fatalf(
+					"LFS route returned %d: %s",
+					lfsResponse.Code,
+					lfsResponse.Body.String(),
+				)
+			}
+		})
+	}
+}
+
 func TestLDAPLoginCreatesSecureBrowserSession(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}

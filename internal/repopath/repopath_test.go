@@ -51,6 +51,50 @@ func TestParseRepositoryRoutes(t *testing.T) {
 	}
 }
 
+func TestParseRepositoryRoutesWithLFSGroupNames(t *testing.T) {
+	for _, test := range []struct {
+		path       string
+		repository string
+		suffix     string
+	}{
+		{
+			path:       "/info/lfs/project.git/info/refs",
+			repository: "info/lfs/project",
+			suffix:     "/info/refs",
+		},
+		{
+			path:       "/info/lfs/objects/team/project.git/git-upload-pack",
+			repository: "info/lfs/objects/team/project",
+			suffix:     "/git-upload-pack",
+		},
+		{
+			path:       "/info/lfs/objects/team/project.git/info/lfs/objects/abc",
+			repository: "info/lfs/objects/team/project",
+			suffix:     "/info/lfs/objects/abc",
+		},
+		{
+			path:       "/archive.git/info/lfs/objects/team/project.git/info/refs",
+			repository: "archive.git/info/lfs/objects/team/project",
+			suffix:     "/info/refs",
+		},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			repository, suffix, err := ParseGitRequestPath(test.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repository.Full() != test.repository || suffix != test.suffix {
+				t.Fatalf(
+					"ParseGitRequestPath(%q) = %#v, %q",
+					test.path,
+					repository,
+					suffix,
+				)
+			}
+		})
+	}
+}
+
 func TestRejectInvalidRepositoryPaths(t *testing.T) {
 	for _, path := range []string{
 		"/team/project",

@@ -17,16 +17,31 @@ func (r Repository) Full() string  { return r.Group() + "/" + r.Name }
 func ParseGitRequestPath(p string) (Repository, string, error) {
 	p = strings.TrimPrefix(p, "/")
 	var suffix string
-	for _, s := range []string{"/info/lfs/objects/batch", "/info/lfs/objects/verify", "/git-upload-pack", "/git-receive-pack", "/info/refs"} {
+	for _, s := range []string{
+		"/info/lfs/objects/batch",
+		"/info/lfs/objects/verify",
+		"/git-upload-pack",
+		"/git-receive-pack",
+		"/info/refs",
+	} {
 		if strings.HasSuffix(p, s) {
 			p = strings.TrimSuffix(p, s)
 			suffix = s
 			break
 		}
 	}
-	if i := strings.Index(p, "/info/lfs/objects/"); i >= 0 {
-		suffix = p[i:]
-		p = p[:i]
+	if suffix == "" && !strings.HasSuffix(p, ".git") {
+		const objectRoute = "/info/lfs/objects/"
+		if i := strings.LastIndex(p, objectRoute); i >= 0 {
+			repositoryPath := p[:i]
+			object := p[i+len(objectRoute):]
+			if strings.HasSuffix(repositoryPath, ".git") &&
+				object != "" &&
+				!strings.Contains(object, "/") {
+				suffix = p[i:]
+				p = repositoryPath
+			}
+		}
 	}
 	if !strings.HasSuffix(p, ".git") {
 		return Repository{}, "", errors.New("repository path must end in .git")

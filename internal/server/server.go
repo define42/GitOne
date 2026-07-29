@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
@@ -144,10 +145,6 @@ func New(c Config) http.Handler {
 }
 
 func containsLFS(p string) bool {
-	for i := 0; i+9 <= len(p); i++ {
-		if p[i:i+9] == "/info/lfs" {
-			return true
-		}
-	}
-	return false
+	_, suffix, err := repopath.ParseGitRequestPath(p)
+	return err == nil && strings.HasPrefix(suffix, "/info/lfs/")
 }
