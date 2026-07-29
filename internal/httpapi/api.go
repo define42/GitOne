@@ -722,9 +722,10 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 	}()
 	a.Resolver.Controls.Invalidate(path)
 	owner := ""
+	author := ""
 	if strings.Contains(path, "/") {
 		parent := path[:strings.LastIndex(path, "/")]
-		owner, err = a.authorize(ctx, input.AuthInput, parent, control.RoleMaintainer)
+		author, err = a.authorize(ctx, input.AuthInput, parent, control.RoleMaintainer)
 		if err != nil {
 			return nil, err
 		}
@@ -734,8 +735,14 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 			return nil, authErr
 		}
 		owner = identity.Name
+		author = owner
 	}
-	if err = a.Storage.CreateGroupLocked(path, owner, input.Description); err != nil {
+	if owner == "" {
+		err = a.Storage.CreateInheritedGroupLocked(path, author, input.Description)
+	} else {
+		err = a.Storage.CreateGroupLocked(path, owner, input.Description)
+	}
+	if err != nil {
 		return nil, huma.Error409Conflict(err.Error())
 	}
 	a.Resolver.Controls.Invalidate(path)

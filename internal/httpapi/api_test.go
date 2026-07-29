@@ -755,6 +755,95 @@ func TestGroupLifecycleEndpoints(t *testing.T) {
 	}
 }
 
+func TestMaintainerCreatesSubgroupWithInheritedRole(t *testing.T) {
+	service, ownerCredentials, _ := repositoryAPIFixture(t)
+	ctx := context.Background()
+
+	parent, err := service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent.Members["bob"] = control.RoleMaintainer
+	if err = service.Storage.UpdateGroupControl("engineering", parent, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	service.Resolver.Controls.Invalidate("engineering")
+	service.Resolver.Directory = testIdentityProvider{
+		"alice": "secret",
+		"bob":   "bob-secret",
+	}
+	request, err := http.NewRequest(http.MethodGet, "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SetBasicAuth("bob", "bob-secret")
+	maintainerCredentials := AuthInput{Authorization: request.Header.Get("Authorization")}
+
+	if _, err = service.createGroup(ctx, &createGroupInput{
+		GroupPathInput: GroupPathInput{
+			AuthInput: maintainerCredentials,
+			Path:      "engineering/backend",
+		},
+		Description: "Backend team",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	child, err := service.Resolver.Controls.Load(ctx, "engineering/backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !child.Inherit {
+		t.Fatal("new subgroup does not inherit access")
+	}
+	if len(child.Members) != 0 {
+		t.Fatalf("new subgroup has direct members: %#v", child.Members)
+	}
+
+	creator, err := service.authorizePrincipal(
+		ctx,
+		maintainerCredentials,
+		"engineering/backend",
+		control.RoleMaintainer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creator.Role != control.RoleMaintainer || creator.Group != "engineering" {
+		t.Fatalf("creator role = %#v", creator)
+	}
+	inheritedOwner, err := service.authorizePrincipal(
+		ctx,
+		ownerCredentials,
+		"engineering/backend",
+		control.RoleOwner,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inheritedOwner.Role != control.RoleOwner || inheritedOwner.Group != "engineering" {
+		t.Fatalf("owner role = %#v", inheritedOwner)
+	}
+
+	if _, err = service.updateGroupSettings(ctx, &updateGroupSettingsInput{
+		GroupPathInput: GroupPathInput{
+			AuthInput: maintainerCredentials,
+			Path:      "engineering/backend",
+		},
+		Body: updateGroupSettingsBody{
+			Name:        "backend",
+			Description: child.Description,
+			Inherit:     false,
+			Visibility:  child.Visibility,
+			LFS:         child.LFS,
+			Members:     map[string]control.Role{},
+			Tokens:      []groupTokenInput{},
+		},
+	}); err == nil {
+		t.Fatal("ownerless subgroup disabled inheritance")
+	}
+}
+
 func TestRenameGroupRequiresMaintainerAccessToChangedParents(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

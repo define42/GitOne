@@ -1122,6 +1122,14 @@ function emptyState(message: string): HTMLElement {
   return empty;
 }
 
+function groupRoleBadge(role: GroupRole): HTMLElement {
+  const roleName = role[0].toUpperCase() + role.slice(1);
+  const badge = element("span", `${roleName} access`);
+  badge.className = "group-role-badge";
+  badge.title = `Your permission for this group: ${roleName}`;
+  return badge;
+}
+
 function groupList(groups: GroupSummary[], emptyMessage = "No groups yet."): HTMLElement {
   if (groups.length === 0) {
     return emptyState(emptyMessage);
@@ -1141,11 +1149,7 @@ function groupList(groups: GroupSummary[], emptyMessage = "No groups yet."): HTM
     const title = element("span");
     title.className = "resource-title";
     const name = element("strong", group.name);
-    const roleName = group.role[0].toUpperCase() + group.role.slice(1);
-    const role = element("span", `${roleName} access`);
-    role.className = "group-role-badge";
-    role.title = `Your permission for this group: ${roleName}`;
-    title.append(name, role);
+    title.append(name, groupRoleBadge(group.role));
     const description = element("span", group.description || "No description");
     description.className = "resource-description";
     content.append(title, description);
@@ -1483,14 +1487,18 @@ function pageHeader(
   title: string,
   description = "",
   actions: HTMLElement[] = [],
+  badges: HTMLElement[] = [],
 ): HTMLElement {
   const header = element("section");
   header.className = "page-header";
   const copy = element("div");
   copy.className = "page-header-copy";
+  const context = element("div");
+  context.className = "page-header-context";
   const label = element("span", eyebrow);
   label.className = "eyebrow";
-  copy.append(label);
+  context.append(label, ...badges);
+  copy.append(context);
   if (title) {
     copy.append(element("h1", title));
   }
@@ -5333,6 +5341,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
       "",
       data.description,
       pageActions,
+      [groupRoleBadge(data.role)],
     ),
     subgroups,
     repositories,

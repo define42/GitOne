@@ -510,11 +510,20 @@ func (s Store) CreateGroup(group, owner, description string) error {
 // operations lock.
 func (s Store) CreateGroupLocked(group, owner, description string) error {
 	return review.NewStore(s.Root).WithGroupLocks([]string{group}, func() error {
-		return s.createGroup(group, owner, description)
+		return s.createGroup(group, owner, owner, description)
 	})
 }
 
-func (s Store) createGroup(group, owner, description string) error {
+// CreateInheritedGroupLocked creates an inherited subgroup without assigning
+// its creator a direct role while its caller holds the repository operations
+// lock.
+func (s Store) CreateInheritedGroupLocked(group, author, description string) error {
+	return review.NewStore(s.Root).WithGroupLocks([]string{group}, func() error {
+		return s.createGroup(group, "", author, description)
+	})
+}
+
+func (s Store) createGroup(group, owner, author, description string) error {
 	gp, e := s.GroupPath(group)
 	if e != nil {
 		return e
@@ -552,6 +561,10 @@ func (s Store) createGroup(group, owner, description string) error {
 	if e != nil {
 		return e
 	}
+	members := map[string]control.Role{}
+	if owner != "" {
+		members[owner] = control.RoleOwner
+	}
 	doc := control.Document{
 		Version:     control.CurrentVersion,
 		Group:       group,
@@ -559,7 +572,7 @@ func (s Store) createGroup(group, owner, description string) error {
 		Inherit:     true,
 		Visibility:  "private",
 		LFS:         control.LFSPolicy{Enabled: true},
-		Members:     map[string]control.Role{owner: control.RoleOwner},
+		Members:     members,
 		Tokens:      []control.Token{},
 	}
 	b, _ := json.MarshalIndent(doc, "", "  ")
@@ -570,7 +583,7 @@ func (s Store) createGroup(group, owner, description string) error {
 	if _, e = wt.Add("control.json"); e != nil {
 		return e
 	}
-	commit, e := wt.Commit("Initialize group control", &git.CommitOptions{Author: &object.Signature{Name: owner, Email: owner + "@localhost", When: time.Now().UTC()}})
+	commit, e := wt.Commit("Initialize group control", &git.CommitOptions{Author: &object.Signature{Name: author, Email: author + "@localhost", When: time.Now().UTC()}})
 	if e != nil {
 		return e
 	}

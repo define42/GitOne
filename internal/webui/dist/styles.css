@@ -851,6 +851,13 @@ a:hover {
   min-width: 0;
 }
 
+.page-header-context {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
 .eyebrow {
   color: var(--accent);
   display: block;
@@ -858,6 +865,10 @@ a:hover {
   font-weight: 750;
   margin-bottom: 0.35rem;
   text-transform: uppercase;
+}
+
+.page-header-context .eyebrow {
+  margin-bottom: 0;
 }
 
 h1,

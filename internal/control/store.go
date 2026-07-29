@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	git "github.com/go-git/go-git/v5"
@@ -102,7 +103,7 @@ func Validate(group string, d Document) error {
 			return fmt.Errorf("invalid role")
 		}
 	}
-	if owners == 0 {
+	if owners == 0 && (!strings.Contains(group, "/") || !d.Inherit) {
 		return errors.New("at least one owner required")
 	}
 	return ValidateSettings(d)

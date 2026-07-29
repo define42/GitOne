@@ -27,6 +27,21 @@ func TestValidateRequiresOwner(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsOwnerlessInheritedSubgroup(t *testing.T) {
+	d := Document{
+		Version: CurrentVersion, Group: "parent/child", Inherit: true,
+		Visibility: "private", Members: map[string]Role{},
+	}
+	if err := Validate("parent/child", d); err != nil {
+		t.Fatalf("validate inherited subgroup: %v", err)
+	}
+
+	d.Inherit = false
+	if Validate("parent/child", d) == nil {
+		t.Fatal("ownerless subgroup was allowed to disable inheritance")
+	}
+}
+
 func TestValidateGroupMatch(t *testing.T) {
 	d := Document{
 		Version: CurrentVersion, Group: "other", Visibility: "private",
