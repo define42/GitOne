@@ -160,7 +160,7 @@ These endpoints require `Authorization: Bearer <GITONE_RUNNER_TOKEN>`.
 | `GET` | `/api/groups/{path}/settings` | Get the complete `control.json` document for an admin-authorized group. |
 | `POST` | `/api/groups/{path}` | Create a group. Any LDAP user may create a top-level group; nested groups require parent admin access. Optional query parameter: `description`. |
 | `PUT` | `/api/groups/{path}/settings` | Replace group control settings and optionally rename the group through the `name` field. |
-| `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
+| `PATCH` | `/api/groups/{path}` | Rename or move a group. JSON field: `newPath`. A cross-parent move requires admin access to the source group and both non-root parent groups. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.yaml`. |
 | `POST` | `/api/repositories/{path}/import` | Mirror all Git refs and tags from an HTTP or HTTPS remote into a new bare repository. JSON fields: `url`, optional `username`, and optional `password` or access token. Git LFS objects are not imported. |

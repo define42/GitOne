@@ -603,3 +603,99 @@ func TestGroupLifecycleEndpoints(t *testing.T) {
 		t.Fatal("non-empty group was deleted")
 	}
 }
+
+func TestRenameGroupRequiresAdminAccessToChangedParents(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	for _, group := range []struct {
+		path  string
+		owner string
+	}{
+		{path: "source", owner: "bob"},
+		{path: "source/team", owner: "alice"},
+		{path: "destination", owner: "carol"},
+	} {
+		if err := store.CreateGroup(group.path, group.owner, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	controls := control.NewStore(root)
+	service := API{
+		Storage: store,
+		Resolver: &auth.Resolver{
+			Controls: controls,
+			Directory: testIdentityProvider{
+				"alice": "alice-secret",
+				"bob":   "bob-secret",
+				"carol": "carol-secret",
+			},
+		},
+	}
+	request, err := http.NewRequest(http.MethodGet, "/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SetBasicAuth("alice", "alice-secret")
+	credentials := AuthInput{Authorization: request.Header.Get("Authorization")}
+	move := func() error {
+		_, moveErr := service.renameGroup(ctx, &renameGroupInput{
+			GroupPathInput: GroupPathInput{
+				AuthInput: credentials,
+				Path:      "source/team",
+			},
+			Body: renameGroupBody{NewPath: "destination/team"},
+		})
+		return moveErr
+	}
+	setRole := func(group, username string, role control.Role) {
+		t.Helper()
+		document, loadErr := controls.Load(ctx, group)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if role == "" {
+			delete(document.Members, username)
+		} else {
+			document.Members[username] = role
+		}
+		if updateErr := store.UpdateGroupControl(group, document, "test"); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		controls.Invalidate(group)
+	}
+
+	setRole("destination", "alice", control.RoleAdmin)
+	if err = move(); err == nil {
+		t.Fatal("group moved without source-parent admin access")
+	}
+	if _, err = controls.Load(ctx, "source/team"); err != nil {
+		t.Fatalf("source group changed after denied move: %v", err)
+	}
+
+	setRole("source", "alice", control.RoleAdmin)
+	setRole("destination", "alice", "")
+	if err = move(); err == nil {
+		t.Fatal("group moved without destination-parent admin access")
+	}
+	if _, err = controls.Load(ctx, "source/team"); err != nil {
+		t.Fatalf("source group changed after denied move: %v", err)
+	}
+
+	setRole("destination", "alice", control.RoleAdmin)
+	if err = move(); err != nil {
+		t.Fatalf("group move with both parent permissions failed: %v", err)
+	}
+	if _, err = controls.Load(ctx, "source/team"); err == nil {
+		t.Fatal("source group still exists after authorized move")
+	}
+	moved, err := controls.Load(ctx, "destination/team")
+	if err != nil {
+		t.Fatalf("destination group is unavailable after authorized move: %v", err)
+	}
+	if moved.Group != "destination/team" ||
+		moved.Members["alice"] != control.RoleOwner {
+		t.Fatalf("unexpected moved group control: %#v", moved)
+	}
+}

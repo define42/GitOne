@@ -699,6 +699,24 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 	if err != nil {
 		return nil, err
 	}
+	sourceParent := parentGroup(path)
+	destinationParent := parentGroup(newPath)
+	if sourceParent != destinationParent {
+		for _, parent := range []string{sourceParent, destinationParent} {
+			if parent == "" {
+				continue
+			}
+			a.Resolver.Controls.Invalidate(parent)
+			if _, err = a.authorize(
+				ctx,
+				input.AuthInput,
+				parent,
+				control.RoleAdmin,
+			); err != nil {
+				return nil, err
+			}
+		}
+	}
 	document, err := a.Resolver.Controls.Load(ctx, path)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not load group settings", err)
@@ -974,6 +992,14 @@ func canonicalGroup(value string) (string, error) {
 		return "", err
 	}
 	return strings.Join(parts, "/"), nil
+}
+
+func parentGroup(group string) string {
+	index := strings.LastIndex(group, "/")
+	if index < 0 {
+		return ""
+	}
+	return group[:index]
 }
 
 func parseRepositoryPath(value string) (repopath.Repository, error) {
