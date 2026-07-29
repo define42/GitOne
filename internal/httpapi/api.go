@@ -663,7 +663,8 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 	a.Resolver.Controls.Invalidate(path)
 	owner := ""
 	if strings.Contains(path, "/") {
-		owner, err = a.authorize(ctx, input.AuthInput, path, control.RoleAdmin)
+		parent := path[:strings.LastIndex(path, "/")]
+		owner, err = a.authorize(ctx, input.AuthInput, parent, control.RoleAdmin)
 		if err != nil {
 			return nil, err
 		}

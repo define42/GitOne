@@ -24,8 +24,13 @@ const (
 )
 
 type Resolver struct {
-	Controls  *control.Store
+	Controls  ControlStore
 	Directory IdentityProvider
+}
+
+type ControlStore interface {
+	Load(context.Context, string) (control.Document, error)
+	Invalidate(string)
 }
 
 type IdentityProvider interface {
@@ -49,7 +54,7 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 	for i := len(paths) - 1; i >= 0; i-- {
 		document, err := r.Controls.Load(ctx, paths[i])
 		if err != nil {
-			continue
+			return Principal{}, fmt.Errorf("load group control %q: %w", paths[i], err)
 		}
 		documents = append(documents, groupControl{path: paths[i], document: document})
 		for _, token := range document.Tokens {
@@ -108,7 +113,7 @@ func (r *Resolver) AuthorizeIdentity(
 	for i := len(paths) - 1; i >= 0; i-- {
 		document, err := r.Controls.Load(ctx, paths[i])
 		if err != nil {
-			continue
+			return Principal{}, fmt.Errorf("load group control %q: %w", paths[i], err)
 		}
 		if role, ok := document.Members[identity.Name]; ok {
 			identity.Role = role

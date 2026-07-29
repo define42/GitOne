@@ -3,6 +3,8 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,6 +17,25 @@ type fakeDirectory struct {
 	username  string
 	password  string
 	canonical string
+}
+
+type controllableControlStore struct {
+	store       *control.Store
+	unavailable map[string]error
+}
+
+func (s *controllableControlStore) Load(
+	ctx context.Context,
+	group string,
+) (control.Document, error) {
+	if err := s.unavailable[group]; err != nil {
+		return control.Document{}, err
+	}
+	return s.store.Load(ctx, group)
+}
+
+func (s *controllableControlStore) Invalidate(group string) {
+	s.store.Invalidate(group)
 }
 
 func (d fakeDirectory) Authenticate(
@@ -125,5 +146,141 @@ func TestResolverUsesLDAPIdentityAndTokenKeys(t *testing.T) {
 	}
 	if !principal.AllowsRepository("api") || principal.AllowsRepository("web") {
 		t.Fatalf("repository scope was not retained: %#v", principal.Repositories)
+	}
+}
+
+func TestResolverFailsClosedWhenChildControlCannotBeLoaded(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		disrupt func(*testing.T, string)
+	}{
+		{
+			name: "missing",
+			disrupt: func(t *testing.T, childControlPath string) {
+				t.Helper()
+				if err := os.RemoveAll(childControlPath); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "corrupt",
+			disrupt: func(t *testing.T, childControlPath string) {
+				t.Helper()
+				referencePath := filepath.Join(childControlPath, "refs", "heads", "main")
+				if err := os.WriteFile(referencePath, []byte("not-a-git-hash\n"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, controls := inheritedControlFixture(t, false)
+			test.disrupt(t, filepath.Join(root, "engineering", "backend", "control.git"))
+			controls.Invalidate("engineering/backend")
+
+			resolver := auth.Resolver{
+				Controls: controls,
+				Directory: fakeDirectory{
+					username:  "alice-login",
+					password:  "alice-secret",
+					canonical: "alice",
+				},
+			}
+			assertControlLoadDenied(t, &resolver)
+		})
+	}
+}
+
+func TestResolverFailsClosedDuringTemporaryChildControlFailure(t *testing.T) {
+	_, controls := inheritedControlFixture(t, true)
+	temporaryErr := errors.New("control storage temporarily unavailable")
+	controlled := &controllableControlStore{
+		store: controls,
+		unavailable: map[string]error{
+			"engineering/backend": temporaryErr,
+		},
+	}
+	resolver := auth.Resolver{
+		Controls: controlled,
+		Directory: fakeDirectory{
+			username:  "alice-login",
+			password:  "alice-secret",
+			canonical: "alice",
+		},
+	}
+
+	assertControlLoadDenied(t, &resolver)
+
+	delete(controlled.unavailable, "engineering/backend")
+	principal, err := resolver.Authenticate(
+		context.Background(),
+		"engineering/backend",
+		"alice-login",
+		"alice-secret",
+	)
+	if err != nil {
+		t.Fatalf("authentication did not recover with the control store: %v", err)
+	}
+	if principal.Name != "alice" || principal.Role != control.RoleOwner ||
+		principal.Group != "engineering" {
+		t.Fatalf("unexpected recovered principal: %#v", principal)
+	}
+	principal, err = resolver.AuthorizeIdentity(
+		context.Background(),
+		"engineering/backend",
+		auth.Principal{Name: "alice"},
+	)
+	if err != nil {
+		t.Fatalf("session authorization did not recover with the control store: %v", err)
+	}
+	if principal.Role != control.RoleOwner || principal.Group != "engineering" {
+		t.Fatalf("unexpected recovered session principal: %#v", principal)
+	}
+}
+
+func inheritedControlFixture(t *testing.T, inherit bool) (string, *control.Store) {
+	t.Helper()
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateGroup("engineering/backend", "bob", ""); err != nil {
+		t.Fatal(err)
+	}
+	controls := control.NewStore(root)
+	document, err := controls.Load(context.Background(), "engineering/backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Inherit = inherit
+	if err = store.UpdateGroupControl("engineering/backend", document, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	controls.Invalidate("engineering/backend")
+	return root, controls
+}
+
+func assertControlLoadDenied(t *testing.T, resolver *auth.Resolver) {
+	t.Helper()
+	if _, err := resolver.Authenticate(
+		context.Background(),
+		"engineering/backend",
+		"alice-login",
+		"alice-secret",
+	); err == nil {
+		t.Fatal("LDAP authentication accepted parent access after the child control load failed")
+	} else if !strings.Contains(err.Error(), `load group control "engineering/backend"`) {
+		t.Fatalf("LDAP authentication returned an unexpected error: %v", err)
+	}
+	if _, err := resolver.AuthorizeIdentity(
+		context.Background(),
+		"engineering/backend",
+		auth.Principal{Name: "alice"},
+	); err == nil {
+		t.Fatal("session authorization accepted parent access after the child control load failed")
+	} else if !strings.Contains(err.Error(), `load group control "engineering/backend"`) {
+		t.Fatalf("session authorization returned an unexpected error: %v", err)
 	}
 }
