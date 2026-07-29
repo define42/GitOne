@@ -8,8 +8,10 @@ Implemented:
 - Initial `control.json` commit on `main`
 - Main-only receive-pack ref validation for `control.git`
 - Git Smart HTTP discovery, upload-pack, and receive-pack handlers using go-git
+- Native Git protocol-v2 client fallback coverage for Smart HTTP clones
 - Per-repository sibling LFS storage (`repo.git` next to `repo.lfs`)
 - LFS Batch API and basic PUT/GET/HEAD/verify endpoints
+- Receive-pack validation of LFS pointer object existence and size
 - Group create/delete/rename endpoints
 - Repository create/delete/rename endpoints
 - Huma administration API with generated OpenAPI and interactive documentation
@@ -28,9 +30,8 @@ Implemented:
 Not production-complete yet:
 
 - Restrict the control tree to only `control.json`
-- LFS pointer validation during Git receive-pack
 - Cross-process locking and atomic multi-path rename/delete transactions
-- Complete Git compatibility matrix and protocol-v2 testing
+- Complete Git client compatibility matrix
 - TLS termination, rate limits, audit logs, and observability
 - Build cancellation, secrets, artifacts, caches, runner capability matching, and log-retention policies
 

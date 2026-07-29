@@ -217,6 +217,11 @@ The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encod
 | `GET` | `/{group...}/{repo}.git/info/refs?service=git-receive-pack` | Advertise push references. |
 | `POST` | `/{group...}/{repo}.git/git-receive-pack` | Push Git objects and reference updates. |
 
+GitOne currently serves Git Smart HTTP protocol v0. Clients requesting protocol v2
+fall back to v0; this compatibility path is exercised with the native Git client.
+Every successfully applied branch update triggers its build scheduling callback,
+even when another reference update in the same non-atomic push fails.
+
 ### Git LFS
 
 | Method | Path | Description |
@@ -226,6 +231,11 @@ The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encod
 | `GET` | `/{group...}/{repo}.git/info/lfs/objects/{sha256}` | Download an LFS object. |
 | `HEAD` | `/{group...}/{repo}.git/info/lfs/objects/{sha256}` | Read LFS object metadata. |
 | `POST` | `/{group...}/{repo}.git/info/lfs/objects/verify` | Verify an LFS upload. |
+
+Upload negotiation advertises both upload and verify actions. Verification checks
+that the requested OID exists and that its stored size matches the request. Git
+pushes are rejected before references move when newly pushed history contains an
+LFS pointer whose object is missing or has the wrong size.
 
 ## Administration examples
 

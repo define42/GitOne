@@ -641,6 +641,11 @@ func TestLFSBatchUploadAndDownloadOverHTTP(t *testing.T) {
 	if !ok || uploadAction.Href != expectedObjectURL {
 		t.Fatalf("unexpected upload action: %#v", uploadBatch.Objects[0].Actions)
 	}
+	verifyAction, ok := uploadBatch.Objects[0].Actions["verify"]
+	expectedVerifyURL := server.URL + "/engineering/assets.git/info/lfs/objects/verify"
+	if !ok || verifyAction.Href != expectedVerifyURL {
+		t.Fatalf("unexpected verify action: %#v", uploadBatch.Objects[0].Actions)
+	}
 
 	response, responseBody := doRequest(
 		http.MethodPut,
@@ -651,6 +656,23 @@ func TestLFSBatchUploadAndDownloadOverHTTP(t *testing.T) {
 	)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("LFS upload returned %d: %s", response.StatusCode, responseBody)
+	}
+	verifyBody, err := json.Marshal(map[string]any{
+		"oid":  oid,
+		"size": len(content),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, responseBody = doRequest(
+		http.MethodPost,
+		verifyAction.Href,
+		verifyBody,
+		"application/vnd.git-lfs+json",
+		true,
+	)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("LFS verify returned %d: %s", response.StatusCode, responseBody)
 	}
 
 	_, repeatedUpload := batch("upload", true)

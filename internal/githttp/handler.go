@@ -251,6 +251,14 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 			h.writeReceiveError(w, req, "ok", err)
 			return
 		}
+	} else if err = validateLFSPointerUpdates(
+		repository,
+		h.Storage,
+		repo,
+		req.Commands,
+	); err != nil {
+		h.writeReceiveError(w, req, "ok", err)
+		return
 	}
 
 	status := packp.NewReportStatus()
@@ -280,7 +288,7 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 	if allApplied && repo.Name == "control" && h.ControlUpdated != nil {
 		h.ControlUpdated(repo.Group())
 	}
-	if allApplied && len(updates) > 0 && h.RepositoryUpdated != nil {
+	if len(updates) > 0 && h.RepositoryUpdated != nil {
 		h.RepositoryUpdated(repo, updates)
 	}
 }

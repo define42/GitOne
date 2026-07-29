@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -20,6 +21,12 @@ import (
 )
 
 const maximumUploadBytes int64 = 100 << 30
+
+var (
+	ErrInvalidObject      = errors.New("invalid LFS object")
+	ErrObjectSizeMismatch = errors.New("LFS object size mismatch")
+	ErrObjectStorage      = errors.New("LFS object storage error")
+)
 
 type Handler struct {
 	Storage   storage.Store
@@ -50,6 +57,10 @@ type batchResponse struct {
 	Transfer string   `json:"transfer"`
 	Objects  []object `json:"objects"`
 }
+type verifyRequest struct {
+	OID  string `json:"oid"`
+	Size int64  `json:"size"`
+}
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	repo, suffix, e := repopath.ParseGitRequestPath(r.URL.Path)
@@ -61,13 +72,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case suffix == "/info/lfs/objects/batch":
 		h.batch(w, r, repo)
 	case suffix == "/info/lfs/objects/verify":
-		if !h.authorize(w, r, repo, true) {
-			return
-		}
-		if _, ok := h.policy(w, r, repo); !ok {
-			return
-		}
-		w.WriteHeader(200)
+		h.verify(w, r, repo)
 	case strings.HasPrefix(suffix, "/info/lfs/objects/"):
 		if !h.authorize(w, r, repo, r.Method == http.MethodPut) {
 			return
@@ -80,6 +85,43 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (h Handler) verify(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.authorize(w, r, repo, true) {
+		return
+	}
+	if _, ok := h.policy(w, r, repo); !ok {
+		return
+	}
+
+	var q verifyRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	if err := decoder.Decode(&q); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := VerifyObject(h.Storage, repo, q.OID, q.Size); err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			http.Error(w, "object not found", http.StatusNotFound)
+		case errors.Is(err, ErrInvalidObject), errors.Is(err, ErrObjectSizeMismatch):
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		default:
+			http.Error(w, "could not inspect LFS object", http.StatusInternalServerError)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
@@ -118,9 +160,22 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 			continue
 		}
 		p, _ := h.objectPath(repo, o.OID)
-		_, e := os.Stat(p)
+		info, e := os.Stat(p)
 		base := strings.TrimRight(h.PublicURL, "/") + "/" + repo.Full() + ".git/info/lfs/objects/" + o.OID
+		verifyURL := strings.TrimRight(h.PublicURL, "/") + "/" + repo.Full() + ".git/info/lfs/objects/verify"
 		o.Actions = map[string]action{}
+		if e != nil && !errors.Is(e, os.ErrNotExist) {
+			o.Error = &objError{500, "could not inspect object"}
+			o.Actions = nil
+			resp.Objects = append(resp.Objects, o)
+			continue
+		}
+		if e == nil && (!info.Mode().IsRegular() || info.Size() != o.Size) {
+			o.Error = &objError{422, "stored object size does not match requested size"}
+			o.Actions = nil
+			resp.Objects = append(resp.Objects, o)
+			continue
+		}
 		if q.Operation == "upload" && errors.Is(e, os.ErrNotExist) {
 			additionalBytes := o.Size
 			if _, exists := pending[o.OID]; exists {
@@ -134,6 +189,7 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 				o.Error = &objError{422, "object exceeds the group LFS storage limit"}
 			default:
 				o.Actions["upload"] = action{Href: base}
+				o.Actions["verify"] = action{Href: verifyURL}
 				pending[o.OID] = o.Size
 			}
 		}
@@ -428,13 +484,50 @@ func (h Handler) objectPath(repo repopath.Repository, oid string) (string, error
 
 func OpenObject(store storage.Store, repo repopath.Repository, oid string) (*os.File, error) {
 	if !validOID(oid) {
-		return nil, errors.New("invalid oid")
+		return nil, ErrInvalidObject
 	}
 	path, err := objectPath(store, repo, oid)
 	if err != nil {
 		return nil, err
 	}
 	return os.Open(path)
+}
+
+func VerifyObject(
+	store storage.Store,
+	repo repopath.Repository,
+	oid string,
+	expectedSize int64,
+) error {
+	if !validOID(oid) || expectedSize < 0 {
+		return ErrInvalidObject
+	}
+	file, err := OpenObject(store, repo, oid)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("LFS object %s not found: %w", oid, os.ErrNotExist)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: could not open object %s", ErrObjectStorage, oid)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("%w: could not inspect object %s", ErrObjectStorage, oid)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: stored object is not a regular file", ErrInvalidObject)
+	}
+	if info.Size() != expectedSize {
+		return fmt.Errorf(
+			"%w: expected %d bytes, found %d",
+			ErrObjectSizeMismatch,
+			expectedSize,
+			info.Size(),
+		)
+	}
+	return nil
 }
 
 func objectPath(store storage.Store, repo repopath.Repository, oid string) (string, error) {

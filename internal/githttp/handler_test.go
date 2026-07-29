@@ -1,18 +1,24 @@
 package githttp
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
@@ -549,6 +555,79 @@ func TestApplyReferenceCommand(t *testing.T) {
 	}
 }
 
+func TestPartialReceiveNotifiesSuccessfulReferenceUpdates(t *testing.T) {
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	feature := plumbing.NewBranchReferenceName("feature")
+	request := packp.NewReferenceUpdateRequest()
+	if err = request.Capabilities.Set(capability.ReportStatus); err != nil {
+		t.Fatal(err)
+	}
+	request.Commands = []*packp.Command{
+		{Name: feature, Old: plumbing.ZeroHash, New: head.Hash()},
+		{Name: feature, Old: plumbing.ZeroHash, New: head.Hash()},
+	}
+	var body bytes.Buffer
+	if err = request.Encode(&body); err != nil {
+		t.Fatal(err)
+	}
+
+	var notifications [][]ReferenceUpdate
+	handler := Handler{
+		Storage: store,
+		RepositoryUpdated: func(repository repopath.Repository, updates []ReferenceUpdate) {
+			if repository.Full() != repositoryPath.Full() {
+				t.Fatalf("notification repository = %q", repository.Full())
+			}
+			notifications = append(notifications, updates)
+		},
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(
+		response,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/engineering/api.git/git-receive-pack",
+			&body,
+		),
+	)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("receive-pack returned %d: %s", response.Code, response.Body.String())
+	}
+	if len(notifications) != 1 ||
+		len(notifications[0]) != 1 ||
+		notifications[0][0].Branch != "feature" ||
+		notifications[0][0].Commit != head.Hash() {
+		t.Fatalf("unexpected repository notifications: %#v", notifications)
+	}
+	if !strings.Contains(response.Body.String(), "already exists") {
+		t.Fatalf("failed sibling update was not reported: %q", response.Body.String())
+	}
+}
+
 func TestNativeGitRejectsInvalidControlDocument(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git executable is not available")
@@ -592,6 +671,138 @@ func TestNativeGitRejectsInvalidControlDocument(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "at least one owner required") {
 		t.Fatalf("push did not report control validation failure:\n%s", output)
+	}
+}
+
+func TestNativeGitPushValidatesLFSPointers(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is not available")
+	}
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "assets"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(Handler{Storage: store})
+	defer server.Close()
+
+	checkout := filepath.Join(t.TempDir(), "assets")
+	runGit(t, "", "clone", server.URL+"/engineering/assets.git", checkout)
+	runGit(t, checkout, "config", "user.name", "alice")
+	runGit(t, checkout, "config", "user.email", "alice@localhost")
+
+	content := []byte("large asset stored outside Git")
+	sum := sha256.Sum256(content)
+	oid := hex.EncodeToString(sum[:])
+	pointer := fmt.Sprintf(
+		"version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d\n",
+		oid,
+		len(content),
+	)
+	assetPath := filepath.Join(checkout, "media", "asset.bin")
+	if err := os.MkdirAll(filepath.Dir(assetPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(assetPath, []byte(pointer), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, checkout, "add", "media/asset.bin")
+	runGit(t, checkout, "commit", "-m", "Add LFS asset")
+
+	push := exec.Command("git", "push", "origin", "main")
+	push.Dir = checkout
+	push.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := push.CombinedOutput()
+	if err == nil {
+		t.Fatalf("push with missing LFS object succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "invalid LFS pointer") {
+		t.Fatalf("push did not report the missing LFS object:\n%s", output)
+	}
+
+	upload := httptest.NewRecorder()
+	lfs.Handler{Storage: store}.ServeHTTP(
+		upload,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/engineering/assets.git/info/lfs/objects/"+oid,
+			bytes.NewReader(content),
+		),
+	)
+	if upload.Code != http.StatusOK {
+		t.Fatalf("LFS upload returned %d: %s", upload.Code, upload.Body.String())
+	}
+	runGit(t, checkout, "push", "origin", "main")
+
+	pointer = fmt.Sprintf(
+		"version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d\n",
+		oid,
+		len(content)+1,
+	)
+	if err = os.WriteFile(assetPath, []byte(pointer), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, checkout, "add", "media/asset.bin")
+	runGit(t, checkout, "commit", "-m", "Write mismatched LFS pointer")
+	push = exec.Command("git", "push", "origin", "main")
+	push.Dir = checkout
+	push.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err = push.CombinedOutput()
+	if err == nil {
+		t.Fatalf("push with mismatched LFS pointer succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "LFS object size mismatch") {
+		t.Fatalf("push did not report the LFS size mismatch:\n%s", output)
+	}
+}
+
+func TestNativeGitProtocolV2ClientFallsBackAndClones(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is not available")
+	}
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "docs"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawVersionTwo atomic.Bool
+	handler := Handler{Storage: store}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Git-Protocol") == "version=2" {
+			sawVersionTwo.Store(true)
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	checkout := filepath.Join(t.TempDir(), "docs")
+	runGit(
+		t,
+		"",
+		"-c",
+		"protocol.version=2",
+		"clone",
+		server.URL+"/engineering/docs.git",
+		checkout,
+	)
+	if !sawVersionTwo.Load() {
+		t.Fatal("Git client did not request protocol version 2")
+	}
+	if _, err := os.Stat(filepath.Join(checkout, "README.md")); err != nil {
+		t.Fatalf("protocol-v2 client clone did not materialize README.md: %v", err)
 	}
 }
 

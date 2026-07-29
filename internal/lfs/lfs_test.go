@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -386,10 +387,10 @@ func TestProtocolRoutesAndFailures(t *testing.T) {
 			status: http.StatusNotFound,
 		},
 		{
-			name:   "verify",
+			name:   "malformed verify",
 			method: http.MethodPost,
 			path:   "/g/r.git/info/lfs/objects/verify",
-			status: http.StatusOK,
+			status: http.StatusBadRequest,
 		},
 		{
 			name:   "invalid object ID",
@@ -438,6 +439,80 @@ func TestProtocolRoutesAndFailures(t *testing.T) {
 	}
 }
 
+func TestVerifyEndpointChecksStoredObject(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	content := []byte("verified LFS object")
+	sum := sha256.Sum256(content)
+	oid := hex.EncodeToString(sum[:])
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+	}
+	upload := httptest.NewRecorder()
+	handler.ServeHTTP(
+		upload,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/g/r.git/info/lfs/objects/"+oid,
+			bytes.NewReader(content),
+		),
+	)
+	if upload.Code != http.StatusOK {
+		t.Fatalf("upload returned %d: %s", upload.Code, upload.Body.String())
+	}
+
+	verify := func(method, objectID string, size int64) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(verifyRequest{OID: objectID, Size: size})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(
+			response,
+			httptest.NewRequest(
+				method,
+				"/g/r.git/info/lfs/objects/verify",
+				bytes.NewReader(body),
+			),
+		)
+		return response
+	}
+
+	if response := verify(http.MethodPost, oid, int64(len(content))); response.Code != http.StatusOK {
+		t.Fatalf("valid verify returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := verify(http.MethodPost, oid, int64(len(content)+1)); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("size mismatch returned %d: %s", response.Code, response.Body.String())
+	}
+	missingOID := string(bytes.Repeat([]byte{'0'}, 64))
+	if response := verify(http.MethodPost, missingOID, 1); response.Code != http.StatusNotFound {
+		t.Fatalf("missing object returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := verify(http.MethodPost, "invalid", 1); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid object returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := verify(http.MethodGet, oid, int64(len(content))); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("wrong method returned %d: %s", response.Code, response.Body.String())
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(
+		response,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/g/r.git/info/lfs/objects/verify",
+			bytes.NewBufferString(`{"oid":"`+oid+`","size":19} {}`),
+		),
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestOpenObjectValidatesAndReadsStoredObject(t *testing.T) {
 	store := storage.Store{Root: t.TempDir()}
 	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "docs"}
@@ -474,5 +549,11 @@ func TestOpenObjectValidatesAndReadsStoredObject(t *testing.T) {
 	}
 	if !bytes.Equal(got, content) {
 		t.Fatalf("OpenObject() read %q, want %q", got, content)
+	}
+	if err = VerifyObject(store, repository, oid, int64(len(content))); err != nil {
+		t.Fatalf("VerifyObject() returned %v", err)
+	}
+	if err = VerifyObject(store, repository, oid, int64(len(content)+1)); !errors.Is(err, ErrObjectSizeMismatch) {
+		t.Fatalf("size mismatch returned %v", err)
 	}
 }
