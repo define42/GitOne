@@ -41,6 +41,8 @@ jobs:
         run: make lint
 
       - name: Run tests with coverage
+        env:
+          GITONE_RUNNER_DOCKER_TEST: "1"
         run: |
           go test ./... -coverprofile=coverage.out -coverpkg=./...
 
