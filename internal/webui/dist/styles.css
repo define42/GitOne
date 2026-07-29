@@ -894,6 +894,10 @@ h3 {
   max-width: 46rem;
 }
 
+.repository-page-description strong {
+  color: var(--text);
+}
+
 .page-actions {
   align-items: center;
   display: flex;

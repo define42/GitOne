@@ -3548,11 +3548,13 @@ async function renderRepositoryBrowser(route) {
     document.title = `${route.repository} · GitOne`;
     app.replaceChildren();
     const description = repository?.description.trim();
+    const repositoryDescription = element("p");
+    repositoryDescription.className = "repository-page-description";
+    repositoryDescription.append(element("strong", repositoryName));
     if (description) {
-        const repositoryDescription = element("p", description);
-        repositoryDescription.className = "repository-page-description";
-        app.append(repositoryDescription);
+        repositoryDescription.append(document.createTextNode(` — ${description}`));
     }
+    app.append(repositoryDescription);
     const overview = element("section");
     overview.className = "repository-overview";
     const branchCreator = repositoryBranchCreator(route, branches);
