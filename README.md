@@ -2,7 +2,7 @@
 
 [![codecov](https://codecov.io/gh/define42/GitOne/graph/badge.svg?token=QQLLp3t2wD)](https://codecov.io/gh/define42/GitOne)
 
-Initial pure-Go Git Smart HTTP and Git LFS server with a Huma administration API and a small TypeScript UI. There is no SSH, database, native `git` binary, or CGO.
+Pure-Go Git and Git LFS server with a Huma administration API and a small TypeScript UI. 
 
 ## Storage
 
@@ -13,7 +13,7 @@ Initial pure-Go Git Smart HTTP and Git LFS server with a Huma administration API
 <root>/<group>/<subgroup>/<repo>.lfs/objects/aa/bb/<sha256>
 ```
 
-Every repository belongs to at least one group. Every group must contain `control.git`. Its only permitted branch is `main`; branch creation, deletion, tags, notes, and other refs are rejected by the server. `control.json` is read from `main` and is the authorization source.
+Every repository belongs to at least one group. Every group must contain `control.git` and is the authorization source for that group.
 
 ## Run
 
