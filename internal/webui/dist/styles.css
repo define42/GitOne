@@ -577,7 +577,7 @@ a:hover {
   font-size: 0.9rem;
   font-weight: 650;
   margin-left: 0.85rem;
-  max-width: 25rem;
+  max-width: min(50vw, 60rem);
   min-width: 0;
   overflow: hidden;
   padding: 0.35rem 0 0.35rem 0.85rem;
@@ -803,43 +803,6 @@ a:hover {
 
 .toast-dismiss {
   border-color: transparent;
-}
-
-.breadcrumbs {
-  margin-bottom: 1rem;
-  overflow-x: auto;
-}
-
-.breadcrumbs ol {
-  align-items: center;
-  display: flex;
-  gap: 0.4rem;
-  list-style: none;
-  margin: 0;
-  min-width: max-content;
-  padding: 0;
-}
-
-.breadcrumbs li {
-  align-items: center;
-  color: var(--muted);
-  display: flex;
-  font-size: 0.875rem;
-  gap: 0.4rem;
-}
-
-.breadcrumbs li:not(:last-child)::after {
-  color: var(--muted);
-  content: "/";
-}
-
-.breadcrumbs a {
-  color: var(--muted);
-  text-decoration: none;
-}
-
-.breadcrumbs a:hover {
-  color: var(--accent);
 }
 
 .page-header {

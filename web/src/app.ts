@@ -626,18 +626,36 @@ function setGroupLocation(path: string): void {
   })));
 }
 
-function setRepositoryLocation(repository: string, ref = "main"): void {
-  const parts = repository.split("/");
+function setRepositoryLocation(route: RepositoryBrowserRoute): void {
+  const parts = route.repository.split("/");
   const groupParts = parts.slice(0, -1);
+  const selectedPath = route.view === "files" || route.view === "blame"
+    ? route.file ?? route.path
+    : "";
+  const pathParts = selectedPath ? selectedPath.split("/") : [];
   setLocationContext([
     ...groupParts.map((part, index) => ({
       label: part,
       href: groupURL(groupParts.slice(0, index + 1).join("/")),
     })),
     {
-      label: parts.at(-1) ?? repository,
-      href: repositoryBrowserURL(repository, {ref}),
+      label: parts.at(-1) ?? route.repository,
+      href: repositoryBrowserURL(route.repository, {ref: route.ref}),
     },
+    ...pathParts.map((part, index) => {
+      const path = pathParts.slice(0, index + 1).join("/");
+      const isFile = route.file !== null && index === pathParts.length - 1;
+      return {
+        label: part,
+        href: isFile
+          ? repositoryBrowserURL(route.repository, {
+            ref: route.ref,
+            file: path,
+            view: route.view === "blame" ? "blame" : undefined,
+          })
+          : repositoryBrowserURL(route.repository, {ref: route.ref, path}),
+      };
+    }),
   ]);
 }
 
@@ -1754,45 +1772,6 @@ function groupSettingsControl(
   });
 
   return {trigger, dialog};
-}
-
-function repositoryContentBreadcrumbs(
-  route: RepositoryBrowserRoute,
-): HTMLElement | null {
-  const selectedPath = route.view === "files" || route.view === "blame"
-    ? route.file ?? route.path
-    : "";
-  if (!selectedPath) {
-    return null;
-  }
-
-  const nav = element("nav");
-  nav.className = "breadcrumbs";
-  nav.setAttribute("aria-label", "Repository path");
-  const list = element("ol");
-  const rootItem = element("li");
-  const root = element("a", "Files");
-  root.href = repositoryBrowserURL(route.repository, {ref: route.ref});
-  rootItem.append(root);
-  list.append(rootItem);
-
-  const pathParts = selectedPath.split("/");
-  for (let index = 0; index < pathParts.length; index += 1) {
-    const item = element("li");
-    if (route.file !== null && index === pathParts.length - 1) {
-      item.append(element("span", pathParts[index]));
-    } else {
-      const link = element("a", pathParts[index]);
-      link.href = repositoryBrowserURL(route.repository, {
-        ref: route.ref,
-        path: pathParts.slice(0, index + 1).join("/"),
-      });
-      item.append(link);
-    }
-    list.append(item);
-  }
-  nav.append(list);
-  return nav;
 }
 
 function formatFileSize(size?: number): string {
@@ -4617,7 +4596,7 @@ async function repositoryReadme(
 
 async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<void> {
   stopRepositoryBuildPolling();
-  setRepositoryLocation(route.repository, route.ref);
+  setRepositoryLocation(route);
   const repositoryParts = route.repository.split("/");
   const repositoryName = repositoryParts.at(-1) ?? route.repository;
   const groupPath = repositoryParts.slice(0, -1).join("/");
@@ -4671,10 +4650,6 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     const repositoryDescription = element("p", description);
     repositoryDescription.className = "repository-page-description";
     app.append(repositoryDescription);
-  }
-  const contentBreadcrumbs = repositoryContentBreadcrumbs(route);
-  if (contentBreadcrumbs) {
-    app.append(contentBreadcrumbs);
   }
 
   const overview = element("section");
