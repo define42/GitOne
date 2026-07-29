@@ -42,7 +42,11 @@ func TestSessionManagerSignsAndEncryptsCookie(t *testing.T) {
 	if err != nil || username != "alice" {
 		t.Fatalf("decode session cookie: username=%q err=%v", username, err)
 	}
-	tampered := cookie[:len(cookie)-1] + "x"
+	replacement := "x"
+	if strings.HasSuffix(cookie, replacement) {
+		replacement = "y"
+	}
+	tampered := cookie[:len(cookie)-1] + replacement
 	if _, err = manager.Username(tampered); err == nil {
 		t.Fatal("tampered session cookie was accepted")
 	}
