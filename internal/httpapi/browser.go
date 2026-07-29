@@ -475,7 +475,7 @@ func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranch
 	output := &repositoryBranchesOutput{}
 	output.Body.Repository = parsed.Full()
 	output.Body.DefaultBranch = "main"
-	_, writeErr := a.authorizeRepository(ctx, input.AuthInput, parsed, control.RoleWrite)
+	_, writeErr := a.authorizeRepository(ctx, input.AuthInput, parsed, control.RoleDeveloper)
 	output.Body.CanWrite = writeErr == nil
 	output.Body.Branches = branches
 	return output, nil
@@ -508,7 +508,7 @@ func (a API) createRepositoryBranch(ctx context.Context, input *createRepository
 		ctx,
 		input.AuthInput,
 		input.Repository,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	if err != nil {
 		return nil, err
@@ -610,7 +610,7 @@ func (a API) listRepositoryTree(
 	output.Body.Commit = commit.Hash.String()
 	output.Body.Path = cleanPath
 	branchName, branchRef, _, branchErr := resolveBranch(repository, ref)
-	_, writeErr := a.authorizeRepository(ctx, credentials, parsed, control.RoleWrite)
+	_, writeErr := a.authorizeRepository(ctx, credentials, parsed, control.RoleDeveloper)
 	output.Body.CanEdit = branchErr == nil &&
 		branchName == ref &&
 		branchRef.Hash() == commit.Hash &&
@@ -731,7 +731,7 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 		ctx,
 		input.AuthInput,
 		parsed,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	output.Body.CanManage = branchErr == nil &&
 		branchName == input.Ref &&

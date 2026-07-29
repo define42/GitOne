@@ -51,7 +51,7 @@ Open [http://localhost:8080](http://localhost:8080) and sign in with LDAP creden
 
 The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group maintainers can create repositories, mirror every Git ref and tag from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository; Git LFS objects remain separate and are not imported. Group maintainers can open Settings to change the group name and description, inheritance, and non-owner group tokens. Only group owners can change members and roles, repository visibility, the LFS policy, or owner tokens. Every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
 
-The repository viewer can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Its Builds tab shows queued, running, successful, and failed jobs, polls active jobs automatically, and exposes expandable live logs. Users with write access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
+The repository viewer can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Its Builds tab shows queued, running, successful, and failed jobs, polls active jobs automatically, and exposes expandable live logs. Users with developer access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
 Comparisons can be saved as merge requests with durable Markdown descriptions and threaded, resolvable discussions. Approvals are bound to the exact source commit, so a new push requires a new approval. Authors cannot approve their own changes unless they are the group owner. An approval merges automatically when the request is conflict-free and all discussions are resolved; an explicit retry action is available after clearing a previous blocker.
 
@@ -108,7 +108,7 @@ The Docker socket is a privileged host capability and belongs only on the runner
 
 ## Endpoint reference
 
-`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. Browser administration requests use the secure session cookie. The API also accepts HTTP Basic authentication for scripts and group automation tokens. Native Git and LFS operations continue to use HTTP Basic authentication. Git and LFS reads follow group visibility: `public` permits anonymous reads, `internal` accepts any authenticated LDAP identity, and `private` requires group access. Writes always require group write access. A group's `control.git` remains private regardless of group visibility. Health and Huma documentation endpoints are public.
+`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. Browser administration requests use the secure session cookie. The API also accepts HTTP Basic authentication for scripts and group automation tokens. Native Git and LFS operations continue to use HTTP Basic authentication. Git and LFS reads follow group visibility: `public` permits anonymous reads, `internal` accepts any authenticated LDAP identity, and `private` requires group access. Writes always require group developer access. A group's `control.git` remains private regardless of group visibility. Health and Huma documentation endpoints are public.
 
 ### Health
 
@@ -179,7 +179,7 @@ Build endpoints require repository read access. Existing build history remains r
 
 ### Repository browser API
 
-The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encoded as individual path segments. Blob responses use UTF-8 text when possible and base64 for binary content. Recognized UTF-8 source files up to 1 MiB also include Chroma-generated `language` and escaped `highlightedHtml` fields. Tree `canEdit` enables file creation, while blob `canEdit` enables text editing and `canManage` enables rename/delete; these capabilities require a named branch and write access. Browsable files are limited to 10 MiB.
+The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encoded as individual path segments. Blob responses use UTF-8 text when possible and base64 for binary content. Recognized UTF-8 source files up to 1 MiB also include Chroma-generated `language` and escaped `highlightedHtml` fields. Tree `canEdit` enables file creation, while blob `canEdit` enables text editing and `canManage` enables rename/delete; these capabilities require a named branch and developer access. Browsable files are limited to 10 MiB.
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -284,7 +284,7 @@ curl -u alice:directory-password \
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "group": "engineering/backend",
   "description": "Backend services",
   "inherit": true,
@@ -302,7 +302,7 @@ curl -u alice:directory-password \
       "name": "CI deploy",
       "key": "ci",
       "hash": "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>",
-      "role": "write"
+      "role": "developer"
     }
   ]
 }
@@ -314,9 +314,9 @@ Group tokens are available for automation and use salted Argon2id hashes. The se
 
 ### Role permissions
 
-Roles are cumulative: `owner` includes `maintainer`, `maintainer` includes `write`, and `write` includes `read`.
+Roles are cumulative: `owner` includes `maintainer`, `maintainer` includes `developer`, and `developer` includes `read`.
 
-| Capability | `read` | `write` | `maintainer` | `owner` |
+| Capability | `read` | `developer` | `maintainer` | `owner` |
 |---|:---:|:---:|:---:|:---:|
 | Browse repositories; clone and fetch | ✓ | ✓ | ✓ | ✓ |
 | Read commits, diffs, builds, and merge requests | ✓ | ✓ | ✓ | ✓ |
@@ -338,11 +338,11 @@ Roles are cumulative: `owner` includes `maintainer`, `maintainer` includes `writ
 
 [^cross-parent-move]: A cross-parent move requires maintainer-or-higher access to the source group and to both non-root parent groups.
 
-The closest explicit group assignment wins. When `inherit` is enabled, GitOne searches parent groups until it finds an assignment; disabling inheritance stops that search. The same matrix applies to group tokens, although every group must retain at least one owner in `members`. Creating a top-level group is separate from this matrix: any authenticated LDAP user may create one and becomes its owner. Repository visibility can grant browsing and Git clone/fetch access to ordinary repositories without an explicit role—`public` permits anonymous reads and `internal` permits authenticated LDAP users—but never grants write, maintainer, owner, or access to `control.git`.
+The closest explicit group assignment wins. When `inherit` is enabled, GitOne searches parent groups until it finds an assignment; disabling inheritance stops that search. The same matrix applies to group tokens, although every group must retain at least one owner in `members`. Creating a top-level group is separate from this matrix: any authenticated LDAP user may create one and becomes its owner. Repository visibility can grant browsing and Git clone/fetch access to ordinary repositories without an explicit role—`public` permits anonymous reads and `internal` permits authenticated LDAP users—but never grants developer, maintainer, owner, or access to `control.git`.
 
 New groups are private with Git LFS enabled and unlimited quotas. The group policy applies to every ordinary repository in the group. `maximumObjectBytes` limits each object, `maximumStorageBytes` limits aggregate LFS storage across the group's repositories, and zero means unlimited within the server's absolute upload guard.
 
-Control schema version 3 renames the `admin` role to `maintainer`. Before upgrading a populated version-2 server, replace every `admin` member or token role with `maintainer` and set each document's `version` to `3`. When upgrading from version 1, also add explicit group `visibility` and `lfs` policies, remove `repositories` from every token, and remove the top-level `repositories` map. Earlier schema versions are rejected rather than interpreted with potentially unsafe defaults.
+Control schema version 4 renames the `write` role to `developer`. Before upgrading a populated version-3 server, replace every `write` member or token role with `developer` and set each document's `version` to `4`. When upgrading from version 2, also replace every `admin` role with `maintainer`. When upgrading from version 1, additionally add explicit group `visibility` and `lfs` policies, remove `repositories` from every token, and remove the top-level `repositories` map. Earlier schema versions are rejected rather than interpreted with potentially unsafe defaults.
 
 ## Tests
 

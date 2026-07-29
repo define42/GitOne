@@ -329,7 +329,7 @@ func (a API) prepareRepositoryFileChange(
 		ctx,
 		credentials,
 		repositoryPath,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	if err != nil {
 		return nil, err

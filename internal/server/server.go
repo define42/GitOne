@@ -65,7 +65,7 @@ func New(c Config) http.Handler {
 		}
 		need := control.RoleRead
 		if write {
-			need = control.RoleWrite
+			need = control.RoleDeveloper
 		}
 		if repo.Name == "control" && write {
 			need = control.RoleOwner

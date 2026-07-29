@@ -116,7 +116,7 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	document.Description = "Engineering services"
-	document.Members["bob"] = control.RoleWrite
+	document.Members["bob"] = control.RoleDeveloper
 	if err = service.Storage.UpdateGroupControl("engineering", document, "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 	if len(groups.Body.Groups) != 1 ||
 		groups.Body.Groups[0].Path != "engineering" ||
 		groups.Body.Groups[0].Description != "Engineering services" ||
-		groups.Body.Groups[0].Role != control.RoleWrite {
+		groups.Body.Groups[0].Role != control.RoleDeveloper {
 		t.Fatalf("unexpected group summaries: %#v", groups.Body.Groups)
 	}
 
@@ -151,10 +151,10 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(group.Body.Subgroups) != 1 ||
-		group.Body.Role != control.RoleWrite ||
+		group.Body.Role != control.RoleDeveloper ||
 		group.Body.Subgroups[0].Path != "engineering/platform" ||
 		group.Body.Subgroups[0].Description != "Platform services" ||
-		group.Body.Subgroups[0].Role != control.RoleWrite {
+		group.Body.Subgroups[0].Role != control.RoleDeveloper {
 		t.Fatalf("unexpected subgroup summaries: %#v", group.Body.Subgroups)
 	}
 }
@@ -235,7 +235,7 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 				Name: "automation",
 				Key:  "ci",
 				Hash: "untrusted-hash",
-				Role: control.RoleWrite,
+				Role: control.RoleDeveloper,
 			}},
 		},
 	})
@@ -270,7 +270,7 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 				Name:      "automation",
 				Key:       "ci",
 				NewSecret: "first-secret",
-				Role:      control.RoleWrite,
+				Role:      control.RoleDeveloper,
 			}},
 		},
 	})

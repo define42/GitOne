@@ -262,7 +262,7 @@ func TestCompareCanMergeWithRepositoryScopedWriteToken(t *testing.T) {
 		Name: "review automation",
 		Key:  "reviewer",
 		Hash: tokenHash,
-		Role: control.RoleWrite,
+		Role: control.RoleDeveloper,
 	})
 	if err = service.Storage.UpdateGroupControl(parsed.Group(), document, "alice"); err != nil {
 		t.Fatal(err)

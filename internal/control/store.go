@@ -109,6 +109,6 @@ func Validate(group string, d Document) error {
 }
 
 func validRole(r Role) bool {
-	return r == RoleRead || r == RoleWrite || r == RoleMaintainer || r == RoleOwner
+	return r == RoleRead || r == RoleDeveloper || r == RoleMaintainer || r == RoleOwner
 }
 func (s *Store) Invalidate(group string) { s.mu.Lock(); delete(s.cache, group); s.mu.Unlock() }

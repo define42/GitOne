@@ -3,24 +3,24 @@ package control
 import "testing"
 
 func TestRoleAllows(t *testing.T) {
-	if !RoleOwner.Allows(RoleWrite) {
-		t.Fatal("owner should write")
+	if !RoleOwner.Allows(RoleDeveloper) {
+		t.Fatal("owner should have developer access")
 	}
-	if !RoleMaintainer.Allows(RoleWrite) {
-		t.Fatal("maintainer should write")
+	if !RoleMaintainer.Allows(RoleDeveloper) {
+		t.Fatal("maintainer should have developer access")
 	}
 	if RoleMaintainer.Allows(RoleOwner) {
 		t.Fatal("maintainer should not have owner access")
 	}
-	if RoleRead.Allows(RoleWrite) {
-		t.Fatal("read should not write")
+	if RoleRead.Allows(RoleDeveloper) {
+		t.Fatal("read should not have developer access")
 	}
 }
 
 func TestValidateRequiresOwner(t *testing.T) {
 	d := Document{
 		Version: CurrentVersion, Group: "g", Visibility: "private",
-		Members: map[string]Role{"a": RoleWrite},
+		Members: map[string]Role{"a": RoleDeveloper},
 	}
 	if Validate("g", d) == nil {
 		t.Fatal("expected owner error")
@@ -80,21 +80,27 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			},
 		},
 		{
+			name: "legacy write member role",
+			mutate: func(document *Document) {
+				document.Members["bob"] = Role("write")
+			},
+		},
+		{
 			name: "token without name",
 			mutate: func(document *Document) {
-				document.Tokens = []Token{{Key: "deploy", Hash: "hash", Role: RoleWrite}}
+				document.Tokens = []Token{{Key: "deploy", Hash: "hash", Role: RoleDeveloper}}
 			},
 		},
 		{
 			name: "token without key",
 			mutate: func(document *Document) {
-				document.Tokens = []Token{{Name: "ci", Hash: "hash", Role: RoleWrite}}
+				document.Tokens = []Token{{Name: "ci", Hash: "hash", Role: RoleDeveloper}}
 			},
 		},
 		{
 			name: "token without hash",
 			mutate: func(document *Document) {
-				document.Tokens = []Token{{Name: "ci", Key: "deploy", Role: RoleWrite}}
+				document.Tokens = []Token{{Name: "ci", Key: "deploy", Role: RoleDeveloper}}
 			},
 		},
 		{
@@ -110,11 +116,17 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			},
 		},
 		{
+			name: "legacy write token role",
+			mutate: func(document *Document) {
+				document.Tokens = []Token{{Name: "ci", Key: "deploy", Hash: "hash", Role: Role("write")}}
+			},
+		},
+		{
 			name: "duplicate token name",
 			mutate: func(document *Document) {
 				document.Tokens = []Token{
-					{Name: "ci", Key: "deploy", Hash: "sha256:a", Role: RoleWrite},
-					{Name: "ci", Key: "release", Hash: "sha256:b", Role: RoleWrite},
+					{Name: "ci", Key: "deploy", Hash: "sha256:a", Role: RoleDeveloper},
+					{Name: "ci", Key: "release", Hash: "sha256:b", Role: RoleDeveloper},
 				}
 			},
 		},
@@ -122,8 +134,8 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			name: "duplicate token key",
 			mutate: func(document *Document) {
 				document.Tokens = []Token{
-					{Name: "ci", Key: "deploy", Hash: "sha256:a", Role: RoleWrite},
-					{Name: "release", Key: "deploy", Hash: "sha256:b", Role: RoleWrite},
+					{Name: "ci", Key: "deploy", Hash: "sha256:a", Role: RoleDeveloper},
+					{Name: "release", Key: "deploy", Hash: "sha256:b", Role: RoleDeveloper},
 				}
 			},
 		},

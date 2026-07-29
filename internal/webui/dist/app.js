@@ -992,7 +992,7 @@ function sectionHeading(title, count, actions = []) {
 }
 function roleSelect(value, canSelectOwner = true) {
     const select = element("select");
-    for (const role of ["read", "write", "maintainer", "owner"]) {
+    for (const role of ["read", "developer", "maintainer", "owner"]) {
         const option = element("option", role[0].toUpperCase() + role.slice(1));
         option.value = role;
         option.selected = role === value;
@@ -1141,7 +1141,7 @@ function groupSettingsControl(path, settings, role) {
         name: "",
         key: "",
         hash: "",
-        role: "write",
+        role: "developer",
     }) => {
         const row = element("fieldset");
         row.className = "settings-item token-row";
@@ -1967,7 +1967,7 @@ function repositoryBranchCreator(route, data) {
     dialog.className = "action-dialog";
     if (!data.canWrite) {
         trigger.disabled = true;
-        trigger.title = "Write access is required to create a branch";
+        trigger.title = "Developer access is required to create a branch";
         return { trigger, dialog };
     }
     if (data.branches.length === 0) {

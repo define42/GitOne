@@ -77,7 +77,7 @@ func (a API) compareRepositoryBranches(
 		ctx,
 		input.AuthInput,
 		parsed,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	output := &compareRepositoryBranchesOutput{}
 	output.Body.Repository = parsed.Full()
@@ -123,7 +123,7 @@ func (a API) mergeRepositoryBranches(
 		ctx,
 		input.AuthInput,
 		parsed,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	if err != nil {
 		return nil, err

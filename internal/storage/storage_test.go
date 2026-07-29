@@ -111,12 +111,12 @@ func TestUpdateGroupControl(t *testing.T) {
 		MaximumObjectBytes:  1024,
 		MaximumStorageBytes: 4096,
 	}
-	document.Members["bob"] = control.RoleWrite
+	document.Members["bob"] = control.RoleDeveloper
 	document.Tokens = append(document.Tokens, control.Token{
 		Name: "deploy",
 		Key:  "ci",
 		Hash: "sha256:test",
-		Role: control.RoleWrite,
+		Role: control.RoleDeveloper,
 	})
 	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ func TestUpdateGroupControl(t *testing.T) {
 	}
 	if updated.Description != "After" ||
 		updated.Inherit ||
-		updated.Members["bob"] != control.RoleWrite ||
+		updated.Members["bob"] != control.RoleDeveloper ||
 		len(updated.Tokens) != 1 ||
 		updated.Visibility != "internal" ||
 		!updated.LFS.Enabled ||

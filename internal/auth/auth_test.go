@@ -106,7 +106,7 @@ func TestResolverUsesLDAPIdentityAndTokenKeys(t *testing.T) {
 		Name: "deploy",
 		Key:  "ci",
 		Hash: tokenHash,
-		Role: control.RoleWrite,
+		Role: control.RoleDeveloper,
 	}}
 	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
 		t.Fatal(err)
@@ -143,7 +143,7 @@ func TestResolverUsesLDAPIdentityAndTokenKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("token key did not authenticate: %v", err)
 	}
-	if principal.Group != "engineering" || principal.Role != control.RoleWrite {
+	if principal.Group != "engineering" || principal.Role != control.RoleDeveloper {
 		t.Fatalf("token did not receive its group role: %#v", principal)
 	}
 }

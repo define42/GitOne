@@ -66,7 +66,7 @@ func newMergeRequestAPIFixture(t *testing.T) mergeRequestAPIFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document.Members["bob"] = control.RoleWrite
+	document.Members["bob"] = control.RoleDeveloper
 	if err = service.Storage.UpdateGroupControl(path.Group(), document, "alice"); err != nil {
 		t.Fatal(err)
 	}

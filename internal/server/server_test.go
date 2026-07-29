@@ -840,7 +840,7 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 			"name": "deploy",
 			"key": "ci",
 			"newSecret": "deploy-secret",
-			"role": "write",
+			"role": "developer",
 			"disabled": true
 		}]
 	}`

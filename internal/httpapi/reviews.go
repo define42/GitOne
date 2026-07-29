@@ -314,7 +314,7 @@ func (a API) createMergeRequest(
 		ctx,
 		input.AuthInput,
 		input.Repository,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	if err != nil {
 		return nil, err
@@ -424,7 +424,7 @@ func (a API) updateMergeRequest(
 		ctx,
 		input.AuthInput,
 		input.Repository,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	if err != nil {
 		return nil, err
@@ -631,8 +631,8 @@ func (a API) updateReviewThread(
 			}
 			if principal.Name != threadAuthor &&
 				principal.Name != request.Author &&
-				!principal.Role.Allows(control.RoleWrite) {
-				return huma.Error403Forbidden("only the thread author or a writer can update this thread")
+				!principal.Role.Allows(control.RoleDeveloper) {
+				return huma.Error403Forbidden("only the thread author or a developer can update this thread")
 			}
 			now := time.Now().UTC()
 			thread.Resolved = input.Body.Resolved
@@ -673,7 +673,7 @@ func (a API) approveMergeRequest(
 		ctx,
 		input.AuthInput,
 		input.Repository,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	if err != nil {
 		return nil, err
@@ -830,7 +830,7 @@ func (a API) mergeStoredRequest(
 		ctx,
 		credentials,
 		parsed,
-		control.RoleWrite,
+		control.RoleDeveloper,
 	)
 	if err != nil {
 		return mergeRequestView{}, err
@@ -1316,7 +1316,7 @@ func (a API) buildMergeRequestView(
 		parsed,
 		control.RoleRead,
 	)
-	canWrite := principalErr == nil && principal.Role.Allows(control.RoleWrite)
+	canWrite := principalErr == nil && principal.Role.Allows(control.RoleDeveloper)
 	canApproveOwn := principalErr == nil && principal.Role == control.RoleOwner
 	approvals := make([]mergeRequestApprovalView, 0, len(request.Approvals))
 	currentApprovals := 0
