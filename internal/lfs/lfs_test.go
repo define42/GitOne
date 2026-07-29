@@ -67,8 +67,8 @@ func TestPolicyDisablesLFS(t *testing.T) {
 		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
 			return true, true
 		},
-		Policy: func(*http.Request, repopath.Repository) (control.RepositoryPolicy, error) {
-			return control.RepositoryPolicy{}, nil
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{}, nil
 		},
 	}
 	request := httptest.NewRequest(
@@ -91,12 +91,12 @@ func TestUploadEnforcesObjectAndStorageLimits(t *testing.T) {
 		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
 			return true, true
 		},
-		Policy: func(*http.Request, repopath.Repository) (control.RepositoryPolicy, error) {
-			return control.RepositoryPolicy{LFS: control.LFSPolicy{
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{
 				Enabled:             true,
 				MaximumObjectBytes:  4,
 				MaximumStorageBytes: 6,
-			}}, nil
+			}, nil
 		},
 	}
 	upload := func(data string) *httptest.ResponseRecorder {
@@ -123,6 +123,57 @@ func TestUploadEnforcesObjectAndStorageLimits(t *testing.T) {
 	}
 	if response := upload("7"); response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("storage overflow returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestUploadEnforcesStorageLimitAcrossGroupRepositories(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	existing := []byte("1234")
+	existingHash := sha256.Sum256(existing)
+	existingOID := hex.EncodeToString(existingHash[:])
+	existingPath := filepath.Join(
+		root,
+		"g",
+		"other.lfs",
+		"objects",
+		existingOID[:2],
+		existingOID[2:4],
+		existingOID,
+	)
+	if err := os.MkdirAll(filepath.Dir(existingPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existingPath, existing, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: 6}, nil
+		},
+	}
+	upload := func(data string) *httptest.ResponseRecorder {
+		sum := sha256.Sum256([]byte(data))
+		oid := hex.EncodeToString(sum[:])
+		request := httptest.NewRequest(
+			http.MethodPut,
+			"/g/r.git/info/lfs/objects/"+oid,
+			bytes.NewBufferString(data),
+		)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	if response := upload("567"); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("group storage overflow returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := upload("56"); response.Code != http.StatusOK {
+		t.Fatalf("upload at group storage limit returned %d: %s", response.Code, response.Body.String())
 	}
 }
 
@@ -352,8 +403,8 @@ func TestProtocolRoutesAndFailures(t *testing.T) {
 	}
 
 	failedPolicy := allowed
-	failedPolicy.Policy = func(*http.Request, repopath.Repository) (control.RepositoryPolicy, error) {
-		return control.RepositoryPolicy{}, errors.New("control repository unavailable")
+	failedPolicy.Policy = func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+		return control.LFSPolicy{}, errors.New("control repository unavailable")
 	}
 	response = request(failedPolicy, http.MethodPost, "/g/r.git/info/lfs/objects/verify")
 	if response.Code != http.StatusInternalServerError {

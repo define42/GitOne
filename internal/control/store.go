@@ -87,8 +87,8 @@ func ReadDocument(repository *git.Repository, hash plumbing.Hash, group string) 
 }
 
 func Validate(group string, d Document) error {
-	if d.Version != 1 {
-		return fmt.Errorf("unsupported version")
+	if d.Version != CurrentVersion {
+		return fmt.Errorf("unsupported version %d (expected %d)", d.Version, CurrentVersion)
 	}
 	if d.Group != group {
 		return fmt.Errorf("group mismatch")
@@ -104,11 +104,6 @@ func Validate(group string, d Document) error {
 	}
 	if owners == 0 {
 		return errors.New("at least one owner required")
-	}
-	for name := range d.Repositories {
-		if name == "control" || name == "" || filepath.Base(name) != name {
-			return fmt.Errorf("invalid repository name %q", name)
-		}
 	}
 	return ValidateSettings(d)
 }

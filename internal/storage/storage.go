@@ -491,13 +491,14 @@ func (s Store) createGroup(group, owner, description string) error {
 		return e
 	}
 	doc := control.Document{
-		Version:      1,
-		Group:        group,
-		Description:  description,
-		Inherit:      true,
-		Members:      map[string]control.Role{owner: control.RoleOwner},
-		Tokens:       []control.Token{},
-		Repositories: map[string]control.RepositoryPolicy{},
+		Version:     control.CurrentVersion,
+		Group:       group,
+		Description: description,
+		Inherit:     true,
+		Visibility:  "private",
+		LFS:         control.LFSPolicy{Enabled: true},
+		Members:     map[string]control.Role{owner: control.RoleOwner},
+		Tokens:      []control.Token{},
 	}
 	b, _ := json.MarshalIndent(doc, "", "  ")
 	b = append(b, '\n')

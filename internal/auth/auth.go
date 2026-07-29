@@ -38,10 +38,9 @@ type IdentityProvider interface {
 }
 
 type Principal struct {
-	Name         string
-	Role         control.Role
-	Group        string
-	Repositories []string
+	Name  string
+	Role  control.Role
+	Group string
 }
 
 func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string) (Principal, error) {
@@ -64,10 +63,9 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 			}
 			if VerifySecret(token.Hash, secret) {
 				return Principal{
-					Name:         user,
-					Role:         token.Role,
-					Group:        paths[i],
-					Repositories: append([]string(nil), token.Repositories...),
+					Name:  user,
+					Role:  token.Role,
+					Group: paths[i],
 				}, nil
 			}
 		}
@@ -134,18 +132,6 @@ func parents(g string) []string {
 		o[i] = strings.Join(p[:i+1], "/")
 	}
 	return o
-}
-
-func (p Principal) AllowsRepository(name string) bool {
-	if len(p.Repositories) == 0 {
-		return true
-	}
-	for _, repository := range p.Repositories {
-		if repository == name {
-			return true
-		}
-	}
-	return false
 }
 
 func HashSecret(secret string) (string, error) {

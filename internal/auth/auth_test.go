@@ -103,11 +103,10 @@ func TestResolverUsesLDAPIdentityAndTokenKeys(t *testing.T) {
 	}
 	document.Members["bob"] = control.RoleRead
 	document.Tokens = []control.Token{{
-		Name:         "deploy",
-		Key:          "ci",
-		Hash:         tokenHash,
-		Role:         control.RoleWrite,
-		Repositories: []string{"api"},
+		Name: "deploy",
+		Key:  "ci",
+		Hash: tokenHash,
+		Role: control.RoleWrite,
 	}}
 	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
 		t.Fatal(err)
@@ -144,8 +143,8 @@ func TestResolverUsesLDAPIdentityAndTokenKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("token key did not authenticate: %v", err)
 	}
-	if !principal.AllowsRepository("api") || principal.AllowsRepository("web") {
-		t.Fatalf("repository scope was not retained: %#v", principal.Repositories)
+	if principal.Group != "engineering" || principal.Role != control.RoleWrite {
+		t.Fatalf("token did not receive its group role: %#v", principal)
 	}
 }
 

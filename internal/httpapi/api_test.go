@@ -257,7 +257,13 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 		Body: updateGroupSettingsBody{
 			Name:        "engineering",
 			Description: "Backend services",
-			Members:     map[string]control.Role{"alice": control.RoleOwner},
+			Visibility:  "internal",
+			LFS: control.LFSPolicy{
+				Enabled:             true,
+				MaximumObjectBytes:  1024,
+				MaximumStorageBytes: 4096,
+			},
+			Members: map[string]control.Role{"alice": control.RoleOwner},
 			Tokens: []groupTokenInput{{
 				Name:      "automation",
 				Key:       "ci",
@@ -274,8 +280,10 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 		!auth.VerifySecret(token.Hash, "first-secret") {
 		t.Fatalf("new token secret was not secured: %#v", token)
 	}
-	if created.Body.Settings.Repositories == nil {
-		t.Fatal("nil repository policies were not normalized")
+	if created.Body.Settings.Visibility != "internal" ||
+		!created.Body.Settings.LFS.Enabled ||
+		created.Body.Settings.LFS.MaximumStorageBytes != 4096 {
+		t.Fatalf("group policy was not retained: %#v", created.Body.Settings)
 	}
 
 	preserved, err := service.updateGroupSettings(ctx, &updateGroupSettingsInput{
@@ -283,6 +291,8 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 		Body: updateGroupSettingsBody{
 			Name:        "engineering",
 			Description: "Updated description",
+			Visibility:  created.Body.Settings.Visibility,
+			LFS:         created.Body.Settings.LFS,
 			Members:     map[string]control.Role{"alice": control.RoleOwner},
 			Tokens: []groupTokenInput{{
 				Name: "automation",
@@ -307,6 +317,8 @@ func TestUpdateGroupSettingsRenamesGroupAndRepository(t *testing.T) {
 		Body: updateGroupSettingsBody{
 			Name:        "platform",
 			Description: "Renamed group",
+			Visibility:  "private",
+			LFS:         control.LFSPolicy{Enabled: true},
 			Members:     map[string]control.Role{"alice": control.RoleOwner},
 		},
 	})

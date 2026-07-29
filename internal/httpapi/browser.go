@@ -856,9 +856,9 @@ func (a API) openRepository(
 		return nil, repopath.Repository{}, huma.Error400BadRequest(err.Error())
 	}
 	visibility := ""
-	if role == control.RoleRead {
+	if role == control.RoleRead && parsed.Name != "control" {
 		if document, loadErr := a.Resolver.Controls.Load(ctx, parsed.Group()); loadErr == nil {
-			visibility = document.Repositories[parsed.Name].Visibility
+			visibility = document.Visibility
 		}
 	}
 	switch visibility {

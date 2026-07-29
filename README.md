@@ -42,7 +42,7 @@ docker compose up --build
 
 Open [http://localhost:8080](http://localhost:8080) and sign in with LDAP credentials. After LDAP validation, GitOne stores only the username in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner; creating a subgroup still requires admin access inherited from its parent. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser.
 
-The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can create repositories, mirror every Git ref and tag from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository; Git LFS objects remain separate and are not imported. Group admins can open Settings to change the group name and description, inheritance, members and roles, tokens, and repository visibility and LFS policies; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
+The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group admins can create repositories, mirror every Git ref and tag from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository; Git LFS objects remain separate and are not imported. Group admins can open Settings to change the group name and description, inheritance, members and roles, group tokens, and the group-wide repository visibility and LFS policy; every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
 
 The repository viewer can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Its Builds tab shows queued, running, successful, and failed jobs, polls active jobs automatically, and exposes expandable live logs. Users with write access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
@@ -101,7 +101,7 @@ The Docker socket is a privileged host capability and belongs only on the runner
 
 ## Endpoint reference
 
-`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. Browser administration requests use the secure session cookie. The API also accepts HTTP Basic authentication for scripts and automation tokens. Native Git and LFS operations continue to use HTTP Basic authentication. Git and LFS reads follow repository visibility: `public` permits anonymous reads, `internal` accepts any authenticated LDAP identity, and private/default repositories require group access. Writes always require group write access. Health and Huma documentation endpoints are public.
+`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. Browser administration requests use the secure session cookie. The API also accepts HTTP Basic authentication for scripts and group automation tokens. Native Git and LFS operations continue to use HTTP Basic authentication. Git and LFS reads follow group visibility: `public` permits anonymous reads, `internal` accepts any authenticated LDAP identity, and `private` requires group access. Writes always require group write access. A group's `control.git` remains private regardless of group visibility. Health and Huma documentation endpoints are public.
 
 ### Health
 
@@ -277,10 +277,16 @@ curl -u alice:directory-password \
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "group": "engineering/backend",
   "description": "Backend services",
   "inherit": true,
+  "visibility": "private",
+  "lfs": {
+    "enabled": true,
+    "maximumObjectBytes": 10737418240,
+    "maximumStorageBytes": 107374182400
+  },
   "members": {
     "alice": "owner"
   },
@@ -289,28 +295,19 @@ curl -u alice:directory-password \
       "name": "CI deploy",
       "key": "ci",
       "hash": "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>",
-      "role": "write",
-      "repositories": ["api"]
+      "role": "write"
     }
-  ],
-  "repositories": {
-    "api": {
-      "visibility": "private",
-      "lfs": {
-        "enabled": true,
-        "maximumObjectBytes": 10737418240,
-        "maximumStorageBytes": 107374182400
-      }
-    }
-  }
+  ]
 }
 ```
 
 Member entries contain only LDAP usernames and roles. GitOne binds directly with the submitted username plus the optional `LDAP_USER_DOMAIN`, searches for that authenticated identifier using `LDAP_USER_FILTER`, then matches the submitted username exactly against `members`; member passwords are never stored in `control.json`.
 
-Repository tokens remain available for automation and use salted Argon2id hashes. The settings API accepts a new token secret only for the duration of an update and hashes it on the server. A token's `key` is its HTTP Basic username, while `name` is only its display label. An empty token repository list grants access to every repository allowed by its role.
+Group tokens are available for automation and use salted Argon2id hashes. The settings API accepts a new token secret only for the duration of an update and hashes it on the server. A token's `key` is its HTTP Basic username, while `name` is only its display label. Its role applies to the whole group and follows the same `inherit` boundary as member access for subgroups.
 
-Git LFS is enabled with unlimited quotas when a repository has no explicit policy. An explicit policy can disable LFS or configure object and storage limits; a zero limit means unlimited within the server's absolute upload guard.
+New groups are private with Git LFS enabled and unlimited quotas. The group policy applies to every ordinary repository in the group. `maximumObjectBytes` limits each object, `maximumStorageBytes` limits aggregate LFS storage across the group's repositories, and zero means unlimited within the server's absolute upload guard.
+
+Control schema version 2 replaces version 1 repository policies and repository-scoped tokens. Before upgrading a populated server, rewrite each group's `control.json` with one explicit group `visibility` and `lfs` policy, remove `repositories` from every token, remove the top-level `repositories` map, and set `version` to `2`. Version 1 documents are rejected rather than interpreted with potentially unsafe defaults.
 
 ## Tests
 

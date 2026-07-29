@@ -259,11 +259,10 @@ func TestCompareCanMergeWithRepositoryScopedWriteToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	document.Tokens = append(document.Tokens, control.Token{
-		Name:         "review automation",
-		Key:          "reviewer",
-		Hash:         tokenHash,
-		Role:         control.RoleWrite,
-		Repositories: []string{parsed.Name},
+		Name: "review automation",
+		Key:  "reviewer",
+		Hash: tokenHash,
+		Role: control.RoleWrite,
 	})
 	if err = service.Storage.UpdateGroupControl(parsed.Group(), document, "alice"); err != nil {
 		t.Fatal(err)
@@ -291,7 +290,7 @@ func TestCompareCanMergeWithRepositoryScopedWriteToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !comparison.Body.CanMerge {
-		t.Fatal("repository-scoped write token was not allowed to merge")
+		t.Fatal("group write token was not allowed to merge")
 	}
 	branches, err := service.listRepositoryBranches(
 		context.Background(),
@@ -304,7 +303,7 @@ func TestCompareCanMergeWithRepositoryScopedWriteToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !branches.Body.CanWrite {
-		t.Fatal("repository-scoped write token was not reported as writable")
+		t.Fatal("group write token was not reported as writable")
 	}
 }
 

@@ -78,23 +78,23 @@ type groupSettingsOutput struct {
 }
 
 type updateGroupSettingsBody struct {
-	Name         string                              `json:"name" minLength:"1"`
-	Description  string                              `json:"description"`
-	Inherit      bool                                `json:"inherit"`
-	Members      map[string]control.Role             `json:"members"`
-	Tokens       []groupTokenInput                   `json:"tokens"`
-	Repositories map[string]control.RepositoryPolicy `json:"repositories"`
+	Name        string                  `json:"name" minLength:"1"`
+	Description string                  `json:"description"`
+	Inherit     bool                    `json:"inherit"`
+	Visibility  string                  `json:"visibility" enum:"private,internal,public"`
+	LFS         control.LFSPolicy       `json:"lfs"`
+	Members     map[string]control.Role `json:"members"`
+	Tokens      []groupTokenInput       `json:"tokens"`
 }
 
 type groupTokenInput struct {
-	Name         string       `json:"name"`
-	Key          string       `json:"key"`
-	Hash         string       `json:"hash,omitempty"`
-	NewSecret    string       `json:"newSecret,omitempty"`
-	Role         control.Role `json:"role"`
-	Repositories []string     `json:"repositories,omitempty"`
-	ExpiresAt    *time.Time   `json:"expiresAt,omitempty"`
-	Disabled     bool         `json:"disabled,omitempty"`
+	Name      string       `json:"name"`
+	Key       string       `json:"key"`
+	Hash      string       `json:"hash,omitempty"`
+	NewSecret string       `json:"newSecret,omitempty"`
+	Role      control.Role `json:"role"`
+	ExpiresAt *time.Time   `json:"expiresAt,omitempty"`
+	Disabled  bool         `json:"disabled,omitempty"`
 }
 
 type updateGroupSettingsInput struct {
@@ -404,7 +404,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 			group.Path,
 			control.RoleRead,
 		)
-		if authErr != nil || len(subgroupPrincipal.Repositories) > 0 {
+		if authErr != nil {
 			continue
 		}
 		description := ""
@@ -422,9 +422,6 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		return nil, huma.Error404NotFound("group not found")
 	}
 	for _, name := range current.Repositories {
-		if !principal.AllowsRepository(name) {
-			continue
-		}
 		description, descriptionErr := a.Storage.RepositoryDescription(repopath.Repository{
 			Groups: strings.Split(path, "/"),
 			Name:   name,
@@ -489,12 +486,13 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 		return nil, huma.Error400BadRequest(err.Error())
 	}
 	document := control.Document{
-		Version:      1,
-		Group:        target,
-		Description:  input.Body.Description,
-		Inherit:      input.Body.Inherit,
-		Members:      input.Body.Members,
-		Repositories: input.Body.Repositories,
+		Version:     control.CurrentVersion,
+		Group:       target,
+		Description: input.Body.Description,
+		Inherit:     input.Body.Inherit,
+		Visibility:  input.Body.Visibility,
+		LFS:         input.Body.LFS,
+		Members:     input.Body.Members,
 	}
 	if document.Members == nil {
 		document.Members = map[string]control.Role{}
@@ -521,17 +519,13 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 			}
 		}
 		document.Tokens = append(document.Tokens, control.Token{
-			Name:         submitted.Name,
-			Key:          submitted.Key,
-			Hash:         hash,
-			Role:         submitted.Role,
-			Repositories: submitted.Repositories,
-			ExpiresAt:    submitted.ExpiresAt,
-			Disabled:     submitted.Disabled,
+			Name:      submitted.Name,
+			Key:       submitted.Key,
+			Hash:      hash,
+			Role:      submitted.Role,
+			ExpiresAt: submitted.ExpiresAt,
+			Disabled:  submitted.Disabled,
 		})
-	}
-	if document.Repositories == nil {
-		document.Repositories = map[string]control.RepositoryPolicy{}
 	}
 	if err = control.Validate(target, document); err != nil {
 		return nil, huma.Error400BadRequest("invalid group settings", err)
@@ -871,9 +865,6 @@ func (a API) authorize(ctx context.Context, credentials AuthInput, group string,
 	if err != nil {
 		return "", err
 	}
-	if len(principal.Repositories) > 0 {
-		return "", huma.Error403Forbidden("repository-scoped tokens cannot manage groups")
-	}
 	return principal.Name, nil
 }
 
@@ -886,9 +877,6 @@ func (a API) authorizeRepository(
 	principal, err := a.authorizePrincipal(ctx, credentials, repository.Group(), need)
 	if err != nil {
 		return auth.Principal{}, err
-	}
-	if !principal.AllowsRepository(repository.Name) {
-		return auth.Principal{}, huma.Error403Forbidden("token cannot access this repository")
 	}
 	return principal, nil
 }

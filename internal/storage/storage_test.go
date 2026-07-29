@@ -54,6 +54,15 @@ func TestCreateGroupAndRepository(t *testing.T) {
 	if e := s.CreateGroup("engineering", "alice", "Engineering projects"); e != nil {
 		t.Fatal(e)
 	}
+	document, err := control.NewStore(root).Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Version != control.CurrentVersion ||
+		document.Visibility != "private" ||
+		!document.LFS.Enabled {
+		t.Fatalf("unexpected default group policy: %#v", document)
+	}
 	r := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
 	if e := s.CreateRepository(r, CreateRepositoryOptions{}); e != nil {
 		t.Fatal(e)
@@ -95,6 +104,12 @@ func TestUpdateGroupControl(t *testing.T) {
 	}
 	document.Description = "After"
 	document.Inherit = false
+	document.Visibility = "internal"
+	document.LFS = control.LFSPolicy{
+		Enabled:             true,
+		MaximumObjectBytes:  1024,
+		MaximumStorageBytes: 4096,
+	}
 	document.Members["bob"] = control.RoleWrite
 	document.Tokens = append(document.Tokens, control.Token{
 		Name: "deploy",
@@ -102,15 +117,6 @@ func TestUpdateGroupControl(t *testing.T) {
 		Hash: "sha256:test",
 		Role: control.RoleWrite,
 	})
-	document.Repositories["api"] = control.RepositoryPolicy{
-		Visibility: "private",
-		LFS: control.LFSPolicy{
-			Enabled:             true,
-			MaximumObjectBytes:  1024,
-			MaximumStorageBytes: 4096,
-		},
-	}
-
 	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +128,10 @@ func TestUpdateGroupControl(t *testing.T) {
 		updated.Inherit ||
 		updated.Members["bob"] != control.RoleWrite ||
 		len(updated.Tokens) != 1 ||
-		!updated.Repositories["api"].LFS.Enabled {
+		updated.Visibility != "internal" ||
+		!updated.LFS.Enabled ||
+		updated.LFS.MaximumObjectBytes != 1024 ||
+		updated.LFS.MaximumStorageBytes != 4096 {
 		t.Fatalf("unexpected updated control document: %#v", updated)
 	}
 

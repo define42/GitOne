@@ -1019,7 +1019,7 @@ function localDateTime(value) {
     const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
     return local.toISOString().slice(0, 16);
 }
-function groupSettingsControl(path, detail, settings) {
+function groupSettingsControl(path, settings) {
     const trigger = actionButton("Settings", "settings", "secondary");
     const dialog = element("dialog");
     dialog.className = "action-dialog settings-dialog";
@@ -1162,10 +1162,6 @@ function groupSettingsControl(path, detail, settings) {
         tokenSecret.className = "token-secret";
         tokenSecret.type = "password";
         tokenSecret.autocomplete = "new-password";
-        const tokenRepositories = element("input");
-        tokenRepositories.className = "token-repositories";
-        tokenRepositories.placeholder = "api, web";
-        tokenRepositories.value = token.repositories?.join(", ") ?? "";
         const tokenExpiry = element("input");
         tokenExpiry.className = "token-expires";
         tokenExpiry.type = "datetime-local";
@@ -1177,7 +1173,7 @@ function groupSettingsControl(path, detail, settings) {
         const disabledLabel = element("label");
         disabledLabel.className = "checkbox-label settings-checkbox";
         disabledLabel.append(tokenDisabled, document.createTextNode("Disabled"));
-        fields.append(fieldLabel("Token name", tokenName), fieldLabel("Login key", tokenKey), fieldLabel("Role", tokenRole), fieldLabel("Stored hash", tokenHash), fieldLabel("New secret", tokenSecret), fieldLabel("Repository scope", tokenRepositories), fieldLabel("Expires", tokenExpiry), disabledLabel);
+        fields.append(fieldLabel("Token name", tokenName), fieldLabel("Login key", tokenKey), fieldLabel("Role", tokenRole), fieldLabel("Stored hash", tokenHash), fieldLabel("New secret", tokenSecret), fieldLabel("Expires", tokenExpiry), disabledLabel);
         row.append(legend, remove, fields);
         tokens.append(row);
         refreshTokenEmpty();
@@ -1191,114 +1187,50 @@ function groupSettingsControl(path, detail, settings) {
     addToken.addEventListener("click", () => addTokenRow());
     tokensPanel.append(tokensHeader, tokenEmpty, tokens);
     refreshTokenEmpty();
-    const repositoriesPanel = element("section");
-    repositoriesPanel.className = "settings-panel-view";
-    repositoriesPanel.setAttribute("role", "tabpanel");
-    const repositoriesHeader = element("div");
-    repositoriesHeader.className = "settings-section-header";
-    repositoriesHeader.append(element("h3", "Repository policies"));
-    const addPolicy = actionButton("Add policy", "plus", "secondary");
-    repositoriesHeader.append(addPolicy);
-    const repositoryNames = Array.from(new Set([
-        ...detail.repositories.map((repository) => repository.name),
-        ...Object.keys(settings.repositories),
-    ])).sort();
-    const repositoryOptions = element("datalist");
-    repositoryOptions.id = "repository-policy-options";
-    for (const repositoryName of repositoryNames) {
-        const option = element("option");
-        option.value = repositoryName;
-        repositoryOptions.append(option);
+    const policyPanel = element("section");
+    policyPanel.className = "settings-panel-view";
+    policyPanel.setAttribute("role", "tabpanel");
+    policyPanel.append(element("h3", "Repository policy"));
+    const policyGrid = element("div");
+    policyGrid.className = "settings-field-grid";
+    const visibility = element("select");
+    for (const [value, label] of [
+        ["private", "Private"],
+        ["internal", "Internal"],
+        ["public", "Public"],
+    ]) {
+        const option = element("option", label);
+        option.value = value;
+        option.selected = value === settings.visibility;
+        visibility.append(option);
     }
-    const policies = element("div");
-    policies.className = "settings-items policy-items";
-    const policyEmpty = element("p", "No repository policies.");
-    policyEmpty.className = "settings-empty";
-    const refreshPolicyEmpty = () => {
-        policyEmpty.hidden = policies.querySelector(".policy-row") !== null;
-    };
-    const addPolicyRow = (repositoryName = "", policy = {
-        visibility: "",
-        lfs: { enabled: false },
-    }) => {
-        const row = element("fieldset");
-        row.className = "settings-item policy-row";
-        const legend = element("legend", repositoryName || "New policy");
-        const remove = removeButton(`Remove ${repositoryName || "policy"}`);
-        remove.classList.add("settings-item-remove");
-        remove.addEventListener("click", () => {
-            row.remove();
-            refreshPolicyEmpty();
-        });
-        const fields = element("div");
-        fields.className = "settings-field-grid policy-field-grid";
-        const policyRepository = element("input");
-        policyRepository.className = "policy-repository";
-        policyRepository.required = true;
-        policyRepository.autocomplete = "off";
-        policyRepository.setAttribute("list", repositoryOptions.id);
-        policyRepository.value = repositoryName;
-        policyRepository.addEventListener("input", () => {
-            legend.textContent = policyRepository.value || "New policy";
-        });
-        const visibility = element("select");
-        visibility.className = "policy-visibility";
-        for (const [value, label] of [
-            ["", "Default"],
-            ["private", "Private"],
-            ["internal", "Internal"],
-            ["public", "Public"],
-        ]) {
-            const option = element("option", label);
-            option.value = value;
-            option.selected = value === (policy.visibility ?? "");
-            visibility.append(option);
-        }
-        const lfsEnabled = element("input");
-        lfsEnabled.className = "policy-lfs-enabled";
-        lfsEnabled.type = "checkbox";
-        lfsEnabled.checked = policy.lfs.enabled;
-        const lfsLabel = element("label");
-        lfsLabel.className = "checkbox-label settings-checkbox";
-        lfsLabel.append(lfsEnabled, document.createTextNode("LFS enabled"));
-        const maximumObject = element("input");
-        maximumObject.className = "policy-maximum-object";
-        maximumObject.type = "number";
-        maximumObject.min = "0";
-        maximumObject.step = "1";
-        maximumObject.value = policy.lfs.maximumObjectBytes
-            ? String(policy.lfs.maximumObjectBytes)
-            : "";
-        const maximumStorage = element("input");
-        maximumStorage.className = "policy-maximum-storage";
-        maximumStorage.type = "number";
-        maximumStorage.min = "0";
-        maximumStorage.step = "1";
-        maximumStorage.value = policy.lfs.maximumStorageBytes
-            ? String(policy.lfs.maximumStorageBytes)
-            : "";
-        fields.append(fieldLabel("Repository", policyRepository), fieldLabel("Visibility", visibility), lfsLabel, fieldLabel("Maximum object bytes", maximumObject), fieldLabel("Maximum storage bytes", maximumStorage));
-        row.append(legend, remove, fields);
-        policies.append(row);
-        refreshPolicyEmpty();
-        if (!repositoryName) {
-            policyRepository.focus();
-        }
-    };
-    for (const [repositoryName, policy] of Object.entries(settings.repositories).sort()) {
-        addPolicyRow(repositoryName, policy);
-    }
-    addPolicy.addEventListener("click", () => {
-        const used = new Set(Array.from(policies.querySelectorAll(".policy-repository")).map((input) => input.value));
-        addPolicyRow(repositoryNames.find((repository) => !used.has(repository)) ?? "");
-    });
-    repositoriesPanel.append(repositoriesHeader, repositoryOptions, policyEmpty, policies);
-    refreshPolicyEmpty();
+    const lfsEnabled = element("input");
+    lfsEnabled.type = "checkbox";
+    lfsEnabled.checked = settings.lfs.enabled;
+    const lfsLabel = element("label");
+    lfsLabel.className = "checkbox-label settings-checkbox";
+    lfsLabel.append(lfsEnabled, document.createTextNode("Enable Git LFS for repositories in this group"));
+    const maximumObject = element("input");
+    maximumObject.type = "number";
+    maximumObject.min = "0";
+    maximumObject.step = "1";
+    maximumObject.value = settings.lfs.maximumObjectBytes
+        ? String(settings.lfs.maximumObjectBytes)
+        : "";
+    const maximumStorage = element("input");
+    maximumStorage.type = "number";
+    maximumStorage.min = "0";
+    maximumStorage.step = "1";
+    maximumStorage.value = settings.lfs.maximumStorageBytes
+        ? String(settings.lfs.maximumStorageBytes)
+        : "";
+    policyGrid.append(fieldLabel("Visibility", visibility), lfsLabel, fieldLabel("Maximum object bytes", maximumObject), fieldLabel("Maximum group storage bytes", maximumStorage));
+    policyPanel.append(policyGrid);
     const panelDefinitions = [
         ["General", generalPanel],
         ["Access", accessPanel],
         ["Tokens", tokensPanel],
-        ["Repositories", repositoriesPanel],
+        ["Policy", policyPanel],
     ];
     const tabButtons = [];
     const selectPanel = (selected) => {
@@ -1382,11 +1314,6 @@ function groupSettingsControl(path, detail, settings) {
                 if (!hash && !secret) {
                     throw new Error("Every new token needs a secret.");
                 }
-                const repositoryScope = row
-                    .querySelector(".token-repositories")
-                    ?.value.split(",")
-                    .map((value) => value.trim())
-                    .filter(Boolean);
                 const expiry = row.querySelector(".token-expires")?.value ?? "";
                 updatedTokens.push({
                     name: tokenName,
@@ -1394,48 +1321,19 @@ function groupSettingsControl(path, detail, settings) {
                     hash,
                     newSecret: secret || undefined,
                     role: row.querySelector(".token-role")?.value,
-                    repositories: repositoryScope,
                     expiresAt: expiry ? new Date(expiry).toISOString() : undefined,
                     disabled: row.querySelector(".token-disabled")?.checked ?? false,
                 });
             }
-            const updatedPolicies = {};
-            for (const row of policies.querySelectorAll(".policy-row")) {
-                const repositoryName = row
-                    .querySelector(".policy-repository")
-                    ?.value.trim() ?? "";
-                if (!repositoryName) {
-                    throw new Error("Every repository policy needs a repository.");
-                }
-                if (repositoryName in updatedPolicies) {
-                    throw new Error(`Repository ${repositoryName} has more than one policy.`);
-                }
-                const maximumObjectValue = row
-                    .querySelector(".policy-maximum-object")
-                    ?.value.trim() ?? "";
-                const maximumStorageValue = row
-                    .querySelector(".policy-maximum-storage")
-                    ?.value.trim() ?? "";
-                const maximumObjectBytes = maximumObjectValue ? Number(maximumObjectValue) : 0;
-                const maximumStorageBytes = maximumStorageValue ? Number(maximumStorageValue) : 0;
-                if (!Number.isSafeInteger(maximumObjectBytes) ||
-                    !Number.isSafeInteger(maximumStorageBytes) ||
-                    maximumObjectBytes < 0 ||
-                    maximumStorageBytes < 0) {
-                    throw new Error("Repository limits must be non-negative whole bytes.");
-                }
-                updatedPolicies[repositoryName] = {
-                    visibility: row
-                        .querySelector(".policy-visibility")
-                        ?.value,
-                    lfs: {
-                        enabled: row
-                            .querySelector(".policy-lfs-enabled")
-                            ?.checked ?? false,
-                        maximumObjectBytes,
-                        maximumStorageBytes,
-                    },
-                };
+            const maximumObjectValue = maximumObject.value.trim();
+            const maximumStorageValue = maximumStorage.value.trim();
+            const maximumObjectBytes = maximumObjectValue ? Number(maximumObjectValue) : 0;
+            const maximumStorageBytes = maximumStorageValue ? Number(maximumStorageValue) : 0;
+            if (!Number.isSafeInteger(maximumObjectBytes) ||
+                !Number.isSafeInteger(maximumStorageBytes) ||
+                maximumObjectBytes < 0 ||
+                maximumStorageBytes < 0) {
+                throw new Error("LFS limits must be non-negative whole bytes.");
             }
             const updated = await request(groupSettingsAPIURL(path), {
                 method: "PUT",
@@ -1444,9 +1342,14 @@ function groupSettingsControl(path, detail, settings) {
                     name: name.value.trim(),
                     description: description.value,
                     inherit: inherit.checked,
+                    visibility: visibility.value,
+                    lfs: {
+                        enabled: lfsEnabled.checked,
+                        maximumObjectBytes,
+                        maximumStorageBytes,
+                    },
                     members: updatedMembers,
                     tokens: updatedTokens,
-                    repositories: updatedPolicies,
                 }),
             });
             dialog.close();
@@ -4061,7 +3964,7 @@ async function renderGroup(path, message) {
     }, [repositoryDescription.label, initializeReadmeLabel]);
     const importRepository = repositoryImportControl(data.path);
     const settingsControl = controlSettings
-        ? groupSettingsControl(data.path, data, controlSettings)
+        ? groupSettingsControl(data.path, controlSettings)
         : null;
     const subgroups = element("section");
     subgroups.className = "content-section";

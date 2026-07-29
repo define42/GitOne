@@ -2,10 +2,11 @@ package control
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 )
+
+const CurrentVersion = 2
 
 type Role string
 
@@ -17,31 +18,27 @@ const (
 )
 
 type Document struct {
-	Version      int                         `json:"version"`
-	Group        string                      `json:"group"`
-	Description  string                      `json:"description"`
-	Inherit      bool                        `json:"inherit"`
-	Members      map[string]Role             `json:"members"`
-	Tokens       []Token                     `json:"tokens"`
-	Repositories map[string]RepositoryPolicy `json:"repositories"`
+	Version     int             `json:"version"`
+	Group       string          `json:"group"`
+	Description string          `json:"description"`
+	Inherit     bool            `json:"inherit"`
+	Visibility  string          `json:"visibility" enum:"private,internal,public"`
+	LFS         LFSPolicy       `json:"lfs"`
+	Members     map[string]Role `json:"members"`
+	Tokens      []Token         `json:"tokens"`
 }
 type Token struct {
-	Name         string     `json:"name"`
-	Key          string     `json:"key"`
-	Hash         string     `json:"hash"`
-	Role         Role       `json:"role"`
-	Repositories []string   `json:"repositories,omitempty"`
-	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
-	Disabled     bool       `json:"disabled,omitempty"`
-}
-type RepositoryPolicy struct {
-	Visibility string    `json:"visibility,omitempty"`
-	LFS        LFSPolicy `json:"lfs"`
+	Name      string     `json:"name"`
+	Key       string     `json:"key"`
+	Hash      string     `json:"hash"`
+	Role      Role       `json:"role"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	Disabled  bool       `json:"disabled,omitempty"`
 }
 type LFSPolicy struct {
 	Enabled             bool  `json:"enabled"`
-	MaximumObjectBytes  int64 `json:"maximumObjectBytes,omitempty"`
-	MaximumStorageBytes int64 `json:"maximumStorageBytes,omitempty"`
+	MaximumObjectBytes  int64 `json:"maximumObjectBytes,omitempty" minimum:"0"`
+	MaximumStorageBytes int64 `json:"maximumStorageBytes,omitempty" minimum:"0"`
 }
 
 func (r Role) Allows(need Role) bool {
@@ -73,11 +70,6 @@ func ValidateSettings(d Document) error {
 		if !validRole(token.Role) {
 			return fmt.Errorf("invalid role for token %q", token.Name)
 		}
-		for _, repository := range token.Repositories {
-			if strings.TrimSpace(repository) == "" || filepath.Base(repository) != repository || repository == "control" {
-				return fmt.Errorf("invalid repository scope %q for token %q", repository, token.Name)
-			}
-		}
 		if _, exists := tokenNames[token.Name]; exists {
 			return fmt.Errorf("duplicate token name %q", token.Name)
 		}
@@ -88,15 +80,13 @@ func ValidateSettings(d Document) error {
 		tokenKeys[token.Key] = struct{}{}
 	}
 
-	for name, policy := range d.Repositories {
-		switch policy.Visibility {
-		case "", "private", "internal", "public":
-		default:
-			return fmt.Errorf("invalid visibility for repository %q", name)
-		}
-		if policy.LFS.MaximumObjectBytes < 0 || policy.LFS.MaximumStorageBytes < 0 {
-			return fmt.Errorf("LFS limits cannot be negative for repository %q", name)
-		}
+	switch d.Visibility {
+	case "private", "internal", "public":
+	default:
+		return fmt.Errorf("invalid group visibility %q", d.Visibility)
+	}
+	if d.LFS.MaximumObjectBytes < 0 || d.LFS.MaximumStorageBytes < 0 {
+		return fmt.Errorf("group LFS limits cannot be negative")
 	}
 	return nil
 }

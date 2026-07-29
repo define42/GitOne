@@ -42,12 +42,11 @@ func New(c Config) http.Handler {
 	}
 	authorizeRepo := func(r *http.Request, repo repopath.Repository, write bool) (bool, bool) {
 		document, _ := cs.Load(r.Context(), repo.Group())
-		if !write {
-			visibility := document.Repositories[repo.Name].Visibility
-			if visibility == "public" {
+		if !write && repo.Name != "control" {
+			if document.Visibility == "public" {
 				return true, true
 			}
-			if visibility == "internal" {
+			if document.Visibility == "internal" {
 				u, p, ok := r.BasicAuth()
 				if !ok {
 					return false, false
@@ -72,7 +71,7 @@ func New(c Config) http.Handler {
 		if repo.Name == "control" && write {
 			need = control.RoleOwner
 		}
-		return true, pr.Role.Allows(need) && pr.AllowsRepository(repo.Name)
+		return true, pr.Role.Allows(need)
 	}
 	mux := http.NewServeMux()
 	buildStore := runner.NewStore(c.Root)
@@ -101,16 +100,12 @@ func New(c Config) http.Handler {
 		Storage:   st,
 		PublicURL: c.PublicURL,
 		Authorize: authorizeRepo,
-		Policy: func(r *http.Request, repo repopath.Repository) (control.RepositoryPolicy, error) {
+		Policy: func(r *http.Request, repo repopath.Repository) (control.LFSPolicy, error) {
 			document, err := cs.Load(r.Context(), repo.Group())
 			if err != nil {
-				return control.RepositoryPolicy{}, err
+				return control.LFSPolicy{}, err
 			}
-			policy, configured := document.Repositories[repo.Name]
-			if !configured {
-				policy.LFS.Enabled = true
-			}
-			return policy, nil
+			return document.LFS, nil
 		},
 		UploadMu: &sync.Mutex{},
 	}

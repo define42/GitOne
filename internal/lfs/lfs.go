@@ -26,7 +26,7 @@ type Handler struct {
 	Storage   storage.Store
 	PublicURL string
 	Authorize func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
-	Policy    func(*http.Request, repopath.Repository) (control.RepositoryPolicy, error)
+	Policy    func(*http.Request, repopath.Repository) (control.LFSPolicy, error)
 	UploadMu  *sync.Mutex
 }
 type batchRequest struct {
@@ -104,9 +104,9 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 	}
 	resp := batchResponse{Transfer: "basic"}
 	var storageBytes int64
-	if q.Operation == "upload" && policy.LFS.MaximumStorageBytes > 0 {
+	if q.Operation == "upload" && policy.MaximumStorageBytes > 0 {
 		var usageErr error
-		storageBytes, usageErr = h.storageUsage(repo)
+		storageBytes, usageErr = h.groupStorageUsage(repo.Group())
 		if usageErr != nil {
 			http.Error(w, "could not inspect LFS storage", http.StatusInternalServerError)
 			return
@@ -129,11 +129,11 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 				additionalBytes = 0
 			}
 			switch {
-			case policy.LFS.MaximumObjectBytes > 0 && o.Size > policy.LFS.MaximumObjectBytes:
-				o.Error = &objError{422, "object exceeds the repository LFS object limit"}
-			case policy.LFS.MaximumStorageBytes > 0 &&
-				storageBytes+pendingBytes(pending)+additionalBytes > policy.LFS.MaximumStorageBytes:
-				o.Error = &objError{422, "object exceeds the repository LFS storage limit"}
+			case policy.MaximumObjectBytes > 0 && o.Size > policy.MaximumObjectBytes:
+				o.Error = &objError{422, "object exceeds the group LFS object limit"}
+			case policy.MaximumStorageBytes > 0 &&
+				storageBytes+pendingBytes(pending)+additionalBytes > policy.MaximumStorageBytes:
+				o.Error = &objError{422, "object exceeds the group LFS storage limit"}
 			default:
 				o.Actions["upload"] = action{Href: base}
 				pending[o.OID] = o.Size
@@ -184,18 +184,18 @@ func (h Handler) policy(
 	w http.ResponseWriter,
 	r *http.Request,
 	repo repopath.Repository,
-) (control.RepositoryPolicy, bool) {
+) (control.LFSPolicy, bool) {
 	if h.Policy == nil {
-		return control.RepositoryPolicy{LFS: control.LFSPolicy{Enabled: true}}, true
+		return control.LFSPolicy{Enabled: true}, true
 	}
 	policy, err := h.Policy(r, repo)
 	if err != nil {
-		http.Error(w, "could not load repository LFS policy", http.StatusInternalServerError)
-		return control.RepositoryPolicy{}, false
+		http.Error(w, "could not load group LFS policy", http.StatusInternalServerError)
+		return control.LFSPolicy{}, false
 	}
-	if !policy.LFS.Enabled {
-		http.Error(w, "Git LFS is disabled for this repository", http.StatusForbidden)
-		return control.RepositoryPolicy{}, false
+	if !policy.Enabled {
+		http.Error(w, "Git LFS is disabled for this group", http.StatusForbidden)
+		return control.LFSPolicy{}, false
 	}
 	return policy, true
 }
@@ -241,12 +241,12 @@ func (h Handler) object(
 			http.Error(w, "bad path", http.StatusBadRequest)
 			return
 		}
-		if policy.LFS.MaximumObjectBytes > 0 &&
-			r.ContentLength > policy.LFS.MaximumObjectBytes {
-			http.Error(w, "object exceeds the repository LFS object limit", http.StatusUnprocessableEntity)
+		if policy.MaximumObjectBytes > 0 &&
+			r.ContentLength > policy.MaximumObjectBytes {
+			http.Error(w, "object exceeds the group LFS object limit", http.StatusUnprocessableEntity)
 			return
 		}
-		if err = h.upload(r, repo, p, oid, policy.LFS); err != nil {
+		if err = h.upload(r, repo, p, oid, policy); err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
@@ -321,7 +321,7 @@ func (h Handler) upload(
 	}
 	if n > limit {
 		_ = tmp.Close()
-		return errors.New("object exceeds the repository LFS object limit")
+		return errors.New("object exceeds the group LFS object limit")
 	}
 	if e = tmp.Sync(); e != nil {
 		_ = tmp.Close()
@@ -337,44 +337,54 @@ func (h Handler) upload(
 		return nil
 	}
 	if policy.MaximumStorageBytes > 0 {
-		usage, usageErr := h.storageUsage(repo)
+		usage, usageErr := h.groupStorageUsage(repo.Group())
 		if usageErr != nil {
 			return usageErr
 		}
 		if usage+n > policy.MaximumStorageBytes {
-			return errors.New("object exceeds the repository LFS storage limit")
+			return errors.New("object exceeds the group LFS storage limit")
 		}
 	}
 	return os.Rename(name, p)
 }
 
-func (h Handler) storageUsage(repo repopath.Repository) (int64, error) {
-	root, err := h.Storage.LFSPath(repo)
+func (h Handler) groupStorageUsage(group string) (int64, error) {
+	root, err := h.Storage.GroupPath(group)
+	if err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return 0, err
 	}
 	var total int64
-	err = filepath.WalkDir(filepath.Join(root, "objects"), func(_ string, entry os.DirEntry, walkErr error) error {
-		if errors.Is(walkErr, os.ErrNotExist) {
+	for _, repository := range entries {
+		if !repository.IsDir() || !strings.HasSuffix(repository.Name(), ".lfs") {
+			continue
+		}
+		objects := filepath.Join(root, repository.Name(), "objects")
+		err = filepath.WalkDir(objects, func(_ string, entry os.DirEntry, walkErr error) error {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() || !validOID(entry.Name()) {
+				return nil
+			}
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			total += info.Size()
 			return nil
+		})
+		if err != nil {
+			return 0, err
 		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() || !validOID(entry.Name()) {
-			return nil
-		}
-		info, infoErr := entry.Info()
-		if infoErr != nil {
-			return infoErr
-		}
-		total += info.Size()
-		return nil
-	})
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
 	}
-	return total, err
+	return total, nil
 }
 
 func (h Handler) objectPath(repo repopath.Repository, oid string) (string, error) {

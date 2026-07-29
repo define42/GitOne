@@ -12,26 +12,44 @@ func TestRoleAllows(t *testing.T) {
 }
 
 func TestValidateRequiresOwner(t *testing.T) {
-	d := Document{Version: 1, Group: "g", Members: map[string]Role{"a": RoleWrite}, Repositories: map[string]RepositoryPolicy{}}
+	d := Document{
+		Version: CurrentVersion, Group: "g", Visibility: "private",
+		Members: map[string]Role{"a": RoleWrite},
+	}
 	if Validate("g", d) == nil {
 		t.Fatal("expected owner error")
 	}
 }
 
 func TestValidateGroupMatch(t *testing.T) {
-	d := Document{Version: 1, Group: "other", Members: map[string]Role{"a": RoleOwner}, Repositories: map[string]RepositoryPolicy{}}
+	d := Document{
+		Version: CurrentVersion, Group: "other", Visibility: "private",
+		Members: map[string]Role{"a": RoleOwner},
+	}
 	if Validate("g", d) == nil {
 		t.Fatal("expected mismatch")
 	}
 }
 
+func TestValidateRejectsPreviousSchemaVersion(t *testing.T) {
+	document := Document{
+		Version:    CurrentVersion - 1,
+		Group:      "g",
+		Visibility: "private",
+		Members:    map[string]Role{"alice": RoleOwner},
+	}
+	if err := Validate("g", document); err == nil {
+		t.Fatal("previous control schema version was accepted")
+	}
+}
+
 func TestValidateRejectsInvalidSettings(t *testing.T) {
 	base := Document{
-		Version:      1,
-		Group:        "g",
-		Members:      map[string]Role{"alice": RoleOwner},
-		Tokens:       []Token{},
-		Repositories: map[string]RepositoryPolicy{},
+		Version:    CurrentVersion,
+		Group:      "g",
+		Visibility: "private",
+		Members:    map[string]Role{"alice": RoleOwner},
+		Tokens:     []Token{},
 	}
 	tests := []struct {
 		name   string
@@ -74,15 +92,6 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid repository scope",
-			mutate: func(document *Document) {
-				document.Tokens = []Token{{
-					Name: "ci", Key: "deploy", Hash: "hash", Role: RoleWrite,
-					Repositories: []string{"nested/api"},
-				}}
-			},
-		},
-		{
 			name: "duplicate token name",
 			mutate: func(document *Document) {
 				document.Tokens = []Token{
@@ -101,17 +110,15 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid repository visibility",
+			name: "invalid group visibility",
 			mutate: func(document *Document) {
-				document.Repositories["api"] = RepositoryPolicy{Visibility: "secret"}
+				document.Visibility = "secret"
 			},
 		},
 		{
 			name: "negative LFS limit",
 			mutate: func(document *Document) {
-				document.Repositories["api"] = RepositoryPolicy{
-					LFS: LFSPolicy{MaximumObjectBytes: -1},
-				}
+				document.LFS.MaximumObjectBytes = -1
 			},
 		},
 	}
@@ -120,7 +127,6 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 			document := base
 			document.Members = map[string]Role{"alice": RoleOwner}
 			document.Tokens = nil
-			document.Repositories = map[string]RepositoryPolicy{}
 			test.mutate(&document)
 			if Validate("g", document) == nil {
 				t.Fatal("expected validation error")

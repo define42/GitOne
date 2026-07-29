@@ -244,19 +244,50 @@ func TestLDAPUserCanCreateRootGroupButNotUnauthorizedSubgroup(t *testing.T) {
 	}
 }
 
-func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
+func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}
-	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"public", "internal", "api", "web"} {
+	for _, fixture := range []struct {
+		group      string
+		repository string
+		visibility string
+		lfs        bool
+	}{
+		{group: "public-group", repository: "public", visibility: "public", lfs: false},
+		{group: "internal-group", repository: "internal", visibility: "internal", lfs: true},
+		{group: "engineering", repository: "api", visibility: "private", lfs: true},
+	} {
+		if err := store.CreateGroup(fixture.group, "alice", ""); err != nil {
+			t.Fatal(err)
+		}
 		if err := store.CreateRepository(
-			repopath.Repository{Groups: []string{"engineering"}, Name: name},
+			repopath.Repository{Groups: []string{fixture.group}, Name: fixture.repository},
 			storage.CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
 		); err != nil {
 			t.Fatal(err)
 		}
+		controls := control.NewStore(root)
+		document, err := controls.Load(context.Background(), fixture.group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		document.Visibility = fixture.visibility
+		document.LFS.Enabled = fixture.lfs
+		if err = store.UpdateGroupControl(fixture.group, document, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.CreateRepository(
+		repopath.Repository{Groups: []string{"engineering"}, Name: "web"},
+		storage.CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRepository(
+		repopath.Repository{Groups: []string{"public-group"}, Name: "docs"},
+		storage.CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
+	); err != nil {
+		t.Fatal(err)
 	}
 	controls := control.NewStore(root)
 	document, err := controls.Load(context.Background(), "engineering")
@@ -267,26 +298,13 @@ func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document.Repositories["public"] = control.RepositoryPolicy{Visibility: "public"}
-	document.Repositories["internal"] = control.RepositoryPolicy{Visibility: "internal"}
 	document.Tokens = []control.Token{{
-		Name:         "deploy",
-		Key:          "ci",
-		Hash:         tokenHash,
-		Role:         control.RoleAdmin,
-		Repositories: []string{"api"},
+		Name: "deploy",
+		Key:  "ci",
+		Hash: tokenHash,
+		Role: control.RoleAdmin,
 	}}
 	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.CreateGroup("community", "bob", ""); err != nil {
-		t.Fatal(err)
-	}
-	community, err := controls.Load(context.Background(), "community")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.UpdateGroupControl("community", community, "bob"); err != nil {
 		t.Fatal(err)
 	}
 	handler := New(Config{
@@ -299,13 +317,35 @@ func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
 
 	request := httptest.NewRequest(
 		http.MethodGet,
-		"/engineering/public.git/info/refs?service=git-upload-pack",
+		"/public-group/public.git/info/refs?service=git-upload-pack",
 		nil,
 	)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("public repository returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/public-group/docs.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("group visibility did not apply to second repository: %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/public-group/control.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("public group exposed control.git: %d: %s", response.Code, response.Body.String())
 	}
 
 	request = httptest.NewRequest(
@@ -322,7 +362,7 @@ func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
 
 	request = httptest.NewRequest(
 		http.MethodPost,
-		"/engineering/public.git/info/lfs/objects/batch",
+		"/public-group/public.git/info/lfs/objects/batch",
 		strings.NewReader(`{"operation":"download","objects":[]}`),
 	)
 	response = httptest.NewRecorder()
@@ -333,7 +373,7 @@ func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
 
 	request = httptest.NewRequest(
 		http.MethodGet,
-		"/engineering/internal.git/info/refs?service=git-upload-pack",
+		"/internal-group/internal.git/info/refs?service=git-upload-pack",
 		nil,
 	)
 	request.SetBasicAuth("bob", "bob-secret")
@@ -352,7 +392,7 @@ func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
-		t.Fatalf("scoped repository returned %d: %s", response.Code, response.Body.String())
+		t.Fatalf("group token could not read api: %d: %s", response.Code, response.Body.String())
 	}
 
 	request = httptest.NewRequest(
@@ -363,8 +403,8 @@ func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
 	request.SetBasicAuth("ci", "ci-secret")
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("out-of-scope repository returned %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("group token could not read web: %d: %s", response.Code, response.Body.String())
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/api/groups/engineering", nil)
@@ -382,16 +422,16 @@ func TestRepositoryVisibilityAndTokenScopeAreEnforced(t *testing.T) {
 	if err = json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Repositories) != 1 || detail.Repositories[0].Name != "api" {
-		t.Fatalf("scoped token saw unexpected repositories: %#v", detail.Repositories)
+	if len(detail.Repositories) != 2 {
+		t.Fatalf("group token did not see every repository: %#v", detail.Repositories)
 	}
 
 	request = httptest.NewRequest(http.MethodPost, "/api/repositories/engineering%2Fother", nil)
 	request.SetBasicAuth("ci", "ci-secret")
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("out-of-scope repository creation returned %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusCreated {
+		t.Fatalf("group token could not create repository: %d: %s", response.Code, response.Body.String())
 	}
 }
 
@@ -582,11 +622,9 @@ func TestLFSBatchUploadAndDownloadOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document.Repositories["assets"] = control.RepositoryPolicy{
-		LFS: control.LFSPolicy{
-			Enabled:             true,
-			MaximumStorageBytes: int64(len(content) + 4),
-		},
+	document.LFS = control.LFSPolicy{
+		Enabled:             true,
+		MaximumStorageBytes: int64(len(content) + 4),
 	}
 	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
 		t.Fatal(err)
@@ -662,26 +700,31 @@ func TestLFSBatchUploadAndDownloadOverHTTP(t *testing.T) {
 func TestInternalRepositoryBrowserRequiresLDAPIdentity(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}
-	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"handbook", "private"} {
+	for _, fixture := range []struct {
+		group      string
+		visibility string
+	}{
+		{group: "internal-group", visibility: "internal"},
+		{group: "private-group", visibility: "private"},
+	} {
+		if err := store.CreateGroup(fixture.group, "alice", ""); err != nil {
+			t.Fatal(err)
+		}
 		if err := store.CreateRepository(
-			repopath.Repository{Groups: []string{"engineering"}, Name: name},
+			repopath.Repository{Groups: []string{fixture.group}, Name: "handbook"},
 			storage.CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
 		); err != nil {
 			t.Fatal(err)
 		}
-	}
-	controls := control.NewStore(root)
-	document, err := controls.Load(context.Background(), "engineering")
-	if err != nil {
-		t.Fatal(err)
-	}
-	document.Repositories["handbook"] = control.RepositoryPolicy{Visibility: "internal"}
-	document.Repositories["private"] = control.RepositoryPolicy{Visibility: "private"}
-	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
-		t.Fatal(err)
+		controls := control.NewStore(root)
+		document, err := controls.Load(context.Background(), fixture.group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		document.Visibility = fixture.visibility
+		if err = store.UpdateGroupControl(fixture.group, document, "alice"); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	server := httptest.NewServer(New(Config{
@@ -693,11 +736,11 @@ func TestInternalRepositoryBrowserRequiresLDAPIdentity(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	browse := func(repository, username, password string) (int, []byte) {
+	browse := func(group, repository, username, password string) (int, []byte) {
 		t.Helper()
 		request, requestErr := http.NewRequest(
 			http.MethodGet,
-			server.URL+"/api/repositories/engineering%2F"+repository+"/tree/main",
+			server.URL+"/api/repositories/"+group+"%2F"+repository+"/tree/main",
 			nil,
 		)
 		if requestErr != nil {
@@ -722,17 +765,18 @@ func TestInternalRepositoryBrowserRequiresLDAPIdentity(t *testing.T) {
 	}
 
 	for _, attempt := range []struct {
-		name, repository, username, password string
-		status                               int
+		name, group, repository, username, password string
+		status                                      int
 	}{
-		{name: "anonymous internal", repository: "handbook", status: http.StatusUnauthorized},
-		{name: "invalid LDAP password", repository: "handbook", username: "bob", password: "wrong", status: http.StatusUnauthorized},
-		{name: "LDAP user internal", repository: "handbook", username: "bob", password: "bob-secret", status: http.StatusOK},
-		{name: "non-member private", repository: "private", username: "bob", password: "bob-secret", status: http.StatusUnauthorized},
-		{name: "owner private", repository: "private", username: "alice", password: "alice-secret", status: http.StatusOK},
+		{name: "anonymous internal", group: "internal-group", repository: "handbook", status: http.StatusUnauthorized},
+		{name: "invalid LDAP password", group: "internal-group", repository: "handbook", username: "bob", password: "wrong", status: http.StatusUnauthorized},
+		{name: "LDAP user internal", group: "internal-group", repository: "handbook", username: "bob", password: "bob-secret", status: http.StatusOK},
+		{name: "non-member private", group: "private-group", repository: "handbook", username: "bob", password: "bob-secret", status: http.StatusUnauthorized},
+		{name: "owner private", group: "private-group", repository: "handbook", username: "alice", password: "alice-secret", status: http.StatusOK},
 	} {
 		t.Run(attempt.name, func(t *testing.T) {
 			status, body := browse(
+				attempt.group,
 				attempt.repository,
 				attempt.username,
 				attempt.password,
@@ -782,6 +826,12 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 		"name": "product",
 		"description": "Product engineering",
 		"inherit": false,
+		"visibility": "internal",
+		"lfs": {
+			"enabled": true,
+			"maximumObjectBytes": 1024,
+			"maximumStorageBytes": 4096
+		},
 		"members": {
 			"alice": "owner",
 			"bob": "read"
@@ -791,19 +841,8 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 			"key": "ci",
 			"newSecret": "deploy-secret",
 			"role": "write",
-			"repositories": ["api"],
 			"disabled": true
-		}],
-		"repositories": {
-			"api": {
-				"visibility": "private",
-				"lfs": {
-					"enabled": true,
-					"maximumObjectBytes": 1024,
-					"maximumStorageBytes": 4096
-				}
-			}
-		}
+		}]
 	}`
 	updateRequest := httptest.NewRequest(
 		http.MethodPut,
@@ -833,7 +872,10 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 		updated.Members["bob"] != control.RoleRead ||
 		len(updated.Tokens) != 1 ||
 		!strings.HasPrefix(updated.Tokens[0].Hash, "$argon2id$") ||
-		!updated.Repositories["api"].LFS.Enabled {
+		updated.Visibility != "internal" ||
+		!updated.LFS.Enabled ||
+		updated.LFS.MaximumObjectBytes != 1024 ||
+		updated.LFS.MaximumStorageBytes != 4096 {
 		t.Fatalf("unexpected updated settings: %#v", updated)
 	}
 	if descendant.Group != "product/backend" {

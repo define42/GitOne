@@ -2139,8 +2139,7 @@ textarea:focus {
   top: 0.55rem;
 }
 
-.token-field-grid,
-.policy-field-grid {
+.token-field-grid {
   padding-top: 0.5rem;
 }
 
