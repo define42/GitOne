@@ -440,6 +440,7 @@ type IconName =
   | "git-branch"
   | "git-compare"
   | "git-merge"
+  | "home"
   | "log-out"
   | "pencil"
   | "play"
@@ -488,6 +489,11 @@ const iconPaths: Record<IconName, string[]> = {
     "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
     "M6 9v9",
     "M18 15v-1a5 5 0 0 0-5-5h-2a5 5 0 0 1-5-5",
+  ],
+  home: [
+    "M3 11 12 4l9 7",
+    "M5 10v10h14V10",
+    "M9 20v-6h6v6",
   ],
   "log-out": [
     "M10 17l5-5-5-5",
@@ -610,6 +616,7 @@ function repositoryBrowserURL(
 }
 
 type LocationContextKind =
+  | "root"
   | "group"
   | "subgroup"
   | "repository"
@@ -623,11 +630,18 @@ interface LocationContextItem {
 }
 
 const locationContextIcons: Record<LocationContextKind, IconName> = {
+  root: "home",
   group: "group",
   subgroup: "group",
   repository: "repository",
   folder: "folder",
   file: "file",
+};
+
+const rootLocationContextItem: LocationContextItem = {
+  label: "Root",
+  href: "/",
+  kind: "root",
 };
 
 function setLocationContext(items: LocationContextItem[]): void {
@@ -636,7 +650,9 @@ function setLocationContext(items: LocationContextItem[]): void {
     entry.className = `location-${item.kind}`;
     const link = element("a");
     link.href = item.href;
-    link.title = `${item.kind[0].toUpperCase()}${item.kind.slice(1)}: ${item.label}`;
+    link.title = item.kind === "root"
+      ? "GitOne root"
+      : `${item.kind[0].toUpperCase()}${item.kind.slice(1)}: ${item.label}`;
     link.append(
       icon(locationContextIcons[item.kind]),
       document.createTextNode(item.label),
@@ -653,11 +669,14 @@ function setLocationContext(items: LocationContextItem[]): void {
 
 function setGroupLocation(path: string): void {
   const parts = path.split("/");
-  setLocationContext(parts.map((part, index) => ({
-    label: part,
-    href: groupURL(parts.slice(0, index + 1).join("/")),
-    kind: index === 0 ? "group" : "subgroup",
-  })));
+  setLocationContext([
+    rootLocationContextItem,
+    ...parts.map((part, index) => ({
+      label: part,
+      href: groupURL(parts.slice(0, index + 1).join("/")),
+      kind: index === 0 ? "group" as const : "subgroup" as const,
+    })),
+  ]);
 }
 
 function setRepositoryLocation(route: RepositoryBrowserRoute): void {
@@ -668,6 +687,7 @@ function setRepositoryLocation(route: RepositoryBrowserRoute): void {
     : "";
   const pathParts = selectedPath ? selectedPath.split("/") : [];
   setLocationContext([
+    rootLocationContextItem,
     ...groupParts.map((part, index) => ({
       label: part,
       href: groupURL(groupParts.slice(0, index + 1).join("/")),
@@ -5208,7 +5228,7 @@ function renderLogin(message = ""): void {
 
 async function renderRoot(message?: string): Promise<void> {
   stopRepositoryBuildPolling();
-  setLocationContext([]);
+  setLocationContext([rootLocationContextItem]);
   const data = await request<GroupList>("/api/groups");
   document.title = "GitOne";
   app.replaceChildren();

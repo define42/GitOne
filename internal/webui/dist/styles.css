@@ -627,6 +627,10 @@ a:hover {
   width: 0.85rem;
 }
 
+.location-context .location-root {
+  --location-color: var(--text);
+}
+
 .location-context .location-group {
   --location-color: var(--accent);
 }

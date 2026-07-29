@@ -2611,9 +2611,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=11">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=12">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=31">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=32">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -2661,6 +2661,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "renderLogin") ||
 		!strings.Contains(assetResponse.Body.String(), `request("/api/session"`) {
 		t.Fatal("served UI does not persist and apply color themes")
+	}
+	if !strings.Contains(assetResponse.Body.String(), `label: "Root"`) ||
+		!strings.Contains(assetResponse.Body.String(), `kind: "root"`) ||
+		!strings.Contains(assetResponse.Body.String(), `"GitOne root"`) ||
+		!strings.Contains(assetResponse.Body.String(), "rootLocationContextItem") {
+		t.Fatal("served UI does not provide a root breadcrumb")
 	}
 	if strings.Contains(assetResponse.Body.String(), `"Recent commits"`) {
 		t.Fatal("served UI should reserve commit lists for history")

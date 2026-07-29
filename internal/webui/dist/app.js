@@ -123,6 +123,11 @@ const iconPaths = {
         "M6 9v9",
         "M18 15v-1a5 5 0 0 0-5-5h-2a5 5 0 0 1-5-5",
     ],
+    home: [
+        "M3 11 12 4l9 7",
+        "M5 10v10h14V10",
+        "M9 20v-6h6v6",
+    ],
     "log-out": [
         "M10 17l5-5-5-5",
         "M15 12H3",
@@ -220,11 +225,17 @@ function repositoryBrowserURL(repository, options = {}) {
     return `${url.pathname}${url.search}`;
 }
 const locationContextIcons = {
+    root: "home",
     group: "group",
     subgroup: "group",
     repository: "repository",
     folder: "folder",
     file: "file",
+};
+const rootLocationContextItem = {
+    label: "Root",
+    href: "/",
+    kind: "root",
 };
 function setLocationContext(items) {
     const entries = items.map((item, index) => {
@@ -232,7 +243,9 @@ function setLocationContext(items) {
         entry.className = `location-${item.kind}`;
         const link = element("a");
         link.href = item.href;
-        link.title = `${item.kind[0].toUpperCase()}${item.kind.slice(1)}: ${item.label}`;
+        link.title = item.kind === "root"
+            ? "GitOne root"
+            : `${item.kind[0].toUpperCase()}${item.kind.slice(1)}: ${item.label}`;
         link.append(icon(locationContextIcons[item.kind]), document.createTextNode(item.label));
         if (index === items.length - 1) {
             link.setAttribute("aria-current", "page");
@@ -245,11 +258,14 @@ function setLocationContext(items) {
 }
 function setGroupLocation(path) {
     const parts = path.split("/");
-    setLocationContext(parts.map((part, index) => ({
-        label: part,
-        href: groupURL(parts.slice(0, index + 1).join("/")),
-        kind: index === 0 ? "group" : "subgroup",
-    })));
+    setLocationContext([
+        rootLocationContextItem,
+        ...parts.map((part, index) => ({
+            label: part,
+            href: groupURL(parts.slice(0, index + 1).join("/")),
+            kind: index === 0 ? "group" : "subgroup",
+        })),
+    ]);
 }
 function setRepositoryLocation(route) {
     const parts = route.repository.split("/");
@@ -259,6 +275,7 @@ function setRepositoryLocation(route) {
         : "";
     const pathParts = selectedPath ? selectedPath.split("/") : [];
     setLocationContext([
+        rootLocationContextItem,
         ...groupParts.map((part, index) => ({
             label: part,
             href: groupURL(groupParts.slice(0, index + 1).join("/")),
@@ -3994,7 +4011,7 @@ function renderLogin(message = "") {
 }
 async function renderRoot(message) {
     stopRepositoryBuildPolling();
-    setLocationContext([]);
+    setLocationContext([rootLocationContextItem]);
     const data = await request("/api/groups");
     document.title = "GitOne";
     app.replaceChildren();
