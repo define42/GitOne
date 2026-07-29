@@ -216,10 +216,10 @@ func TestCreateRepositoryWithDescriptionOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tree.Entries) != 1 || tree.Entries[0].Name != ".gitone.json" {
+	if len(tree.Entries) != 1 || tree.Entries[0].Name != ".gitone.yaml" {
 		t.Fatalf("unexpected description-only tree: %#v", tree.Entries)
 	}
-	metadata, err := commit.File(".gitone.json")
+	metadata, err := commit.File(".gitone.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,8 +227,8 @@ func TestCreateRepositoryWithDescriptionOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if contents != "{\n  \"description\": \"Backend API\"\n}\n" {
-		t.Fatalf("unexpected .gitone.json contents: %q", contents)
+	if contents != "description: Backend API\n" {
+		t.Fatalf("unexpected .gitone.yaml contents: %q", contents)
 	}
 	description, err := store.RepositoryDescription(repositoryPath)
 	if err != nil {
@@ -587,14 +587,14 @@ func TestRepositoryDescriptionHandlesMissingInvalidAndBrokenMetadata(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(checkout, ".gitone.json"), []byte("{invalid"), 0o640); err != nil {
+	if err = os.WriteFile(filepath.Join(checkout, ".gitone.yaml"), []byte("{invalid"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	worktree, err := repository.Worktree()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = worktree.Add(".gitone.json"); err != nil {
+	if _, err = worktree.Add(".gitone.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = worktree.Commit("Break metadata", &git.CommitOptions{
@@ -610,7 +610,7 @@ func TestRepositoryDescriptionHandlesMissingInvalidAndBrokenMetadata(t *testing.
 		t.Fatal(err)
 	}
 	if _, err = store.RepositoryDescription(invalidPath); err == nil ||
-		!strings.Contains(err.Error(), "read .gitone.json") {
+		!strings.Contains(err.Error(), "read .gitone.yaml") {
 		t.Fatalf("invalid metadata error = %v", err)
 	}
 

@@ -145,7 +145,7 @@ type RepositoryPathInput struct {
 type createRepositoryInput struct {
 	RepositoryPathInput
 	InitializeReadme bool   `query:"initializeReadme" default:"false" doc:"Create an initial main commit containing README.md"`
-	Description      string `query:"description" doc:"Repository description stored in .gitone.json"`
+	Description      string `query:"description" doc:"Repository description stored in .gitone.yaml"`
 }
 
 type renameRepositoryBody struct {

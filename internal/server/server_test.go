@@ -916,7 +916,7 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 	if readmeContents != "api\n" {
 		t.Fatalf("unexpected README.md contents: %q", readmeContents)
 	}
-	metadata, err := initialCommit.File(".gitone.json")
+	metadata, err := initialCommit.File(".gitone.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -924,8 +924,8 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadataContents != "{\n  \"description\": \"Engineering API\"\n}\n" {
-		t.Fatalf("unexpected .gitone.json contents: %q", metadataContents)
+	if metadataContents != "description: Engineering API\n" {
+		t.Fatalf("unexpected .gitone.yaml contents: %q", metadataContents)
 	}
 
 	unauthenticatedGit := httptest.NewRequest(http.MethodGet, "/engineering/api.git/info/refs?service=git-upload-pack", nil)
@@ -1051,12 +1051,12 @@ func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 	if string(readme) != "hello\n" {
 		t.Fatalf("unexpected cloned README.md contents: %q", readme)
 	}
-	metadata, err := os.ReadFile(filepath.Join(checkout, ".gitone.json"))
+	metadata, err := os.ReadFile(filepath.Join(checkout, ".gitone.yaml"))
 	if err != nil {
-		t.Fatalf("cloned .gitone.json does not exist: %v", err)
+		t.Fatalf("cloned .gitone.yaml does not exist: %v", err)
 	}
-	if string(metadata) != "{\n  \"description\": \"Hello repository\"\n}\n" {
-		t.Fatalf("unexpected cloned .gitone.json contents: %q", metadata)
+	if string(metadata) != "description: Hello repository\n" {
+		t.Fatalf("unexpected cloned .gitone.yaml contents: %q", metadata)
 	}
 
 	updatedReadme := []byte(string(readme) + "Updated through Git Smart HTTP.\n")

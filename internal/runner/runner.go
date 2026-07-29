@@ -86,7 +86,7 @@ func (r *Runner) Store() Store {
 	return r.state
 }
 
-// Schedule inspects .gitone.json at commit and queues a matching branch build.
+// Schedule inspects .gitone.yaml at commit and queues a matching branch build.
 // It returns nil when the commit has no build or its branch filter does not match.
 func (r *Runner) Schedule(
 	repositoryPath repopath.Repository,

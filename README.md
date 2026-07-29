@@ -49,27 +49,21 @@ make ui
 
 ## Repository builds
 
-GitOne builds are split across two applications and container images. The `gitone` web server owns repositories, the durable build queue, logs, and the runner API. The separate `gitone-runner` worker claims jobs over that API and is the only application that needs access to Docker. After a successful branch update, the server reads the build definition from `.gitone.json` at the exact new commit and persists a queued job. A runner claims the job with a renewable lease, downloads an exact-commit source archive, runs the script in an ephemeral Docker-compatible container, and streams logs and completion state back to GitOne. Branches created, edited, or merged through the API trigger builds too.
+GitOne builds are split across two applications and container images. The `gitone` web server owns repositories, the durable build queue, logs, and the runner API. The separate `gitone-runner` worker claims jobs over that API and is the only application that needs access to Docker. After a successful branch update, the server reads the build definition from `.gitone.yaml` at the exact new commit and persists a queued job. A runner claims the job with a renewable lease, downloads an exact-commit source archive, runs the script in an ephemeral Docker-compatible container, and streams logs and completion state back to GitOne. Branches created, edited, or merged through the API trigger builds too.
 
-```json
-{
-  "description": "Backend API",
-  "build": {
-    "image": "golang:1.25",
-    "script": [
-      "go test ./...",
-      "go build ./..."
-    ],
-    "branches": [
-      "main",
-      "release/*"
-    ],
-    "environment": {
-      "CGO_ENABLED": "0"
-    },
-    "timeoutSeconds": 1200
-  }
-}
+```yaml
+description: Backend API
+build:
+  image: golang:1.25
+  script:
+    - go test ./...
+    - go build ./...
+  branches:
+    - main
+    - release/*
+  environment:
+    CGO_ENABLED: "0"
+  timeoutSeconds: 1200
 ```
 
 `image` and at least one non-empty `script` command are required. Commands run in order through `/bin/sh -ec` with the repository at `/workspace`. `branches` contains path-style glob patterns and defaults to every branch. `timeoutSeconds` defaults to 900 and is capped at 3600. Repository variables cannot replace reserved `CI_*` or `GITONE_*` variables; GitOne provides `CI_COMMIT_SHA`, `CI_COMMIT_BRANCH`, `CI_PROJECT_PATH`, `GITONE_BUILD_ID`, and equivalent GitOne commit variables.
@@ -154,7 +148,7 @@ These endpoints require `Authorization: Bearer <GITONE_RUNNER_TOKEN>`.
 | `PUT` | `/api/groups/{path}/settings` | Replace group control settings and optionally rename the group through the `name` field. |
 | `PATCH` | `/api/groups/{path}` | Rename a group. JSON field: `newPath`. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
-| `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.json`. |
+| `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.yaml`. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |
 

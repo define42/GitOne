@@ -17,6 +17,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"gopkg.in/yaml.v3"
 )
 
 type Store struct{ Root string }
@@ -213,15 +214,18 @@ func (s Store) createInitializedRepository(destination, name string, options Cre
 		}
 	}
 	if options.Description != "" {
-		metadata, marshalErr := json.MarshalIndent(repoconfig.Config{Description: options.Description}, "", "  ")
+		metadata, marshalErr := yaml.Marshal(repoconfig.Config{Description: options.Description})
 		if marshalErr != nil {
 			return marshalErr
 		}
-		metadata = append(metadata, '\n')
-		if err = os.WriteFile(filepath.Join(temporary, ".gitone.json"), metadata, 0o640); err != nil {
+		if err = os.WriteFile(
+			filepath.Join(temporary, repoconfig.FileName),
+			metadata,
+			0o640,
+		); err != nil {
 			return err
 		}
-		if _, err = worktree.Add(".gitone.json"); err != nil {
+		if _, err = worktree.Add(repoconfig.FileName); err != nil {
 			return err
 		}
 	}

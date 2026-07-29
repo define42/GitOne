@@ -1813,7 +1813,7 @@ function repositoryBuildsView(
     }
     if (data.builds.length === 0) {
       listRoot.replaceChildren(
-        emptyState("No builds yet. Push a branch containing a .gitone.json build definition."),
+        emptyState("No builds yet. Push a branch containing a .gitone.yaml build definition."),
       );
       return;
     }

@@ -3,7 +3,6 @@ package runner
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"gopkg.in/yaml.v3"
 )
 
 type recordingExecutor struct {
@@ -412,11 +412,11 @@ func commitBuildConfig(
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents, err := json.MarshalIndent(config, "", "  ")
+	contents, err := yaml.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(filepath.Join(checkout, ".gitone.json"), append(contents, '\n'), 0o640); err != nil {
+	if err = os.WriteFile(filepath.Join(checkout, ".gitone.yaml"), contents, 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if err = os.WriteFile(filepath.Join(checkout, "source.txt"), []byte("source at scheduled commit\n"), 0o640); err != nil {
@@ -426,7 +426,7 @@ func commitBuildConfig(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = worktree.Add(".gitone.json"); err != nil {
+	if _, err = worktree.Add(".gitone.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = worktree.Add("source.txt"); err != nil {

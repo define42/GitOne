@@ -20,6 +20,7 @@ import (
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"gopkg.in/yaml.v3"
 )
 
 type remoteIntegrationExecutor struct{}
@@ -62,17 +63,17 @@ func TestRemoteRunnerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	configuration, err := json.MarshalIndent(repoconfig.Config{
+	configuration, err := yaml.Marshal(repoconfig.Config{
 		Build: &repoconfig.BuildConfig{
 			Image: "alpine:3", Script: []string{"test -f source.txt"}, TimeoutSeconds: 30,
 		},
-	}, "", "  ")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = os.WriteFile(
-		filepath.Join(checkout, ".gitone.json"),
-		append(configuration, '\n'),
+		filepath.Join(checkout, ".gitone.yaml"),
+		configuration,
 		0o640,
 	); err != nil {
 		t.Fatal(err)
@@ -88,7 +89,7 @@ func TestRemoteRunnerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = worktree.Add(".gitone.json"); err != nil {
+	if _, err = worktree.Add(".gitone.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = worktree.Add("source.txt"); err != nil {

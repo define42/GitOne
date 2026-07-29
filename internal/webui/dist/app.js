@@ -1360,7 +1360,7 @@ function repositoryBuildsView(route, initial) {
             count.textContent = String(data.builds.length);
         }
         if (data.builds.length === 0) {
-            listRoot.replaceChildren(emptyState("No builds yet. Push a branch containing a .gitone.json build definition."));
+            listRoot.replaceChildren(emptyState("No builds yet. Push a branch containing a .gitone.yaml build definition."));
             return;
         }
         const list = element("ol");

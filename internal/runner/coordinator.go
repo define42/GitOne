@@ -364,7 +364,7 @@ func failedConfigurationJob(
 		Status:     StatusFailed,
 		CreatedAt:  finished,
 		FinishedAt: &finished,
-		Error:      "invalid .gitone.json build: " + configurationErr.Error(),
+		Error:      "invalid " + repoconfig.FileName + " build: " + configurationErr.Error(),
 	}
 	if err := state.save(repository, job); err != nil {
 		return nil, errors.Join(configurationErr, err)
