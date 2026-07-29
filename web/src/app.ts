@@ -73,6 +73,7 @@ interface RepositoryTree {
   ref: string;
   commit: string;
   path: string;
+  canEdit: boolean;
   entries: RepositoryTreeEntry[];
 }
 
@@ -88,6 +89,7 @@ interface RepositoryBlob {
   language?: string;
   highlightedHtml?: string;
   canEdit: boolean;
+  canManage: boolean;
   lfs?: boolean;
   lfsOid?: string;
 }
@@ -96,6 +98,8 @@ interface RepositoryFileUpdate {
   repository: string;
   branch: string;
   path: string;
+  previousPath?: string;
+  operation: "created" | "updated" | "deleted" | "renamed";
   commit: string;
   previousCommit: string;
   message: string;
@@ -333,6 +337,7 @@ type IconName =
   | "clock"
   | "close"
   | "copy"
+  | "download"
   | "file"
   | "folder"
   | "git-branch"
@@ -356,6 +361,7 @@ const iconPaths: Record<IconName, string[]> = {
     "M8 8h11a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2Z",
     "M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3",
   ],
+  download: ["M12 3v12", "m7 10 5 5 5-5", "M5 21h14"],
   file: ["M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z", "M14 2v6h6"],
   folder: ["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"],
   "git-branch": [
@@ -523,6 +529,15 @@ function repositoryFileAPIURL(
   path: string,
 ): string {
   return `/api/repositories/${encodeURIComponent(repository)}/files/${encodeURIComponent(ref)}/${encodeURIComponent(path)}`;
+}
+
+function repositoryArchiveAPIURL(
+  repository: string,
+  ref: string,
+  format: "zip" | "tar.gz",
+): string {
+  const parameters = new URLSearchParams({format});
+  return `/api/repositories/${encodeURIComponent(repository)}/archives/${encodeURIComponent(ref)}?${parameters}`;
 }
 
 function repositoryAPIURL(
@@ -2676,6 +2691,395 @@ function cloneControl(
   return {trigger, dialog};
 }
 
+function repositoryArchiveControl(
+  route: RepositoryBrowserRoute,
+): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
+  const trigger = actionButton("Download", "download", "secondary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog archive-dialog";
+  const content = element("div");
+  content.className = "dialog-form";
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", "Download repository");
+  title.id = "archive-dialog-title";
+  dialog.setAttribute("aria-labelledby", title.id);
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+  const description = element(
+    "p",
+    `Download ${route.repository} at ${route.ref}, without its Git history.`,
+  );
+  description.className = "dialog-description";
+  const options = element("div");
+  options.className = "archive-options";
+  for (const [format, label] of [
+    ["zip", "Download ZIP"],
+    ["tar.gz", "Download tar.gz"],
+  ] as const) {
+    const link = element("a");
+    link.className = "button secondary";
+    link.href = repositoryArchiveAPIURL(route.repository, route.ref, format);
+    link.append(icon("download"), document.createTextNode(label));
+    options.append(link);
+  }
+  content.append(header, description, options);
+  dialog.append(content);
+
+  trigger.addEventListener("click", () => dialog.showModal());
+  close.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+  return {trigger, dialog};
+}
+
+function repositoryFileCreator(
+  route: RepositoryBrowserRoute,
+  tree: RepositoryTree,
+): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
+  const trigger = actionButton("New file", "plus", "primary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog file-create-dialog";
+  const form = element("form");
+  form.className = "dialog-form";
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", "Create file");
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+
+  const path = element("input");
+  path.name = "path";
+  path.required = true;
+  path.autocomplete = "off";
+  path.spellcheck = false;
+  path.value = tree.path ? `${tree.path}/` : "";
+  path.placeholder = tree.path ? `${tree.path}/example.txt` : "path/to/example.txt";
+  const contents = element("textarea");
+  contents.name = "content";
+  contents.rows = 14;
+  contents.maxLength = 1_048_576;
+  contents.spellcheck = false;
+  contents.className = "file-create-content";
+  const message = element("input");
+  message.name = "message";
+  message.maxLength = 500;
+  message.placeholder = "Defaults to “Create <path>”";
+
+  const actions = element("div");
+  actions.className = "dialog-actions";
+  const cancel = actionButton("Cancel", undefined, "secondary");
+  const submit = actionButton("Create file", "plus", "primary");
+  submit.type = "submit";
+  actions.append(cancel, submit);
+  form.append(
+    header,
+    fieldLabel("File path", path),
+    fieldLabel("File contents", contents),
+    fieldLabel("Commit message", message),
+    actions,
+  );
+  dialog.append(form);
+
+  trigger.addEventListener("click", () => {
+    dialog.showModal();
+    path.focus();
+    path.setSelectionRange(path.value.length, path.value.length);
+  });
+  close.addEventListener("click", () => dialog.close());
+  cancel.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    cancel.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    try {
+      const created = await request<RepositoryFileUpdate>(
+        repositoryFileAPIURL(route.repository, route.ref, path.value),
+        {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            content: contents.value,
+            message: message.value,
+            expectedCommit: tree.commit,
+          }),
+        },
+      );
+      dialog.close();
+      const nextRoute: RepositoryBrowserRoute = {
+        repository: route.repository,
+        ref: created.branch,
+        path: "",
+        file: created.path,
+        view: "files",
+      };
+      window.history.pushState(
+        null,
+        "",
+        repositoryBrowserURL(route.repository, {
+          ref: created.branch,
+          file: created.path,
+        }),
+      );
+      await renderRepositoryBrowser(nextRoute);
+      showStatus(
+        `${created.path} created on ${created.branch} at ${shortCommitHash(created.commit)}.`,
+      );
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "Could not create the file.",
+        true,
+      );
+      submit.disabled = false;
+      cancel.disabled = false;
+      form.removeAttribute("aria-busy");
+    }
+  });
+  return {trigger, dialog};
+}
+
+function repositoryFileRenameControl(
+  route: RepositoryBrowserRoute,
+  content: RepositoryBlob,
+): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
+  const trigger = actionButton("Rename", "pencil", "secondary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog";
+  const form = element("form");
+  form.className = "dialog-form";
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", "Rename file");
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+  const path = element("input");
+  path.name = "newPath";
+  path.required = true;
+  path.autocomplete = "off";
+  path.spellcheck = false;
+  path.value = content.path;
+  const message = element("input");
+  message.name = "message";
+  message.maxLength = 500;
+  message.placeholder = "Defaults to a rename message";
+  const actions = element("div");
+  actions.className = "dialog-actions";
+  const cancel = actionButton("Cancel", undefined, "secondary");
+  const submit = actionButton("Rename file", "pencil", "primary");
+  submit.type = "submit";
+  actions.append(cancel, submit);
+  form.append(
+    header,
+    fieldLabel("New file path", path),
+    fieldLabel("Commit message", message),
+    actions,
+  );
+  dialog.append(form);
+
+  trigger.addEventListener("click", () => {
+    dialog.showModal();
+    path.focus();
+    path.select();
+  });
+  close.addEventListener("click", () => dialog.close());
+  cancel.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (path.value === content.path) {
+      path.setCustomValidity("Choose a different file path.");
+      path.reportValidity();
+      return;
+    }
+    path.setCustomValidity("");
+    submit.disabled = true;
+    cancel.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    try {
+      const renamed = await request<RepositoryFileUpdate>(
+        repositoryFileAPIURL(route.repository, route.ref, content.path),
+        {
+          method: "PATCH",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            newPath: path.value,
+            message: message.value,
+            expectedCommit: content.commit,
+          }),
+        },
+      );
+      dialog.close();
+      const nextRoute: RepositoryBrowserRoute = {
+        repository: route.repository,
+        ref: renamed.branch,
+        path: "",
+        file: renamed.path,
+        view: "files",
+      };
+      window.history.pushState(
+        null,
+        "",
+        repositoryBrowserURL(route.repository, {
+          ref: renamed.branch,
+          file: renamed.path,
+        }),
+      );
+      await renderRepositoryBrowser(nextRoute);
+      showStatus(
+        `${renamed.previousPath ?? content.path} renamed to ${renamed.path} at ${shortCommitHash(renamed.commit)}.`,
+      );
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "Could not rename the file.",
+        true,
+      );
+      submit.disabled = false;
+      cancel.disabled = false;
+      form.removeAttribute("aria-busy");
+    }
+  });
+  return {trigger, dialog};
+}
+
+function repositoryFileDeleteControl(
+  route: RepositoryBrowserRoute,
+  content: RepositoryBlob,
+): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
+  const trigger = actionButton("Delete", "trash", "danger-secondary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog";
+  const form = element("form");
+  form.className = "dialog-form";
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", "Delete file");
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+  const warning = element(
+    "p",
+    `Delete ${content.path} from ${route.ref}? This creates a new commit.`,
+  );
+  const message = element("input");
+  message.name = "message";
+  message.maxLength = 500;
+  message.placeholder = `Defaults to “Delete ${content.path}”`;
+  const actions = element("div");
+  actions.className = "dialog-actions";
+  const cancel = actionButton("Cancel", undefined, "secondary");
+  const submit = actionButton("Delete file", "trash", "danger");
+  submit.type = "submit";
+  actions.append(cancel, submit);
+  form.append(
+    header,
+    warning,
+    fieldLabel("Commit message", message),
+    actions,
+  );
+  dialog.append(form);
+
+  trigger.addEventListener("click", () => {
+    dialog.showModal();
+    message.focus();
+  });
+  close.addEventListener("click", () => dialog.close());
+  cancel.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    cancel.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    try {
+      const deleted = await request<RepositoryFileUpdate>(
+        repositoryFileAPIURL(route.repository, route.ref, content.path),
+        {
+          method: "DELETE",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            message: message.value,
+            expectedCommit: content.commit,
+          }),
+        },
+      );
+      dialog.close();
+      const parentPath = content.path.split("/").slice(0, -1).join("/");
+      const nextRoute: RepositoryBrowserRoute = {
+        repository: route.repository,
+        ref: deleted.branch,
+        path: parentPath,
+        file: null,
+        view: "files",
+      };
+      window.history.pushState(
+        null,
+        "",
+        repositoryBrowserURL(route.repository, {
+          ref: deleted.branch,
+          path: parentPath,
+        }),
+      );
+      await renderRepositoryBrowser(nextRoute);
+      showStatus(
+        `${deleted.path} deleted from ${deleted.branch} at ${shortCommitHash(deleted.commit)}.`,
+      );
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "Could not delete the file.",
+        true,
+      );
+      submit.disabled = false;
+      cancel.disabled = false;
+      form.removeAttribute("aria-busy");
+    }
+  });
+  return {trigger, dialog};
+}
+
 function latestCommitBar(
   data: RepositoryCommits,
   route: RepositoryBrowserRoute,
@@ -2739,10 +3143,21 @@ async function repositoryBlobSection(
   const editButton = content.canEdit
     ? actionButton("Edit", "pencil", "secondary")
     : null;
+  const renameControl = content.canManage
+    ? repositoryFileRenameControl(route, content)
+    : null;
+  const deleteControl = content.canManage
+    ? repositoryFileDeleteControl(route, content)
+    : null;
+  const fileActions = [
+    editButton,
+    renameControl?.trigger,
+    deleteControl?.trigger,
+  ].filter((action): action is HTMLButtonElement => action !== null && action !== undefined);
   const heading = sectionHeading(
     content.path,
     undefined,
-    editButton ? [editButton] : [],
+    fileActions,
   );
   const metadata = element(
     "p",
@@ -2758,6 +3173,12 @@ async function repositoryBlobSection(
   const body = element("div");
   body.className = "file-view-body";
   section.append(heading, metadata, body);
+  if (renameControl) {
+    section.append(renameControl.dialog);
+  }
+  if (deleteControl) {
+    section.append(deleteControl.dialog);
+  }
 
   const isMarkdown = /\.md$/i.test(content.path);
   const renderViewer = async (): Promise<void> => {
@@ -2850,7 +3271,9 @@ async function repositoryBlobSection(
     actions.append(messageLabel, buttons);
     form.append(toolbar, contentLabel, diffView, actions);
     body.replaceChildren(form);
-    editButton.hidden = true;
+    for (const action of fileActions) {
+      action.hidden = true;
+    }
     textarea.focus();
 
     const updateSaveState = (): void => {
@@ -2940,7 +3363,9 @@ async function repositoryBlobSection(
     });
     cancel.addEventListener("click", async () => {
       diffGeneration++;
-      editButton.hidden = false;
+      for (const action of fileActions) {
+        action.hidden = false;
+      }
       await renderViewer();
       editButton.focus();
     });
@@ -3053,6 +3478,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   const branchCreator = repositoryBranchCreator(route, branches);
   const branchComparison = repositoryBranchComparison(route, branches);
   const clone = cloneControl(repositoryURL(groupPath, repositoryName, group.username));
+  const archive = repositoryArchiveControl(route);
   const toolbar = element("div");
   toolbar.className = "repository-toolbar";
   const branchControl = element("div");
@@ -3106,7 +3532,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   }
   const repositoryActions = element("div");
   repositoryActions.className = "repository-actions";
-  repositoryActions.append(clone.trigger);
+  repositoryActions.append(archive.trigger, clone.trigger);
   toolbar.append(branchControl, repositoryActions);
   overview.append(toolbar);
   app.append(
@@ -3114,6 +3540,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     repositoryNavigation(route),
     branchCreator.dialog,
     branchComparison.dialog,
+    archive.dialog,
     clone.dialog,
   );
 
@@ -3135,6 +3562,15 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   if ("entries" in content) {
     const section = element("section");
     section.className = "content-section";
+    const fileCreator = content.canEdit
+      ? repositoryFileCreator(route, content)
+      : null;
+    if (fileCreator) {
+      const treeActions = element("div");
+      treeActions.className = "repository-tree-actions";
+      treeActions.append(fileCreator.trigger);
+      section.append(treeActions);
+    }
     if (builds === null) {
       throw new Error("Repository builds are unavailable.");
     }
@@ -3188,6 +3624,9 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
       }
       table.append(head, body);
       section.append(table);
+    }
+    if (fileCreator) {
+      section.append(fileCreator.dialog);
     }
     app.append(section);
     const readme = await repositoryReadme(route, content);

@@ -80,6 +80,13 @@ type repositoryBrowserPathInput struct {
 	Path       string `path:"path" doc:"URL-encoded path inside the repository"`
 }
 
+type repositoryArchiveInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Ref        string `path:"ref" doc:"Git branch, tag, hash, or HEAD"`
+	Format     string `query:"format" enum:"zip,tar.gz" default:"zip" doc:"Archive format"`
+}
+
 type updateRepositoryFileBody struct {
 	Content        string `json:"content" maxLength:"1048576" doc:"Complete UTF-8 file contents"`
 	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
@@ -92,6 +99,47 @@ type updateRepositoryFileInput struct {
 	Ref        string `path:"ref" doc:"Git branch receiving the commit"`
 	Path       string `path:"path" doc:"URL-encoded path inside the repository"`
 	Body       updateRepositoryFileBody
+}
+
+type createRepositoryFileBody struct {
+	Content        string `json:"content" maxLength:"1048576" doc:"Complete UTF-8 file contents"`
+	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
+	ExpectedCommit string `json:"expectedCommit" minLength:"40" maxLength:"40" doc:"Current branch tip commit"`
+}
+
+type createRepositoryFileInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Ref        string `path:"ref" doc:"Git branch receiving the commit"`
+	Path       string `path:"path" doc:"URL-encoded new path inside the repository"`
+	Body       createRepositoryFileBody
+}
+
+type deleteRepositoryFileBody struct {
+	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
+	ExpectedCommit string `json:"expectedCommit" minLength:"40" maxLength:"40" doc:"Current branch tip commit"`
+}
+
+type deleteRepositoryFileInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Ref        string `path:"ref" doc:"Git branch receiving the commit"`
+	Path       string `path:"path" doc:"URL-encoded file path inside the repository"`
+	Body       deleteRepositoryFileBody
+}
+
+type renameRepositoryFileBody struct {
+	NewPath        string `json:"newPath" minLength:"1" doc:"New path inside the repository"`
+	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
+	ExpectedCommit string `json:"expectedCommit" minLength:"40" maxLength:"40" doc:"Current branch tip commit"`
+}
+
+type renameRepositoryFileInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Ref        string `path:"ref" doc:"Git branch receiving the commit"`
+	Path       string `path:"path" doc:"URL-encoded existing file path inside the repository"`
+	Body       renameRepositoryFileBody
 }
 
 type repositoryCommitsInput struct {
@@ -145,6 +193,7 @@ type repositoryTreeOutput struct {
 		Ref        string                `json:"ref"`
 		Commit     string                `json:"commit"`
 		Path       string                `json:"path"`
+		CanEdit    bool                  `json:"canEdit" doc:"Whether files can be changed on the selected reference"`
 		Entries    []repositoryTreeEntry `json:"entries"`
 	}
 }
@@ -162,6 +211,7 @@ type repositoryBlobOutput struct {
 		Language        string `json:"language,omitempty"`
 		HighlightedHTML string `json:"highlightedHtml,omitempty"`
 		CanEdit         bool   `json:"canEdit" doc:"Whether this file and reference can be edited by the authenticated user"`
+		CanManage       bool   `json:"canManage" doc:"Whether this file can be renamed or deleted on the selected reference"`
 		LFS             bool   `json:"lfs,omitempty" doc:"Whether content was resolved from Git LFS storage"`
 		LFSOID          string `json:"lfsOid,omitempty" doc:"SHA-256 object ID for resolved Git LFS content"`
 	}
@@ -172,6 +222,8 @@ type updateRepositoryFileOutput struct {
 		Repository     string `json:"repository"`
 		Branch         string `json:"branch"`
 		Path           string `json:"path"`
+		PreviousPath   string `json:"previousPath,omitempty"`
+		Operation      string `json:"operation" enum:"created,updated,deleted,renamed"`
 		Commit         string `json:"commit"`
 		PreviousCommit string `json:"previousCommit"`
 		Message        string `json:"message"`
@@ -303,12 +355,45 @@ func registerRepositoryBrowser(api huma.API, service API) {
 	}), service.readRepositoryBlob)
 
 	huma.Register(api, protected(huma.Operation{
+		OperationID: "download-repository-archive",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/archives/{ref}",
+		Summary:     "Download a repository reference as an archive",
+		Tags:        []string{"Repository browser"},
+	}), service.downloadRepositoryArchive)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "create-repository-file",
+		Method:        http.MethodPost,
+		Path:          "/api/repositories/{repository}/files/{ref}/{path}",
+		Summary:       "Create a file and commit it to a branch",
+		Tags:          []string{"Repository browser"},
+		DefaultStatus: http.StatusCreated,
+	}), service.createRepositoryFile)
+
+	huma.Register(api, protected(huma.Operation{
 		OperationID: "update-repository-file",
 		Method:      http.MethodPut,
 		Path:        "/api/repositories/{repository}/files/{ref}/{path}",
 		Summary:     "Update a file and commit it to a branch",
 		Tags:        []string{"Repository browser"},
 	}), service.updateRepositoryFile)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "delete-repository-file",
+		Method:      http.MethodDelete,
+		Path:        "/api/repositories/{repository}/files/{ref}/{path}",
+		Summary:     "Delete a file and commit the change to a branch",
+		Tags:        []string{"Repository browser"},
+	}), service.deleteRepositoryFile)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "rename-repository-file",
+		Method:      http.MethodPatch,
+		Path:        "/api/repositories/{repository}/files/{ref}/{path}",
+		Summary:     "Rename a file and commit the change to a branch",
+		Tags:        []string{"Repository browser"},
+	}), service.renameRepositoryFile)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-repository-commits",
@@ -469,6 +554,12 @@ func (a API) listRepositoryTree(
 	output.Body.Ref = ref
 	output.Body.Commit = commit.Hash.String()
 	output.Body.Path = cleanPath
+	branchName, branchRef, _, branchErr := resolveBranch(repository, ref)
+	_, writeErr := a.authorizeRepository(ctx, credentials, parsed, control.RoleWrite)
+	output.Body.CanEdit = branchErr == nil &&
+		branchName == ref &&
+		branchRef.Hash() == commit.Hash &&
+		writeErr == nil
 	output.Body.Entries = entries
 	return output, nil
 }
@@ -580,18 +671,25 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 	if isLFS {
 		output.Body.LFSOID = pointer.OID
 	}
+	branchName, branchRef, _, branchErr := resolveBranch(repository, input.Ref)
+	_, writeErr := a.authorizeRepository(
+		ctx,
+		input.AuthInput,
+		parsed,
+		control.RoleWrite,
+	)
+	output.Body.CanManage = branchErr == nil &&
+		branchName == input.Ref &&
+		branchRef.Hash() == commit.Hash &&
+		file.Mode.IsFile() &&
+		writeErr == nil
 	if encoding == "utf-8" {
 		output.Body.HighlightedHTML, output.Body.Language = highlightRepositoryBlob(
 			cleanPath,
 			encodedContent,
 		)
-		branchName, branchRef, _, branchErr := resolveBranch(repository, input.Ref)
-		_, writeErr := a.authorize(ctx, input.AuthInput, parsed.Group(), control.RoleWrite)
-		output.Body.CanEdit = branchErr == nil &&
+		output.Body.CanEdit = output.Body.CanManage &&
 			!isLFS &&
-			branchName == input.Ref &&
-			branchRef.Hash() == commit.Hash &&
-			writeErr == nil &&
 			file.Blob.Size <= maxEditableBlobSize &&
 			mergeableTextMode(file.Mode)
 	}

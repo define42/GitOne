@@ -1,7 +1,10 @@
 package server
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1265,6 +1268,7 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 		Repository string `json:"repository"`
 		Ref        string `json:"ref"`
 		Commit     string `json:"commit"`
+		CanEdit    bool   `json:"canEdit"`
 		Entries    []struct {
 			Name string `json:"name"`
 			Type string `json:"type"`
@@ -1276,8 +1280,68 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	if rootTree.Repository != "engineering/api" ||
 		rootTree.Ref != "main" ||
 		rootTree.Commit == "" ||
+		!rootTree.CanEdit ||
 		len(rootTree.Entries) != 4 {
 		t.Fatalf("unexpected repository root: %#v", rootTree)
+	}
+	zipResponse := get(
+		"/api/repositories/engineering%2Fapi/archives/main?format=zip",
+	)
+	if zipResponse.Header().Get("Content-Type") != "application/zip" ||
+		!strings.Contains(
+			zipResponse.Header().Get("Content-Disposition"),
+			"api-main.zip",
+		) {
+		t.Fatalf("unexpected ZIP headers: %#v", zipResponse.Header())
+	}
+	zipArchive, err := zip.NewReader(
+		bytes.NewReader(zipResponse.Body.Bytes()),
+		int64(zipResponse.Body.Len()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipEntries := map[string]bool{}
+	for _, entry := range zipArchive.File {
+		zipEntries[entry.Name] = true
+	}
+	if !zipEntries["api-main/docs/guide.txt"] ||
+		!zipEntries["api-main/server.js"] {
+		t.Fatalf("unexpected ZIP entries: %#v", zipEntries)
+	}
+
+	tarResponse := get(
+		"/api/repositories/engineering%2Fapi/archives/main?format=tar.gz",
+	)
+	if tarResponse.Header().Get("Content-Type") != "application/gzip" ||
+		!strings.Contains(
+			tarResponse.Header().Get("Content-Disposition"),
+			"api-main.tar.gz",
+		) {
+		t.Fatalf("unexpected tar.gz headers: %#v", tarResponse.Header())
+	}
+	compressedArchive, err := gzip.NewReader(tarResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarArchive := tar.NewReader(compressedArchive)
+	tarEntries := map[string]bool{}
+	for {
+		header, readErr := tarArchive.Next()
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		tarEntries[header.Name] = true
+	}
+	if err = compressedArchive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !tarEntries["api-main/docs/guide.txt"] ||
+		!tarEntries["api-main/server.js"] {
+		t.Fatalf("unexpected tar.gz entries: %#v", tarEntries)
 	}
 	var featureTree struct {
 		Ref    string `json:"ref"`
@@ -1327,6 +1391,7 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 		Language        string `json:"language"`
 		HighlightedHTML string `json:"highlightedHtml"`
 		CanEdit         bool   `json:"canEdit"`
+		CanManage       bool   `json:"canManage"`
 	}
 	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/HEAD/server.js").Body.Bytes(), &highlightedBlob); err != nil {
 		t.Fatal(err)
@@ -1337,7 +1402,8 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 		highlightedBlob.Language != "JavaScript" ||
 		!strings.Contains(highlightedBlob.HighlightedHTML, "<span") ||
 		!strings.Contains(highlightedBlob.HighlightedHTML, "node:http") ||
-		highlightedBlob.CanEdit {
+		highlightedBlob.CanEdit ||
+		highlightedBlob.CanManage {
 		t.Fatalf("unexpected highlighted repository blob: %#v", highlightedBlob)
 	}
 
@@ -1410,13 +1476,16 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 
 	var editableBlob struct {
-		Commit  string `json:"commit"`
-		CanEdit bool   `json:"canEdit"`
+		Commit    string `json:"commit"`
+		CanEdit   bool   `json:"canEdit"`
+		CanManage bool   `json:"canManage"`
 	}
 	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/main/server.js").Body.Bytes(), &editableBlob); err != nil {
 		t.Fatal(err)
 	}
-	if editableBlob.Commit != head.Hash().String() || !editableBlob.CanEdit {
+	if editableBlob.Commit != head.Hash().String() ||
+		!editableBlob.CanEdit ||
+		!editableBlob.CanManage {
 		t.Fatalf("expected main branch blob to be editable: %#v", editableBlob)
 	}
 
@@ -1537,16 +1606,18 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 
 	var savedBlob struct {
-		Commit  string `json:"commit"`
-		Content string `json:"content"`
-		CanEdit bool   `json:"canEdit"`
+		Commit    string `json:"commit"`
+		Content   string `json:"content"`
+		CanEdit   bool   `json:"canEdit"`
+		CanManage bool   `json:"canManage"`
 	}
 	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/main/docs%2Fguide.txt").Body.Bytes(), &savedBlob); err != nil {
 		t.Fatal(err)
 	}
 	if savedBlob.Commit != updatedFile.Commit ||
 		savedBlob.Content != updatedGuide ||
-		!savedBlob.CanEdit {
+		!savedBlob.CanEdit ||
+		!savedBlob.CanManage {
 		t.Fatalf("unexpected saved repository blob: %#v", savedBlob)
 	}
 
@@ -1650,12 +1721,13 @@ func TestRepositoryBrowserResolvesLFSContent(t *testing.T) {
 		t.Fatalf("read LFS file: expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
 	var blob struct {
-		Size     int64  `json:"size"`
-		Encoding string `json:"encoding"`
-		Content  string `json:"content"`
-		CanEdit  bool   `json:"canEdit"`
-		LFS      bool   `json:"lfs"`
-		LFSOID   string `json:"lfsOid"`
+		Size      int64  `json:"size"`
+		Encoding  string `json:"encoding"`
+		Content   string `json:"content"`
+		CanEdit   bool   `json:"canEdit"`
+		CanManage bool   `json:"canManage"`
+		LFS       bool   `json:"lfs"`
+		LFSOID    string `json:"lfsOid"`
 	}
 	if err = json.Unmarshal(response.Body.Bytes(), &blob); err != nil {
 		t.Fatal(err)
@@ -1664,6 +1736,7 @@ func TestRepositoryBrowserResolvesLFSContent(t *testing.T) {
 		blob.Encoding != "utf-8" ||
 		blob.Content != content ||
 		blob.CanEdit ||
+		!blob.CanManage ||
 		!blob.LFS ||
 		blob.LFSOID != oid {
 		t.Fatalf("unexpected resolved LFS blob: %#v", blob)
@@ -2327,6 +2400,22 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "Commit changes") {
 		t.Fatal("served UI does not support reviewing, editing, and committing repository files")
 	}
+	if !strings.Contains(assetResponse.Body.String(), "repositoryArchiveAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), `"Download ZIP"`) ||
+		!strings.Contains(assetResponse.Body.String(), `"Download tar.gz"`) ||
+		!strings.Contains(assetResponse.Body.String(), "archive.trigger") ||
+		!strings.Contains(assetResponse.Body.String(), "archive.dialog") {
+		t.Fatal("served UI does not offer ZIP and tar.gz repository downloads")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "repositoryFileCreator") ||
+		!strings.Contains(assetResponse.Body.String(), "expectedCommit: tree.commit") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryFileRenameControl") ||
+		!strings.Contains(assetResponse.Body.String(), "content.canManage") ||
+		!strings.Contains(assetResponse.Body.String(), `method: "PATCH"`) ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryFileDeleteControl") ||
+		!strings.Contains(assetResponse.Body.String(), `"Delete file"`) {
+		t.Fatal("served UI does not support creating, renaming, and deleting repository files")
+	}
 	if !strings.Contains(assetResponse.Body.String(), "initializeReadme.checked = true") {
 		t.Fatal("served UI does not default the README initialization option to checked")
 	}
@@ -2418,6 +2507,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 				`"/api/repositories/{repository}/tree/{ref}"`,
 				`"/api/repositories/{repository}/tree/{ref}/{path}"`,
 				`"/api/repositories/{repository}/blob/{ref}/{path}"`,
+				`"/api/repositories/{repository}/archives/{ref}"`,
 				`"/api/repositories/{repository}/files/{ref}/{path}"`,
 				`"/api/repositories/{repository}/commits/{ref}"`,
 				`"/api/repositories/{repository}/commits/{commit}/diff"`,

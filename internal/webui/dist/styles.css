@@ -1084,6 +1084,35 @@ textarea:focus {
   padding: 1rem 1.25rem;
 }
 
+.dialog-description {
+  color: var(--muted);
+  margin: 0;
+}
+
+.archive-options {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.archive-options .button {
+  width: 100%;
+}
+
+.file-create-dialog {
+  width: 44rem;
+}
+
+.file-create-content {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.83rem;
+  line-height: 1.55;
+  min-height: 18rem;
+  resize: vertical;
+  tab-size: 4;
+  white-space: pre;
+}
+
 .settings-dialog {
   height: min(46rem, calc(100vh - 2rem));
   width: 64rem;
@@ -1626,6 +1655,12 @@ textarea:focus {
   flex-wrap: wrap;
   gap: 0.6rem;
   justify-content: flex-end;
+}
+
+.repository-tree-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.8rem;
 }
 
 .branch-control {
@@ -2589,6 +2624,10 @@ table {
 
   .repository-actions > button {
     width: 100%;
+  }
+
+  .archive-options {
+    grid-template-columns: 1fr;
   }
 
   .branch-control {
