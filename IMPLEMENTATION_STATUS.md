@@ -22,6 +22,7 @@ Implemented:
 - Go and TypeScript build validation plus a multi-stage Dockerfile
 - Separate `gitone` web and `gitone-runner` applications and container images, connected through an authenticated build API with durable leases, exact-commit source archives, remote log streaming, branch filters, timeouts, build APIs, and a live Builds UI
 - Repository ZIP/tar.gz downloads and branch-safe UI/API operations for creating, editing, renaming, and deleting files
+- Repository blame views and complete commit-history navigation with paginated API results
 
 Not production-complete yet:
 

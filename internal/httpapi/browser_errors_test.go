@@ -201,7 +201,8 @@ func TestRepositoryBrowserRejectsInvalidReferencesAndPaths(t *testing.T) {
 					AuthInput:  credentials,
 					Repository: "engineering/api",
 					Ref:        "missing",
-					Limit:      20,
+					Page:       1,
+					PerPage:    20,
 				})
 				return err
 			},

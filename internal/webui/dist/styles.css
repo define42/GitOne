@@ -2037,6 +2037,71 @@ table {
   min-width: max-content;
 }
 
+.repository-blame {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  border-spacing: 0;
+  color: var(--code-text);
+  display: block;
+  overflow: auto;
+}
+
+.repository-blame tbody {
+  display: table;
+  min-width: 42rem;
+  width: 100%;
+}
+
+.repository-blame tr + tr > * {
+  border-top: 1px solid var(--border);
+}
+
+.blame-attribution {
+  background: var(--surface-subtle);
+  border-right: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.65rem 0.75rem;
+  vertical-align: top;
+  width: 13rem;
+}
+
+.blame-attribution strong,
+.blame-attribution span {
+  display: block;
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blame-attribution code {
+  color: var(--muted);
+  display: block;
+  font-size: 0.7rem;
+  margin: 0.18rem 0;
+}
+
+.blame-line-number {
+  background: var(--surface-subtle);
+  border-right: 1px solid var(--border);
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+  font-weight: 400;
+  padding: 0 0.65rem;
+  text-align: right;
+  user-select: none;
+  width: 1%;
+}
+
+.blame-line {
+  font-size: 0.8rem;
+  line-height: 1.55;
+  padding: 0 0.75rem;
+  white-space: pre;
+}
+
 .readme-section {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2360,6 +2425,20 @@ table {
   display: grid;
   gap: 0.5rem;
   padding: 1rem;
+}
+
+.history-pagination {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.history-page-status {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-align: center;
 }
 
 .history-heading {

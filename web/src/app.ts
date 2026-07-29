@@ -118,8 +118,30 @@ interface RepositoryCommit {
 interface RepositoryCommits {
   repository: string;
   ref: string;
+  page: number;
+  perPage: number;
   total: number;
+  totalPages: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
   commits: RepositoryCommit[];
+}
+
+interface RepositoryBlameLine {
+  number: number;
+  text: string;
+  commit: string;
+  author: string;
+  email: string;
+  authored: string;
+}
+
+interface RepositoryBlame {
+  repository: string;
+  ref: string;
+  commit: string;
+  path: string;
+  lines: RepositoryBlameLine[];
 }
 
 interface RepositoryCommitDiff {
@@ -193,7 +215,8 @@ interface RepositoryBrowserRoute {
   ref: string;
   path: string;
   file: string | null;
-  view: "files" | "history" | "builds";
+  view: "files" | "history" | "builds" | "blame";
+  page: number;
 }
 
 interface Problem {
@@ -470,7 +493,8 @@ function repositoryBrowserURL(
     ref?: string;
     path?: string;
     file?: string;
-    view?: "files" | "history" | "builds";
+    view?: "files" | "history" | "builds" | "blame";
+    page?: number;
   } = {},
 ): string {
   const encodedRepository = repository.split("/").map(encodeURIComponent).join("/");
@@ -486,6 +510,9 @@ function repositoryBrowserURL(
   }
   if (options.view && options.view !== "files") {
     url.searchParams.set("view", options.view);
+  }
+  if (options.page && options.page > 1) {
+    url.searchParams.set("page", String(options.page));
   }
   return `${url.pathname}${url.search}`;
 }
@@ -542,7 +569,7 @@ function repositoryArchiveAPIURL(
 
 function repositoryAPIURL(
   repository: string,
-  operation: "tree" | "blob" | "commits",
+  operation: "tree" | "blob" | "blame" | "commits",
   ref: string,
   path?: string,
 ): string {
@@ -565,14 +592,22 @@ function currentRepository(): RepositoryBrowserRoute | null {
   }
   const parameters = new URLSearchParams(window.location.search);
   const requestedView = parameters.get("view");
+  const file = parameters.get("file");
+  const requestedPage = Number.parseInt(parameters.get("page") ?? "1", 10);
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0
+    ? requestedPage
+    : 1;
   return {
     repository,
     ref: parameters.get("ref") || "main",
     path: parameters.get("path") || "",
-    file: parameters.get("file"),
-    view: requestedView === "history" || requestedView === "builds"
+    file,
+    view: requestedView === "history" ||
+      requestedView === "builds" ||
+      (requestedView === "blame" && file !== null)
       ? requestedView
       : "files",
+    page,
   };
 }
 
@@ -1590,7 +1625,9 @@ function repositoryBreadcrumbs(route: RepositoryBrowserRoute): HTMLElement {
     list.append(buildsItem);
   }
 
-  const selectedPath = route.view === "files" ? route.file ?? route.path : "";
+  const selectedPath = route.view === "files" || route.view === "blame"
+    ? route.file ?? route.path
+    : "";
   if (selectedPath) {
     const pathParts = selectedPath.split("/");
     for (let index = 0; index < pathParts.length; index += 1) {
@@ -2143,6 +2180,40 @@ function repositoryHistory(
     list.append(item);
   }
   section.append(list);
+  const pagination = element("nav");
+  pagination.className = "history-pagination";
+  pagination.setAttribute("aria-label", "Commit history pages");
+  const previous = element(data.hasPrevious ? "a" : "button", "Previous");
+  previous.className = "button secondary";
+  if (previous instanceof HTMLAnchorElement) {
+    previous.href = repositoryBrowserURL(route.repository, {
+      ref: route.ref,
+      view: "history",
+      page: data.page - 1,
+    });
+  } else {
+    previous.disabled = true;
+  }
+  const start = (data.page - 1) * data.perPage + 1;
+  const end = Math.min(data.page * data.perPage, data.total);
+  const pageStatus = element(
+    "span",
+    `Page ${data.page} of ${Math.max(data.totalPages, 1)} · ${start}–${end} of ${data.total}`,
+  );
+  pageStatus.className = "history-page-status";
+  const next = element(data.hasNext ? "a" : "button", "Next");
+  next.className = "button secondary";
+  if (next instanceof HTMLAnchorElement) {
+    next.href = repositoryBrowserURL(route.repository, {
+      ref: route.ref,
+      view: "history",
+      page: data.page + 1,
+    });
+  } else {
+    next.disabled = true;
+  }
+  pagination.append(previous, pageStatus, next);
+  section.append(pagination);
   return section;
 }
 
@@ -2491,6 +2562,7 @@ function branchComparisonResult(
             path: "",
             file: null,
             view: "files",
+            page: 1,
           };
           window.history.pushState(
             null,
@@ -2835,6 +2907,7 @@ function repositoryFileCreator(
         path: "",
         file: created.path,
         view: "files",
+        page: 1,
       };
       window.history.pushState(
         null,
@@ -2949,6 +3022,7 @@ function repositoryFileRenameControl(
         path: "",
         file: renamed.path,
         view: "files",
+        page: 1,
       };
       window.history.pushState(
         null,
@@ -3054,6 +3128,7 @@ function repositoryFileDeleteControl(
         path: parentPath,
         file: null,
         view: "files",
+        page: 1,
       };
       window.history.pushState(
         null,
@@ -3134,6 +3209,75 @@ function sourcePreview(content: string, highlightedHtml?: string): HTMLElement {
   return pre;
 }
 
+function repositoryBlameSection(
+  route: RepositoryBrowserRoute,
+  blame: RepositoryBlame,
+): HTMLElement {
+  const section = element("section");
+  section.className = "content-section blame-view";
+  const fileLink = element("a");
+  fileLink.className = "button secondary";
+  fileLink.href = repositoryBrowserURL(route.repository, {
+    ref: route.ref,
+    file: blame.path,
+  });
+  fileLink.append(icon("file"), document.createTextNode("View file"));
+  section.append(sectionHeading(blame.path, undefined, [fileLink]));
+  const metadata = element(
+    "p",
+    `${blame.lines.length} ${blame.lines.length === 1 ? "line" : "lines"} · ${shortCommitHash(blame.commit)}`,
+  );
+  metadata.className = "file-metadata";
+  section.append(metadata);
+  if (blame.lines.length === 0) {
+    section.append(emptyState("This file is empty."));
+    return section;
+  }
+
+  const table = element("table");
+  table.className = "repository-blame";
+  const body = element("tbody");
+  for (let index = 0; index < blame.lines.length;) {
+    const first = blame.lines[index];
+    let groupEnd = index + 1;
+    while (
+      groupEnd < blame.lines.length &&
+      blame.lines[groupEnd].commit === first.commit
+    ) {
+      groupEnd++;
+    }
+    for (let lineIndex = index; lineIndex < groupEnd; lineIndex++) {
+      const line = blame.lines[lineIndex];
+      const row = element("tr");
+      if (lineIndex === index) {
+        const attribution = element("td");
+        attribution.className = "blame-attribution";
+        attribution.rowSpan = groupEnd - index;
+        const author = element("strong", first.author);
+        author.title = first.email;
+        const commit = element("code", shortCommitHash(first.commit));
+        commit.title = first.commit;
+        const authored = element("span", relativeTime(first.authored));
+        authored.title = new Date(first.authored).toLocaleString();
+        attribution.append(author, commit, authored);
+        row.append(attribution);
+      }
+      const number = element("th", String(line.number));
+      number.className = "blame-line-number";
+      number.scope = "row";
+      const source = element("td");
+      source.className = "blame-line";
+      source.append(element("code", line.text || " "));
+      row.append(number, source);
+      body.append(row);
+    }
+    index = groupEnd;
+  }
+  table.append(body);
+  section.append(table);
+  return section;
+}
+
 async function repositoryBlobSection(
   route: RepositoryBrowserRoute,
   content: RepositoryBlob,
@@ -3149,11 +3293,29 @@ async function repositoryBlobSection(
   const deleteControl = content.canManage
     ? repositoryFileDeleteControl(route, content)
     : null;
+  const blameLink = content.encoding === "utf-8" &&
+    !content.lfs &&
+    content.size <= 1_048_576
+    ? element("a")
+    : null;
+  if (blameLink) {
+    blameLink.className = "button secondary";
+    blameLink.href = repositoryBrowserURL(route.repository, {
+      ref: route.ref,
+      file: content.path,
+      view: "blame",
+    });
+    blameLink.append(icon("clock"), document.createTextNode("Blame"));
+  }
   const fileActions = [
     editButton,
+    blameLink,
     renameControl?.trigger,
     deleteControl?.trigger,
-  ].filter((action): action is HTMLButtonElement => action !== null && action !== undefined);
+  ].filter(
+    (action): action is HTMLButtonElement | HTMLAnchorElement =>
+      action !== null && action !== undefined,
+  );
   const heading = sectionHeading(
     content.path,
     undefined,
@@ -3439,12 +3601,21 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   const branchesRequest = request<RepositoryBranches>(
     repositoryBranchesAPIURL(route.repository),
   );
+  const commitParameters = new URLSearchParams({
+    page: String(route.view === "history" ? route.page : 1),
+    perPage: String(route.view === "history" ? 50 : 1),
+  });
   const commitsRequest = request<RepositoryCommits>(
-    `${repositoryAPIURL(route.repository, "commits", route.ref)}?limit=${route.view === "history" ? 100 : 1}`,
+    `${repositoryAPIURL(route.repository, "commits", route.ref)}?${commitParameters}`,
   );
-  const contentRequest: Promise<RepositoryTree | RepositoryBlob | null> =
-    route.view !== "files"
+  const contentRequest: Promise<
+    RepositoryTree | RepositoryBlob | RepositoryBlame | null
+  > = route.view === "history" || route.view === "builds"
       ? Promise.resolve(null)
+      : route.view === "blame" && route.file !== null
+        ? request<RepositoryBlame>(
+          repositoryAPIURL(route.repository, "blame", route.ref, route.file),
+        )
       : route.file === null
         ? request<RepositoryTree>(repositoryAPIURL(route.repository, "tree", route.ref, route.path))
         : request<RepositoryBlob>(repositoryAPIURL(route.repository, "blob", route.ref, route.file));
@@ -3555,8 +3726,18 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     app.append(repositoryBuildsView(route, builds));
     return;
   }
+  if (route.view === "blame") {
+    if (content === null || !("lines" in content)) {
+      throw new Error("Repository blame is unavailable.");
+    }
+    app.append(repositoryBlameSection(route, content));
+    return;
+  }
   if (content === null) {
     throw new Error("Repository contents are unavailable.");
+  }
+  if ("lines" in content) {
+    throw new Error("Repository blame was returned outside the blame view.");
   }
 
   if ("entries" in content) {

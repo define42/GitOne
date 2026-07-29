@@ -146,7 +146,8 @@ type repositoryCommitsInput struct {
 	AuthInput
 	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
 	Ref        string `path:"ref" doc:"Git branch, tag, hash, or HEAD"`
-	Limit      int    `query:"limit" minimum:"1" maximum:"100" default:"20"`
+	Page       int    `query:"page" minimum:"1" maximum:"1000000" default:"1" doc:"One-based result page"`
+	PerPage    int    `query:"perPage" minimum:"1" maximum:"100" default:"50" doc:"Commits returned per page"`
 }
 
 type repositoryCommitDiffInput struct {
@@ -242,10 +243,34 @@ type repositoryCommitInfo struct {
 
 type repositoryCommitsOutput struct {
 	Body struct {
-		Repository string                 `json:"repository"`
-		Ref        string                 `json:"ref"`
-		Total      int                    `json:"total" doc:"Total commits reachable from the selected reference"`
-		Commits    []repositoryCommitInfo `json:"commits"`
+		Repository  string                 `json:"repository"`
+		Ref         string                 `json:"ref"`
+		Page        int                    `json:"page"`
+		PerPage     int                    `json:"perPage"`
+		Total       int                    `json:"total" doc:"Total commits reachable from the selected reference"`
+		TotalPages  int                    `json:"totalPages"`
+		HasPrevious bool                   `json:"hasPrevious"`
+		HasNext     bool                   `json:"hasNext"`
+		Commits     []repositoryCommitInfo `json:"commits"`
+	}
+}
+
+type repositoryBlameLine struct {
+	Number   int       `json:"number"`
+	Text     string    `json:"text"`
+	Commit   string    `json:"commit"`
+	Author   string    `json:"author"`
+	Email    string    `json:"email"`
+	Authored time.Time `json:"authored"`
+}
+
+type repositoryBlameOutput struct {
+	Body struct {
+		Repository string                `json:"repository"`
+		Ref        string                `json:"ref"`
+		Commit     string                `json:"commit"`
+		Path       string                `json:"path"`
+		Lines      []repositoryBlameLine `json:"lines"`
 	}
 }
 
@@ -394,6 +419,14 @@ func registerRepositoryBrowser(api huma.API, service API) {
 		Summary:     "Rename a file and commit the change to a branch",
 		Tags:        []string{"Repository browser"},
 	}), service.renameRepositoryFile)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "read-repository-file-blame",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/blame/{ref}/{path}",
+		Summary:     "Show line-by-line file attribution",
+		Tags:        []string{"Repository browser"},
+	}), service.readRepositoryBlame)
 
 	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-repository-commits",
@@ -738,15 +771,24 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 	}
 	defer iterator.Close()
 
-	limit := input.Limit
-	if limit == 0 {
-		limit = 20
+	page := input.Page
+	if page == 0 {
+		page = 1
 	}
-	commits := make([]repositoryCommitInfo, 0, limit)
+	perPage := input.PerPage
+	if perPage == 0 {
+		perPage = 50
+	}
+	if page < 1 || page > 1_000_000 || perPage < 1 || perPage > 100 {
+		return nil, huma.Error400BadRequest("invalid commit history page")
+	}
+	offset := (page - 1) * perPage
+	commits := make([]repositoryCommitInfo, 0, perPage)
 	total := 0
 	err = iterator.ForEach(func(current *object.Commit) error {
+		index := total
 		total++
-		if len(commits) >= limit {
+		if index < offset || len(commits) >= perPage {
 			return nil
 		}
 		commits = append(commits, repositoryCommitInfo{
@@ -767,7 +809,12 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 	output := &repositoryCommitsOutput{}
 	output.Body.Repository = parsed.Full()
 	output.Body.Ref = input.Ref
+	output.Body.Page = page
+	output.Body.PerPage = perPage
 	output.Body.Total = total
+	output.Body.TotalPages = (total + perPage - 1) / perPage
+	output.Body.HasPrevious = page > 1
+	output.Body.HasNext = page < output.Body.TotalPages
 	output.Body.Commits = commits
 	return output, nil
 }

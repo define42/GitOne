@@ -1406,6 +1406,34 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 		highlightedBlob.CanManage {
 		t.Fatalf("unexpected highlighted repository blob: %#v", highlightedBlob)
 	}
+	var blame struct {
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		Commit     string `json:"commit"`
+		Path       string `json:"path"`
+		Lines      []struct {
+			Number int    `json:"number"`
+			Text   string `json:"text"`
+			Commit string `json:"commit"`
+			Author string `json:"author"`
+		} `json:"lines"`
+	}
+	if err = json.Unmarshal(get(
+		"/api/repositories/engineering%2Fapi/blame/main/docs%2Fguide.txt",
+	).Body.Bytes(), &blame); err != nil {
+		t.Fatal(err)
+	}
+	if blame.Repository != "engineering/api" ||
+		blame.Ref != "main" ||
+		blame.Commit != head.Hash().String() ||
+		blame.Path != "docs/guide.txt" ||
+		len(blame.Lines) != 1 ||
+		blame.Lines[0].Number != 1 ||
+		blame.Lines[0].Text != "Browse me" ||
+		blame.Lines[0].Commit != head.Hash().String() ||
+		blame.Lines[0].Author != "alice" {
+		t.Fatalf("unexpected repository blame: %#v", blame)
+	}
 
 	headCommit, err := repository.CommitObject(head.Hash())
 	if err != nil {
@@ -1622,17 +1650,27 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 
 	var commits struct {
-		Ref     string `json:"ref"`
-		Total   int    `json:"total"`
-		Commits []struct {
+		Ref         string `json:"ref"`
+		Page        int    `json:"page"`
+		PerPage     int    `json:"perPage"`
+		Total       int    `json:"total"`
+		TotalPages  int    `json:"totalPages"`
+		HasPrevious bool   `json:"hasPrevious"`
+		HasNext     bool   `json:"hasNext"`
+		Commits     []struct {
 			Message string `json:"message"`
 		} `json:"commits"`
 	}
-	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/commits/feature%2Fdocs?limit=100").Body.Bytes(), &commits); err != nil {
+	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/commits/feature%2Fdocs?page=1&perPage=100").Body.Bytes(), &commits); err != nil {
 		t.Fatal(err)
 	}
 	if commits.Ref != "feature/docs" ||
+		commits.Page != 1 ||
+		commits.PerPage != 100 ||
 		commits.Total != 2 ||
+		commits.TotalPages != 1 ||
+		commits.HasPrevious ||
+		commits.HasNext ||
 		len(commits.Commits) != 2 ||
 		commits.Commits[0].Message != "Add guide" {
 		t.Fatalf("unexpected repository commits: %#v", commits)
@@ -2441,10 +2479,21 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "repositoryCommitDiffAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), "Loading commit diff") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryNavigation") ||
-		!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? 100 : 1`) ||
+		!strings.Contains(assetResponse.Body.String(), `route.view === "history" ? route.page : 1`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "tree"`) ||
 		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "blob"`) {
 		t.Fatal("served UI does not support repository files, branches, and commit history diffs")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "repositoryBlameSection") ||
+		!strings.Contains(assetResponse.Body.String(), `repositoryAPIURL(route.repository, "blame"`) ||
+		!strings.Contains(assetResponse.Body.String(), `document.createTextNode("Blame")`) {
+		t.Fatal("served UI does not provide the repository blame view")
+	}
+	if !strings.Contains(assetResponse.Body.String(), `"Commit history pages"`) ||
+		!strings.Contains(assetResponse.Body.String(), "data.hasPrevious") ||
+		!strings.Contains(assetResponse.Body.String(), "data.hasNext") ||
+		!strings.Contains(assetResponse.Body.String(), "page: data.page + 1") {
+		t.Fatal("served UI does not paginate repository commit history")
 	}
 	if !strings.Contains(assetResponse.Body.String(), `actionButton("Clone", "copy", "primary")`) ||
 		!strings.Contains(assetResponse.Body.String(), `"action-dialog clone-dialog"`) ||
@@ -2509,6 +2558,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 				`"/api/repositories/{repository}/blob/{ref}/{path}"`,
 				`"/api/repositories/{repository}/archives/{ref}"`,
 				`"/api/repositories/{repository}/files/{ref}/{path}"`,
+				`"/api/repositories/{repository}/blame/{ref}/{path}"`,
 				`"/api/repositories/{repository}/commits/{ref}"`,
 				`"/api/repositories/{repository}/commits/{commit}/diff"`,
 			} {
