@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	transportclient "github.com/go-git/go-git/v5/plumbing/transport/client"
@@ -132,7 +133,11 @@ func (p ImportNetworkPolicy) dialerOrDefault() importNetworkDialer {
 	if p.dialer != nil {
 		return p.dialer
 	}
-	return &net.Dialer{}
+	// Replacing DialContext on the cloned DefaultTransport drops the 30s dial
+	// timeout it would otherwise apply, so set one explicitly. Without it, an
+	// import pointed at a routable-but-unresponsive address would pin a
+	// goroutine, socket, and staging directory until the OS-level TCP timeout.
+	return &net.Dialer{Timeout: 30 * time.Second}
 }
 
 func (p ImportNetworkPolicy) hostExplicitlyAllowed(host string) bool {
@@ -372,6 +377,11 @@ func newImportHTTPClient() *http.Client {
 	safeTransport := base.Clone()
 	safeTransport.Proxy = nil
 	safeTransport.DialContext = importDialContext
+	// SSRF filtering depends on every connection flowing through
+	// importDialContext, so ensure TLS is dialed through it too rather than a
+	// separate path, and bound how long a stalled server can hold the request.
+	safeTransport.DialTLSContext = nil
+	safeTransport.ResponseHeaderTimeout = 60 * time.Second
 	return &http.Client{
 		Transport:     safeTransport,
 		CheckRedirect: importCheckRedirect,
