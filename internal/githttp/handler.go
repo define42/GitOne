@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -27,9 +28,10 @@ import (
 )
 
 const (
-	noThinCapability               capability.Capability = "no-thin"
-	maximumUploadPackRequestBytes  int64                 = 16 << 20
-	maximumReceivePackRequestBytes int64                 = 100 << 30
+	noThinCapability                capability.Capability = "no-thin"
+	maximumUploadPackRequestBytes   int64                 = 16 << 20
+	maximumReceivePackRequestBytes  int64                 = 1 << 30
+	maximumRepositoryGitObjectBytes int64                 = 20 << 30
 )
 
 type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
@@ -44,6 +46,9 @@ type Handler struct {
 	Authorize         Authorizer
 	ControlUpdated    func(string)
 	RepositoryUpdated func(repopath.Repository, []ReferenceUpdate)
+	// MaximumRepositoryGitObjectBytes overrides the default Git object quota.
+	// Non-positive values use the default.
+	MaximumRepositoryGitObjectBytes int64
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -277,9 +282,18 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		h.writeReceiveError(w, req, "ok", err)
 		return
 	}
+	validationRepository := repository
+	var quarantine *receiveQuarantine
 	reader := bufio.NewReader(req.Packfile)
 	if _, peekErr := reader.Peek(1); peekErr == nil {
-		if err = packfile.UpdateObjectStorage(repository.Storer, reader); err != nil {
+		quarantine, err = newReceiveQuarantine(path, repository.Storer)
+		if err != nil {
+			h.writeReceiveError(w, req, err.Error(), err)
+			return
+		}
+		defer quarantine.Remove()
+		validationRepository = quarantine.Repository
+		if err = packfile.UpdateObjectStorage(validationRepository.Storer, reader); err != nil {
 			if httpio.BodyTooLarge(err) {
 				http.Error(w, "receive-pack request is too large", http.StatusRequestEntityTooLarge)
 				return
@@ -297,12 +311,12 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 	}
 
 	if repo.Name == "control" {
-		if err = validateControlUpdate(repository, repo.Group(), req.Commands[0]); err != nil {
+		if err = validateControlUpdate(validationRepository, repo.Group(), req.Commands[0]); err != nil {
 			h.writeReceiveError(w, req, "ok", err)
 			return
 		}
 	} else if err = validateLFSPointerUpdates(
-		repository,
+		validationRepository,
 		h.Storage,
 		repo,
 		req.Commands,
@@ -311,9 +325,33 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		return
 	}
 
+	maintenanceCandidates := make(map[*packp.Command]bool, len(req.Commands))
+	for _, command := range req.Commands {
+		maintenanceCandidates[command] = referenceUpdateMayDiscardObjects(
+			validationRepository,
+			command,
+		)
+	}
+
+	if quarantine != nil {
+		maximumBytes := h.MaximumRepositoryGitObjectBytes
+		if maximumBytes <= 0 {
+			maximumBytes = maximumRepositoryGitObjectBytes
+		}
+		if err = enforceRepositoryObjectQuota(path, quarantine.Root, maximumBytes); err != nil {
+			h.writeReceiveError(w, req, "ok", err)
+			return
+		}
+		if err = quarantine.Promote(path); err != nil {
+			h.writeReceiveError(w, req, err.Error(), err)
+			return
+		}
+	}
+
 	status := packp.NewReportStatus()
 	status.UnpackStatus = "ok"
 	allApplied := true
+	maintenanceNeeded := false
 	updates := make([]ReferenceUpdate, 0, len(req.Commands))
 	for _, command := range req.Commands {
 		err = applyReferenceCommand(repository, command)
@@ -324,15 +362,23 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		if err != nil {
 			commandStatus.Status = err.Error()
 			allApplied = false
-		} else if repo.Name != "control" &&
-			command.New != plumbing.ZeroHash &&
-			command.Name.IsBranch() {
-			updates = append(updates, ReferenceUpdate{
-				Branch: command.Name.Short(),
-				Commit: command.New,
-			})
+		} else {
+			maintenanceNeeded = maintenanceNeeded || maintenanceCandidates[command]
+			if repo.Name != "control" &&
+				command.New != plumbing.ZeroHash &&
+				command.Name.IsBranch() {
+				updates = append(updates, ReferenceUpdate{
+					Branch: command.Name.Short(),
+					Commit: command.New,
+				})
+			}
 		}
 		status.CommandStatuses = append(status.CommandStatuses, commandStatus)
+	}
+	if maintenanceNeeded {
+		if err = maintainRepositoryObjects(path); err != nil {
+			log.Printf("could not maintain Git objects for %s: %v", repo.Full(), err)
+		}
 	}
 	h.writeReceiveStatus(w, req, status)
 	if allApplied && repo.Name == "control" && h.ControlUpdated != nil {
@@ -340,6 +386,32 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 	}
 	if len(updates) > 0 && h.RepositoryUpdated != nil {
 		h.RepositoryUpdated(repo, updates)
+	}
+}
+
+func referenceUpdateMayDiscardObjects(
+	repository *git.Repository,
+	command *packp.Command,
+) bool {
+	switch command.Action() {
+	case packp.Delete:
+		return true
+	case packp.Update:
+		if !command.Name.IsBranch() {
+			return true
+		}
+		oldCommit, err := repository.CommitObject(command.Old)
+		if err != nil {
+			return true
+		}
+		newCommit, err := repository.CommitObject(command.New)
+		if err != nil {
+			return true
+		}
+		fastForward, err := oldCommit.IsAncestor(newCommit)
+		return err != nil || !fastForward
+	default:
+		return false
 	}
 }
 

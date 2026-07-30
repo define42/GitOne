@@ -745,6 +745,7 @@ func TestNativeGitRejectsInvalidControlDocument(t *testing.T) {
 	}
 	runGit(t, checkout, "add", "control.json")
 	runGit(t, checkout, "commit", "-m", "Remove final owner")
+	rejectedCommit := strings.TrimSpace(runGitOutput(t, checkout, "rev-parse", "HEAD"))
 	command := exec.Command("git", "push", "origin", "main")
 	command.Dir = checkout
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
@@ -755,6 +756,12 @@ func TestNativeGitRejectsInvalidControlDocument(t *testing.T) {
 	if !strings.Contains(string(output), "at least one owner required") {
 		t.Fatalf("push did not report control validation failure:\n%s", output)
 	}
+	assertServerObjectMissing(
+		t,
+		store,
+		repopath.Repository{Groups: []string{"engineering"}, Name: "control"},
+		rejectedCommit,
+	)
 }
 
 func TestNativeGitRejectsUserManagedTokenSecret(t *testing.T) {
@@ -848,6 +855,7 @@ func TestNativeGitPushValidatesLFSPointers(t *testing.T) {
 	}
 	runGit(t, checkout, "add", "media/asset.bin")
 	runGit(t, checkout, "commit", "-m", "Add LFS asset")
+	missingObjectCommit := strings.TrimSpace(runGitOutput(t, checkout, "rev-parse", "HEAD"))
 
 	push := exec.Command("git", "push", "origin", "main")
 	push.Dir = checkout
@@ -859,6 +867,7 @@ func TestNativeGitPushValidatesLFSPointers(t *testing.T) {
 	if !strings.Contains(string(output), "invalid LFS pointer") {
 		t.Fatalf("push did not report the missing LFS object:\n%s", output)
 	}
+	assertServerObjectMissing(t, store, repositoryPath, missingObjectCommit)
 
 	upload := httptest.NewRecorder()
 	lfs.Handler{Storage: store}.ServeHTTP(
@@ -884,6 +893,7 @@ func TestNativeGitPushValidatesLFSPointers(t *testing.T) {
 	}
 	runGit(t, checkout, "add", "media/asset.bin")
 	runGit(t, checkout, "commit", "-m", "Write mismatched LFS pointer")
+	mismatchedObjectCommit := strings.TrimSpace(runGitOutput(t, checkout, "rev-parse", "HEAD"))
 	push = exec.Command("git", "push", "origin", "main")
 	push.Dir = checkout
 	push.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
@@ -893,6 +903,119 @@ func TestNativeGitPushValidatesLFSPointers(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "LFS object size mismatch") {
 		t.Fatalf("push did not report the LFS size mismatch:\n%s", output)
+	}
+	assertServerObjectMissing(t, store, repositoryPath, mismatchedObjectCommit)
+}
+
+func TestNativeGitPushEnforcesRepositoryObjectQuota(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is not available")
+	}
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "docs"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitPath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := directoryRegularFileBytes(filepath.Join(gitPath, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(Handler{
+		Storage:                         store,
+		MaximumRepositoryGitObjectBytes: usage,
+	})
+	defer server.Close()
+
+	checkout := filepath.Join(t.TempDir(), "docs")
+	runGit(t, "", "clone", server.URL+"/engineering/docs.git", checkout)
+	runGit(t, checkout, "config", "user.name", "alice")
+	runGit(t, checkout, "config", "user.email", "alice@localhost")
+	if err = os.WriteFile(filepath.Join(checkout, "manual.md"), []byte("documentation\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, checkout, "add", "manual.md")
+	runGit(t, checkout, "commit", "-m", "Add manual")
+	rejectedCommit := strings.TrimSpace(runGitOutput(t, checkout, "rev-parse", "HEAD"))
+
+	push := exec.Command("git", "push", "origin", "main")
+	push.Dir = checkout
+	push.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := push.CombinedOutput()
+	if err == nil {
+		t.Fatalf("push exceeding repository quota succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "repository Git object quota") {
+		t.Fatalf("push did not report the repository quota:\n%s", output)
+	}
+	assertServerObjectMissing(t, store, repositoryPath, rejectedCommit)
+}
+
+func TestNativeGitForcePushReclaimsBoundedUnreachablePacks(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is not available")
+	}
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "docs"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(Handler{Storage: store})
+	defer server.Close()
+
+	checkout := filepath.Join(t.TempDir(), "docs")
+	runGit(t, "", "clone", server.URL+"/engineering/docs.git", checkout)
+	runGit(t, checkout, "config", "user.name", "alice")
+	runGit(t, checkout, "config", "user.email", "alice@localhost")
+	base := strings.TrimSpace(runGitOutput(t, checkout, "rev-parse", "HEAD"))
+	for index := range automaticMaintenanceMinimumPacks {
+		content := fmt.Sprintf("revision %d\n", index)
+		if err := os.WriteFile(filepath.Join(checkout, "manual.md"), []byte(content), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, checkout, "add", "manual.md")
+		runGit(t, checkout, "commit", "-m", fmt.Sprintf("Revision %d", index))
+		runGit(t, checkout, "push", "origin", "main")
+	}
+	discarded := strings.TrimSpace(runGitOutput(t, checkout, "rev-parse", "HEAD"))
+	gitPath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packs, _, err := repositoryPackStats(filepath.Join(gitPath, "objects", "pack"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packs < automaticMaintenanceMinimumPacks {
+		t.Fatalf("server accumulated %d packs, want at least %d", packs, automaticMaintenanceMinimumPacks)
+	}
+
+	runGit(t, checkout, "reset", "--hard", base)
+	runGit(t, checkout, "push", "--force", "origin", "main")
+	assertServerObjectMissing(t, store, repositoryPath, discarded)
+
+	packs, _, err = repositoryPackStats(filepath.Join(gitPath, "objects", "pack"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packs != 1 {
+		t.Fatalf("maintenance left %d packs, want one", packs)
 	}
 }
 
@@ -1159,4 +1282,38 @@ func runGitOutput(t *testing.T, directory string, args ...string) string {
 		return string(output)
 	}
 	return ""
+}
+
+func assertServerObjectMissing(
+	t *testing.T,
+	store storage.Store,
+	repositoryPath repopath.Repository,
+	hash string,
+) {
+	t.Helper()
+	gitPath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repository.Storer.EncodedObject(
+		plumbing.AnyObject,
+		plumbing.NewHash(hash),
+	); !errors.Is(err, plumbing.ErrObjectNotFound) {
+		t.Fatalf("rejected object %s remains in live storage: %v", hash, err)
+	}
+
+	entries, err := os.ReadDir(filepath.Dir(gitPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := "." + filepath.Base(gitPath) + ".receive-"
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			t.Fatalf("receive quarantine was not removed: %s", entry.Name())
+		}
+	}
 }
