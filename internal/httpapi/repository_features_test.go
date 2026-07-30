@@ -8,11 +8,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -357,5 +359,164 @@ func TestRepositoryArchivesContainTheSelectedTree(t *testing.T) {
 	}
 	if _, err = archiveEntryName("api/", "../outside"); err == nil {
 		t.Fatal("unsafe archive entry was accepted")
+	}
+}
+
+func TestRepositoryArchivesPreserveExecutableAndSymlinkMetadata(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	repository, _, err := service.openBrowsableRepository(
+		context.Background(),
+		credentials,
+		"engineering/api",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := storeTestTree(
+		t,
+		repository,
+		object.TreeEntry{
+			Name: "README.md", Mode: filemode.Regular,
+			Hash: storeTestBlob(t, repository, []byte("metadata fixture\n")),
+		},
+		object.TreeEntry{
+			Name: "run.sh", Mode: filemode.Executable,
+			Hash: storeTestBlob(t, repository, []byte("#!/bin/sh\nexit 0\n")),
+		},
+		object.TreeEntry{
+			Name: "current", Mode: filemode.Symlink,
+			Hash: storeTestBlob(t, repository, []byte("run.sh")),
+		},
+	)
+	commit := storeTestCommit(t, repository, tree)
+	modified := time.Date(2024, time.January, 2, 3, 4, 6, 0, time.UTC)
+	commit.Committer.When = modified
+
+	var zipContents bytes.Buffer
+	if err = writeRepositoryZIP(tree, commit, "api-main/", &zipContents); err != nil {
+		t.Fatal(err)
+	}
+	zipReader, err := zip.NewReader(
+		bytes.NewReader(zipContents.Bytes()),
+		int64(zipContents.Len()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipEntries := make(map[string]*zip.File, len(zipReader.File))
+	for _, entry := range zipReader.File {
+		zipEntries[entry.Name] = entry
+	}
+	if len(zipEntries) != 3 {
+		t.Fatalf("ZIP entries = %v", zipEntries)
+	}
+	requireZIPEntry := func(
+		name string,
+		mode os.FileMode,
+		content string,
+	) {
+		t.Helper()
+		entry := zipEntries["api-main/"+name]
+		if entry == nil {
+			t.Fatalf("ZIP entry %q is missing", name)
+		}
+		reader, openErr := entry.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		value, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatalf("read ZIP entry %q: %v, %v", name, readErr, closeErr)
+		}
+		if entry.Mode() != mode {
+			t.Fatalf("ZIP entry %q mode = %v, want %v", name, entry.Mode(), mode)
+		}
+		if string(value) != content {
+			t.Fatalf("ZIP entry %q = %q, want %q", name, value, content)
+		}
+		if !entry.Modified.Equal(modified) {
+			t.Fatalf("ZIP entry %q modified = %v, want %v", name, entry.Modified, modified)
+		}
+	}
+	requireZIPEntry("README.md", 0o644, "metadata fixture\n")
+	requireZIPEntry("run.sh", 0o755, "#!/bin/sh\nexit 0\n")
+	requireZIPEntry("current", os.ModeSymlink|0o777, "run.sh")
+
+	var tarContents bytes.Buffer
+	if err = writeRepositoryTarGzip(tree, commit, "api-main/", &tarContents); err != nil {
+		t.Fatal(err)
+	}
+	compressed, err := gzip.NewReader(&tarContents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = compressed.Close()
+	}()
+	tarReader := tar.NewReader(compressed)
+	type tarEntry struct {
+		header  *tar.Header
+		content string
+	}
+	tarEntries := make(map[string]tarEntry)
+	for {
+		header, nextErr := tarReader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		value, readErr := io.ReadAll(tarReader)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		tarEntries[header.Name] = tarEntry{
+			header:  header,
+			content: string(value),
+		}
+	}
+	if len(tarEntries) != 3 {
+		t.Fatalf("TAR entries = %v", tarEntries)
+	}
+	for _, test := range []struct {
+		name     string
+		mode     int64
+		typeflag byte
+		linkname string
+		content  string
+	}{
+		{
+			name: "README.md", mode: 0o644,
+			typeflag: tar.TypeReg, content: "metadata fixture\n",
+		},
+		{
+			name: "run.sh", mode: 0o755,
+			typeflag: tar.TypeReg, content: "#!/bin/sh\nexit 0\n",
+		},
+		{
+			name: "current", mode: -1,
+			typeflag: tar.TypeSymlink, linkname: "run.sh",
+		},
+	} {
+		entry, ok := tarEntries["api-main/"+test.name]
+		if !ok {
+			t.Fatalf("TAR entry %q is missing", test.name)
+		}
+		if (test.mode >= 0 && entry.header.Mode != test.mode) ||
+			entry.header.Typeflag != test.typeflag ||
+			entry.header.Linkname != test.linkname ||
+			entry.content != test.content {
+			t.Fatalf("TAR entry %q = %#v, %q", test.name, entry.header, entry.content)
+		}
+		if !entry.header.ModTime.Equal(modified) {
+			t.Fatalf(
+				"TAR entry %q modified = %v, want %v",
+				test.name,
+				entry.header.ModTime,
+				modified,
+			)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -17,6 +18,17 @@ type deadlineRecorder struct {
 	readDeadlines  []time.Time
 	writeDeadlines []time.Time
 }
+
+type pipeResponseWriter struct {
+	net.Conn
+	header http.Header
+}
+
+func (w *pipeResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *pipeResponseWriter) WriteHeader(int) {}
 
 func (r *deadlineRecorder) Header() http.Header {
 	return r.header
@@ -114,6 +126,66 @@ func TestDeadlineResponseWriterFlushesAndUnwraps(t *testing.T) {
 	if writer.Unwrap() != response {
 		t.Fatal("response writer did not unwrap to its delegate")
 	}
+}
+
+func TestProtectInterruptsStalledSocketIO(t *testing.T) {
+	const timeout = 25 * time.Millisecond
+
+	t.Run("read", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer func() {
+			_ = server.Close()
+			_ = client.Close()
+		}()
+		response := &pipeResponseWriter{Conn: server, header: http.Header{}}
+		request := httptest.NewRequest(http.MethodPost, "/", nil)
+		request.Body = server
+		_, cleanup := Protect(response, request, timeout, -1)
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := request.Body.Read(make([]byte, 1))
+			result <- err
+		}()
+		var err error
+		select {
+		case err = <-result:
+		case <-time.After(time.Second):
+			t.Fatal("stalled socket read was not interrupted")
+		}
+		cleanup()
+		var networkError net.Error
+		if !errors.As(err, &networkError) || !networkError.Timeout() {
+			t.Fatalf("stalled socket read error = %v, want timeout", err)
+		}
+	})
+
+	t.Run("write", func(t *testing.T) {
+		server, client := net.Pipe()
+		defer func() {
+			_ = server.Close()
+			_ = client.Close()
+		}()
+		response := &pipeResponseWriter{Conn: server, header: http.Header{}}
+		writer, cleanup := ProtectWriter(response, timeout)
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := writer.Write([]byte("blocked response"))
+			result <- err
+		}()
+		var err error
+		select {
+		case err = <-result:
+		case <-time.After(time.Second):
+			t.Fatal("stalled socket write was not interrupted")
+		}
+		cleanup()
+		var networkError net.Error
+		if !errors.As(err, &networkError) || !networkError.Timeout() {
+			t.Fatalf("stalled socket write error = %v, want timeout", err)
+		}
+	})
 }
 
 func TestBodyTooLargeRejectsOtherErrors(t *testing.T) {

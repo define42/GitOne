@@ -45,6 +45,20 @@ func (r *stagedUploadReader) Read(buffer []byte) (int, error) {
 	return 0, io.EOF
 }
 
+type failedUploadReader struct {
+	data   []byte
+	offset int
+}
+
+func (r *failedUploadReader) Read(buffer []byte) (int, error) {
+	if r.offset < len(r.data) {
+		count := copy(buffer, r.data[r.offset:])
+		r.offset += count
+		return count, nil
+	}
+	return 0, errors.New("upload body failed")
+}
+
 func TestUploadAndDownload(t *testing.T) {
 	root := t.TempDir()
 	initializeLFSRepository(t, root)
@@ -360,6 +374,127 @@ func TestConcurrentUploadsReserveQuotaBeforeStaging(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("completed concurrent uploads left %d staging files", len(entries))
+	}
+}
+
+func TestFailedUploadReadReleasesQuotaReservation(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	const quota = int64(8)
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: quota}, nil
+		},
+	}
+
+	failedData := []byte("broken")
+	failedSum := sha256.Sum256(failedData)
+	failedRequest := httptest.NewRequest(
+		http.MethodPut,
+		"/g/r.git/info/lfs/objects/"+hex.EncodeToString(failedSum[:]),
+		&failedUploadReader{data: failedData},
+	)
+	failedRequest.ContentLength = quota
+	failedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(failedResponse, failedRequest)
+	if failedResponse.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(failedResponse.Body.String(), "upload body failed") {
+		t.Fatalf(
+			"failed upload returned %d: %s",
+			failedResponse.Code,
+			failedResponse.Body.String(),
+		)
+	}
+
+	validData := []byte("12345678")
+	validSum := sha256.Sum256(validData)
+	validResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		validResponse,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/g/r.git/info/lfs/objects/"+hex.EncodeToString(validSum[:]),
+			bytes.NewReader(validData),
+		),
+	)
+	if validResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"upload after read failure returned %d: %s",
+			validResponse.Code,
+			validResponse.Body.String(),
+		)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".gitone", "uploads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("read failure recovery left %d staging files", len(entries))
+	}
+}
+
+func TestFailedUploadPublishReleasesQuotaReservation(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	const quota = int64(8)
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: quota}, nil
+		},
+	}
+	objectsPath := filepath.Join(root, "g", "r.lfs", "objects")
+	if err := os.MkdirAll(filepath.Dir(objectsPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(objectsPath, []byte("blocks object directory"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	data := []byte("12345678")
+	sum := sha256.Sum256(data)
+	target := "/g/r.git/info/lfs/objects/" + hex.EncodeToString(sum[:])
+	failedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		failedResponse,
+		httptest.NewRequest(http.MethodPut, target, bytes.NewReader(data)),
+	)
+	if failedResponse.Code != http.StatusUnprocessableEntity {
+		t.Fatalf(
+			"failed publication returned %d: %s",
+			failedResponse.Code,
+			failedResponse.Body.String(),
+		)
+	}
+	if err := os.Remove(objectsPath); err != nil {
+		t.Fatal(err)
+	}
+
+	validResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		validResponse,
+		httptest.NewRequest(http.MethodPut, target, bytes.NewReader(data)),
+	)
+	if validResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"upload after publication failure returned %d: %s",
+			validResponse.Code,
+			validResponse.Body.String(),
+		)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".gitone", "uploads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("publication failure recovery left %d staging files", len(entries))
 	}
 }
 

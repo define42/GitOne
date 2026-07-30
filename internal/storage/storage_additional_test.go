@@ -150,6 +150,37 @@ func TestImportRepositoryLockedAndValidatedVariants(t *testing.T) {
 	}
 }
 
+func TestAdoptStagedRemoteRepositoryRollsBackPartialPublication(t *testing.T) {
+	root := t.TempDir()
+	staged := stagedRemoteRepository{
+		root:    filepath.Join(root, "staged"),
+		gitPath: filepath.Join(root, "staged", "repository.git"),
+		lfsPath: filepath.Join(root, "staged", "repository.lfs"),
+	}
+	for _, path := range []string{staged.gitPath, staged.lfsPath} {
+		if err := os.MkdirAll(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "marker"), []byte("staged"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gitPath := filepath.Join(root, "published.git")
+	lfsPath := filepath.Join(root, "missing-parent", "published.lfs")
+	if err := adoptStagedRemoteRepository(staged, gitPath, lfsPath); err == nil {
+		t.Fatal("partial remote import publication succeeded")
+	}
+	for _, path := range []string{gitPath, lfsPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("failed publication left destination %q: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(staged.lfsPath, "marker")); err != nil {
+		t.Fatalf("failed LFS rename lost staged data: %v", err)
+	}
+}
+
 func TestStoragePathListingAndDescriptionFailures(t *testing.T) {
 	missingRoot := filepath.Join(t.TempDir(), "missing")
 	groups, err := (Store{Root: missingRoot}).ListGroups()
