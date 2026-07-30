@@ -2790,7 +2790,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=12">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=13">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
 			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=32">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
@@ -2873,6 +2873,14 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		if !strings.Contains(stylesResponse.Body.String(), `:root[data-theme="`+theme+`"]`) {
 			t.Fatalf("theme styles do not contain %q", theme)
 		}
+	}
+	if !strings.Contains(stylesResponse.Body.String(), "@media (max-width: 60rem)") ||
+		!strings.Contains(stylesResponse.Body.String(), "justify-content: stretch") ||
+		!strings.Contains(
+			stylesResponse.Body.String(),
+			"grid-template-columns: repeat(2, minmax(0, 1fr))",
+		) {
+		t.Fatal("theme styles do not protect page-header copy at tablet widths")
 	}
 	diffAssetRequest := httptest.NewRequest(http.MethodGet, "/assets/diff.min.js", nil)
 	diffAssetRequest.SetBasicAuth("alice", "secret")
@@ -3001,6 +3009,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if !strings.Contains(assetResponse.Body.String(), "description.input.value") ||
 		!strings.Contains(assetResponse.Body.String(), "subgroupDescription.input.value") {
 		t.Fatal("served UI does not provide group and subgroup descriptions")
+	}
+	if !strings.Contains(
+		assetResponse.Body.String(),
+		`pageHeader("Group", data.path, data.description`,
+	) {
+		t.Fatal("served UI does not show the current group name in the page header")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "groupSettingsControl") ||
 		!strings.Contains(assetResponse.Body.String(), "groupSettingsAPIURL") ||

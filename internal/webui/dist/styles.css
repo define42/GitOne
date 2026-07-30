@@ -3226,6 +3226,25 @@ table {
   margin-bottom: 0;
 }
 
+@media (max-width: 60rem) {
+  .page-header {
+    align-items: stretch;
+    display: grid;
+    gap: 1.25rem;
+    justify-content: stretch;
+  }
+
+  .page-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+  }
+
+  .page-actions > button {
+    width: 100%;
+  }
+}
+
 @media (max-width: 45rem) {
   .site-header-inner {
     padding: 0 1rem;
@@ -3280,22 +3299,6 @@ table {
   .session-controls button .icon {
     height: 1rem;
     width: 1rem;
-  }
-
-  .page-header {
-    align-items: stretch;
-    display: grid;
-    gap: 1.25rem;
-  }
-
-  .page-actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    justify-content: stretch;
-  }
-
-  .page-actions > button {
-    width: 100%;
   }
 
   .repository-import-authentication {

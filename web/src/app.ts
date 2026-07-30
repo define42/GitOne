@@ -5585,7 +5585,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
   app.append(
     pageHeader(
       "Group",
-      "",
+      data.path,
       data.description,
       pageActions,
       [groupRoleBadge(data.role)],

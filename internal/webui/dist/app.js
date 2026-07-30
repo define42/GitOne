@@ -4240,7 +4240,7 @@ async function renderGroup(path, message) {
         createRepository.trigger,
         importRepository.trigger,
     ];
-    app.append(pageHeader("Group", "", data.description, pageActions, [groupRoleBadge(data.role)]), subgroups, repositories, danger, createSubgroup.dialog, createRepository.dialog, importRepository.dialog, ...(settingsControl ? [settingsControl.dialog] : []));
+    app.append(pageHeader("Group", data.path, data.description, pageActions, [groupRoleBadge(data.role)]), subgroups, repositories, danger, createSubgroup.dialog, createRepository.dialog, importRepository.dialog, ...(settingsControl ? [settingsControl.dialog] : []));
     if (message) {
         showStatus(message);
     }
