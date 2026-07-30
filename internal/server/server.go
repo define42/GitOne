@@ -69,8 +69,15 @@ func New(c Config) http.Handler {
 		if write {
 			need = control.RoleDeveloper
 		}
-		if repo.Name == "control" && write {
-			need = control.RoleOwner
+		if repo.Name == "control" {
+			// control.git stores the group's member roles and Argon2id token
+			// hashes. Gate reads at the same level the settings API requires
+			// (maintainer) and writes at owner, so a read- or developer-scoped
+			// member cannot clone it to harvest hashes and enumerate members.
+			need = control.RoleMaintainer
+			if write {
+				need = control.RoleOwner
+			}
 		}
 		return true, pr.Role.Allows(need)
 	}

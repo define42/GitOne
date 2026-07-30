@@ -117,6 +117,15 @@ func ExtractSourceArchive(input io.Reader, destination string) error {
 		if joinErr != nil {
 			return joinErr
 		}
+		// SafeJoin only rejects lexical escapes. A malicious archive can still
+		// escape by first extracting a symlink (e.g. "a" -> ".") and then
+		// nesting entries beneath it ("a/b" -> "../evil"), because the later
+		// writes follow the on-disk symlink. Reject any entry that traverses an
+		// already-extracted symlink; a bare Git tree never nests entries under
+		// a symlink (symlinks are leaf blobs), so honest archives are unaffected.
+		if symlinkErr := ensureNoSymlinkTraversal(destination, target); symlinkErr != nil {
+			return symlinkErr
+		}
 		switch header.Typeflag {
 		case tar.TypeReg:
 			if err = os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
@@ -161,4 +170,35 @@ func relativeParts(root, target string) []string {
 		return []string{".."}
 	}
 	return strings.Split(relative, string(filepath.Separator))
+}
+
+// ensureNoSymlinkTraversal rejects target if any already-existing path
+// component between root and target (inclusive) is a symlink, so an entry
+// cannot be written through a symlink extracted earlier in the same archive.
+func ensureNoSymlinkTraversal(root, target string) error {
+	relative, err := filepath.Rel(root, target)
+	if err != nil {
+		return err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("source archive path %q escapes the extraction root", target)
+	}
+	current := root
+	for _, part := range strings.Split(relative, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			}
+			return statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("source archive path %q traverses a symlink", target)
+		}
+	}
+	return nil
 }

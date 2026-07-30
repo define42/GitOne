@@ -184,6 +184,11 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 			switch {
 			case policy.MaximumObjectBytes > 0 && o.Size > policy.MaximumObjectBytes:
 				o.Error = &objError{422, "object exceeds the group LFS object limit"}
+			case policy.MaximumStorageBytes > 0 && o.Size > policy.MaximumStorageBytes:
+				// A single object can never fit within the total storage
+				// quota; short-circuiting here also prevents the running sum
+				// below from overflowing on an attacker-supplied huge size.
+				o.Error = &objError{422, "object exceeds the group LFS storage limit"}
 			case policy.MaximumStorageBytes > 0 &&
 				storageBytes+pendingBytes(pending)+additionalBytes > policy.MaximumStorageBytes:
 				o.Error = &objError{422, "object exceeds the group LFS storage limit"}
@@ -275,6 +280,11 @@ func (h Handler) object(
 			http.Error(w, "object exceeds the group LFS object limit", http.StatusUnprocessableEntity)
 			return
 		}
+		if policy.MaximumStorageBytes > 0 &&
+			r.ContentLength > policy.MaximumStorageBytes {
+			http.Error(w, "object exceeds the group LFS storage limit", http.StatusUnprocessableEntity)
+			return
+		}
 		stagedPath, stagedSize, err := h.stageUpload(r, oid, policy)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
@@ -347,7 +357,11 @@ func (h Handler) object(
 		defer func() {
 			_ = f.Close()
 		}()
-		st, _ := f.Stat()
+		st, statErr := f.Stat()
+		if statErr != nil {
+			http.Error(w, "storage error", 500)
+			return
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
 		w.Header().Set("ETag", `"`+oid+`"`)
@@ -383,6 +397,14 @@ func (h Handler) stageUpload(
 	limit := maximumUploadBytes
 	if policy.MaximumObjectBytes > 0 && policy.MaximumObjectBytes < limit {
 		limit = policy.MaximumObjectBytes
+	}
+	// A single object can never be published if it alone exceeds the group's
+	// total storage quota, so cap the bytes streamed to the staging file at
+	// that quota. Without this, a group with only MaximumStorageBytes set (a
+	// common configuration) would let one request write up to 100 GiB into the
+	// staging directory before publishUpload rejects it, filling the disk.
+	if policy.MaximumStorageBytes > 0 && policy.MaximumStorageBytes < limit {
+		limit = policy.MaximumStorageBytes
 	}
 	n, err := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(r.Body, limit+1))
 	if err != nil {

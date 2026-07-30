@@ -46,6 +46,33 @@ func (r Role) Allows(need Role) bool {
 	return rank[r] >= rank[need]
 }
 
+// clone returns a deep copy whose Members map and Tokens slice do not share
+// storage with the receiver. The control store caches documents; handing out
+// references to the cached Members map would let a caller mutate the shared,
+// process-wide authorization state for every later Authenticate call.
+func (d Document) clone() Document {
+	copied := d
+	if d.Members != nil {
+		members := make(map[string]Role, len(d.Members))
+		for name, role := range d.Members {
+			members[name] = role
+		}
+		copied.Members = members
+	}
+	if d.Tokens != nil {
+		tokens := make([]Token, len(d.Tokens))
+		for i, token := range d.Tokens {
+			if token.ExpiresAt != nil {
+				expiresAt := *token.ExpiresAt
+				token.ExpiresAt = &expiresAt
+			}
+			tokens[i] = token
+		}
+		copied.Tokens = tokens
+	}
+	return copied
+}
+
 func ValidateSettings(d Document) error {
 	for name, role := range d.Members {
 		if strings.TrimSpace(name) == "" {
