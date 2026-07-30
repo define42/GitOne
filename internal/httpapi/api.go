@@ -1082,6 +1082,18 @@ func parentGroup(group string) string {
 
 func parseRepositoryPath(value string) (repopath.Repository, error) {
 	repository, _, err := repopath.ParseGitRequestPath("/" + strings.TrimSuffix(value, ".git") + ".git/info/refs")
+	if err != nil {
+		return repository, err
+	}
+	// control.git is a group's authorization document, not an addressable
+	// repository. It is created, read, and mutated exclusively through the
+	// group settings API and the git receive-pack owner check. Rejecting the
+	// reserved name here blocks every repository API vector (browse, blob,
+	// history, commit diff, file edit, branch create, direct merge, review,
+	// build, archive import) from reading or rewriting control.json.
+	if repository.Name == "control" {
+		return repopath.Repository{}, errors.New("reserved repository name")
+	}
 	return repository, err
 }
 

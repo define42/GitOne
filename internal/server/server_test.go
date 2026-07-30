@@ -503,6 +503,95 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 	}
 }
 
+func TestControlRepositoryAccessIsRestricted(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	controls := control.NewStore(root)
+	document, err := controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Members["bob"] = control.RoleDeveloper
+	document.Members["carol"] = control.RoleMaintainer
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root: root,
+		Directory: staticDirectory{
+			"alice": "secret",
+			"bob":   "bob-secret",
+			"carol": "carol-secret",
+		},
+	})
+
+	cloneControl := func(username, password string) int {
+		t.Helper()
+		request := httptest.NewRequest(
+			http.MethodGet,
+			"/engineering/control.git/info/refs?service=git-upload-pack",
+			nil,
+		)
+		request.SetBasicAuth(username, password)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	if code := cloneControl("bob", "bob-secret"); code != http.StatusForbidden {
+		t.Fatalf("developer cloned control.git and could read token hashes: status %d", code)
+	}
+	if code := cloneControl("carol", "carol-secret"); code != http.StatusOK {
+		t.Fatalf("maintainer could not clone control.git: status %d", code)
+	}
+
+	// The control repository must not be addressable through the repository
+	// API; otherwise a read member could dump control.json and a developer
+	// could rewrite it to escalate their own role.
+	for _, target := range []string{
+		"/api/repositories/engineering%2Fcontrol/branches",
+		"/api/repositories/engineering%2Fcontrol/blob/main/control.json",
+	} {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		request.SetBasicAuth("carol", "carol-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf(
+				"control repository was reachable via %s: status %d: %s",
+				target,
+				response.Code,
+				response.Body.String(),
+			)
+		}
+	}
+
+	escalation := `{"content":"{\"version\":4,\"group\":\"engineering\",\"inherit\":true,` +
+		`\"visibility\":\"private\",\"members\":{\"alice\":\"owner\",\"bob\":\"owner\"}}",` +
+		`"expectedCommit":"0000000000000000000000000000000000000000"}`
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/api/repositories/engineering%2Fcontrol/files/main/control.json",
+		strings.NewReader(escalation),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.SetBasicAuth("bob", "bob-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code >= http.StatusOK && response.Code < http.StatusMultipleChoices {
+		t.Fatalf("developer rewrote control.json via the file API: status %d", response.Code)
+	}
+	after, err := controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Members["bob"] != control.RoleDeveloper {
+		t.Fatalf("developer escalated their own role: %#v", after.Members)
+	}
+}
+
 func TestLFSBatchUploadAndDownloadOverHTTP(t *testing.T) {
 	root := t.TempDir()
 	var handler http.Handler
