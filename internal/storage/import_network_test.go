@@ -329,7 +329,7 @@ func TestRemoteImportRejectsRedirectToPrivateAddress(t *testing.T) {
 	})
 	ctx := WithImportNetworkPolicy(context.Background(), policy)
 	store := Store{Root: t.TempDir()}
-	_, err = store.stageRemoteRepository(ctx, ImportRepositoryOptions{
+	_, err = store.stageRemoteRepository(ctx, "source", ImportRepositoryOptions{
 		URL: "http://origin.example:" + redirectURL.Port() + "/repository.git",
 	})
 	requireBlockedImportAddress(t, err)

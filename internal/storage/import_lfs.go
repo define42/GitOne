@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/lfspointer"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -67,6 +68,7 @@ func importRemoteLFS(
 	repository *git.Repository,
 	options ImportRepositoryOptions,
 	lfsPath string,
+	existingLFSUsage int64,
 ) error {
 	objects, err := reachableLFSObjects(repository)
 	if err != nil {
@@ -95,6 +97,10 @@ func importRemoteLFS(
 		return sorted[i].OID < sorted[j].OID
 	})
 
+	if err = enforceImportLFSPolicy(options.LFSPolicy, sorted, existingLFSUsage); err != nil {
+		return err
+	}
+
 	client := newImportHTTPClient()
 	for start := 0; start < len(sorted); start += importLFSBatchSize {
 		end := min(start+importLFSBatchSize, len(sorted))
@@ -107,6 +113,45 @@ func importRemoteLFS(
 			sorted[start:end],
 		); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// enforceImportLFSPolicy rejects an import whose reachable LFS objects would
+// breach the destination group's per-object or total storage limits, before any
+// object is downloaded. Sizes are attacker-controlled (the remote LFS server is
+// untrusted), so the total is accumulated overflow-safely against the remaining
+// budget rather than summed first.
+func enforceImportLFSPolicy(
+	policy control.LFSPolicy,
+	objects []importLFSObject,
+	existingUsage int64,
+) error {
+	remaining := int64(-1)
+	if policy.MaximumStorageBytes > 0 {
+		remaining = policy.MaximumStorageBytes - existingUsage
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+	var total int64
+	for _, object := range objects {
+		if object.Size < 0 {
+			return fmt.Errorf("remote Git LFS object %s has an invalid size", object.OID)
+		}
+		if policy.MaximumObjectBytes > 0 && object.Size > policy.MaximumObjectBytes {
+			return fmt.Errorf(
+				"imported Git LFS object %s exceeds the group's %d-byte object limit",
+				object.OID,
+				policy.MaximumObjectBytes,
+			)
+		}
+		if remaining >= 0 {
+			if object.Size > remaining-total {
+				return errors.New("imported Git LFS objects exceed the group's storage limit")
+			}
+			total += object.Size
 		}
 	}
 	return nil

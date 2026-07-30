@@ -13,9 +13,31 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 )
+
+func TestEnforceImportLFSPolicy(t *testing.T) {
+	objects := []importLFSObject{{OID: "a", Size: 100}, {OID: "b", Size: 200}}
+
+	if err := enforceImportLFSPolicy(control.LFSPolicy{}, objects, 1<<40); err != nil {
+		t.Fatalf("unbounded policy rejected an import: %v", err)
+	}
+	if err := enforceImportLFSPolicy(control.LFSPolicy{MaximumObjectBytes: 150}, objects, 0); err == nil {
+		t.Fatal("object exceeding the per-object limit was accepted")
+	}
+	if err := enforceImportLFSPolicy(control.LFSPolicy{MaximumStorageBytes: 500}, objects, 250); err == nil {
+		t.Fatal("import exceeding remaining storage was accepted")
+	}
+	if err := enforceImportLFSPolicy(control.LFSPolicy{MaximumStorageBytes: 500}, objects, 200); err != nil {
+		t.Fatalf("import within remaining storage rejected: %v", err)
+	}
+	overflow := []importLFSObject{{OID: "x", Size: 1 << 62}, {OID: "y", Size: 1 << 62}}
+	if err := enforceImportLFSPolicy(control.LFSPolicy{MaximumStorageBytes: 1 << 40}, overflow, 0); err == nil {
+		t.Fatal("object sizes that would overflow the accumulator were accepted")
+	}
+}
 
 func TestImportRemoteLFSWithoutPointersDoesNotContactEndpoint(t *testing.T) {
 	var requests atomic.Int64
@@ -51,6 +73,7 @@ func TestImportRemoteLFSWithoutPointersDoesNotContactEndpoint(t *testing.T) {
 		repository,
 		ImportRepositoryOptions{URL: remote.URL + "/source/api.git"},
 		lfsPath,
+		0,
 	); err != nil {
 		t.Fatal(err)
 	}

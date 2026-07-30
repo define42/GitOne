@@ -916,11 +916,16 @@ func (a API) importRepository(ctx context.Context, input *importRepositoryInput)
 	if err = a.ImportNetworkPolicy.ValidateURL(ctx, remoteURL); err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	document, err := a.Resolver.Controls.Load(ctx, repository.Group())
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not load group LFS policy", err)
+	}
 	importContext := storage.WithImportNetworkPolicy(ctx, a.ImportNetworkPolicy)
 	err = a.Storage.ImportRepositoryValidated(importContext, repository, storage.ImportRepositoryOptions{
-		URL:      remoteURL,
-		Username: username,
-		Password: input.Body.Password,
+		URL:       remoteURL,
+		Username:  username,
+		Password:  input.Body.Password,
+		LFSPolicy: document.LFS,
 	}, func() error {
 		a.Resolver.Controls.Invalidate(repository.Group())
 		_, authorizeErr := a.authorizeRepository(

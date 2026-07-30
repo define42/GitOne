@@ -37,6 +37,12 @@ type ImportRepositoryOptions struct {
 	URL      string
 	Username string
 	Password string
+	// LFSPolicy caps the Git LFS objects an import may pull into the destination
+	// group. The remote import downloads objects from a server the caller does
+	// not control, so - like the interactive upload path - it must honor the
+	// group's per-object and total storage limits rather than the fixed 100 GiB
+	// import ceiling. The zero value imposes no group limit.
+	LFSPolicy control.LFSPolicy
 }
 
 type RemoteImportError struct {
@@ -217,7 +223,7 @@ func (s Store) ImportRepositoryValidated(
 	if err := s.checkImportDestination(r); err != nil {
 		return err
 	}
-	staged, err := s.stageRemoteRepository(ctx, options)
+	staged, err := s.stageRemoteRepository(ctx, r.Group(), options)
 	if err != nil {
 		return err
 	}
@@ -274,7 +280,7 @@ func (s Store) importRepository(
 	if err != nil {
 		return err
 	}
-	staged, err := s.stageRemoteRepository(ctx, options)
+	staged, err := s.stageRemoteRepository(ctx, r.Group(), options)
 	if err != nil {
 		return err
 	}
@@ -297,8 +303,17 @@ type stagedRemoteRepository struct {
 
 func (s Store) stageRemoteRepository(
 	ctx context.Context,
+	group string,
 	options ImportRepositoryOptions,
 ) (stagedRemoteRepository, error) {
+	var existingLFSUsage int64
+	if options.LFSPolicy.MaximumStorageBytes > 0 {
+		var usageErr error
+		existingLFSUsage, usageErr = s.groupLFSUsage(group)
+		if usageErr != nil {
+			return stagedRemoteRepository{}, usageErr
+		}
+	}
 	temporaryRoot, err := s.newImportStagingDirectory()
 	if err != nil {
 		return stagedRemoteRepository{}, err
@@ -341,11 +356,68 @@ func (s Store) stageRemoteRepository(
 			return stagedRemoteRepository{}, configErr
 		}
 	}
-	if err = importRemoteLFS(ctx, cloned, options, staged.lfsPath); err != nil {
+	if err = importRemoteLFS(ctx, cloned, options, staged.lfsPath, existingLFSUsage); err != nil {
 		_ = os.RemoveAll(temporaryRoot)
 		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
 	}
 	return staged, nil
+}
+
+// groupLFSUsage sums the bytes stored in every repository's LFS object tree in
+// the group, mirroring the accounting the interactive upload path enforces.
+func (s Store) groupLFSUsage(group string) (int64, error) {
+	root, err := s.GroupPath(group)
+	if err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, repository := range entries {
+		if !repository.IsDir() || !strings.HasSuffix(repository.Name(), ".lfs") {
+			continue
+		}
+		objects := filepath.Join(root, repository.Name(), "objects")
+		walkErr := filepath.WalkDir(objects, func(_ string, entry os.DirEntry, walkErr error) error {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() || !isLFSObjectName(entry.Name()) {
+				return nil
+			}
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			total += info.Size()
+			return nil
+		})
+		if walkErr != nil {
+			return 0, walkErr
+		}
+	}
+	return total, nil
+}
+
+func isLFSObjectName(name string) bool {
+	if len(name) != 64 {
+		return false
+	}
+	for _, character := range name {
+		if !((character >= '0' && character <= '9') ||
+			(character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func adoptStagedRemoteRepository(

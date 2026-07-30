@@ -467,6 +467,7 @@ func TestRepositoryCreationFilesystemFailures(t *testing.T) {
 	}
 	if _, err := (Store{Root: blockedRoot}).stageRemoteRepository(
 		context.Background(),
+		"source",
 		ImportRepositoryOptions{URL: "unused"},
 	); err == nil {
 		t.Fatal("remote repository was staged below a regular file")
