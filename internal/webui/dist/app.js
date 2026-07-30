@@ -198,7 +198,7 @@ function repositoryURL(groupPath, repository, username) {
 function repositoryBrowserURL(repository, options = {}) {
     const encodedRepository = repository.split("/").map(encodeURIComponent).join("/");
     const url = new URL(`/repositories/${encodedRepository}`, window.location.origin);
-    if (options.ref && options.ref !== "main") {
+    if (options.ref) {
         url.searchParams.set("ref", options.ref);
     }
     if (options.path) {
@@ -306,6 +306,9 @@ function setRepositoryLocation(route) {
 function repositoryBranchesAPIURL(repository) {
     return `/api/repositories/${encodeURIComponent(repository)}/branches`;
 }
+function repositoryDefaultBranchAPIURL(repository) {
+    return `/api/repositories/${encodeURIComponent(repository)}/default-branch`;
+}
 function repositoryBranchAPIURL(repository, branch) {
     return `${repositoryBranchesAPIURL(repository)}/${encodeURIComponent(branch)}`;
 }
@@ -382,7 +385,7 @@ function currentRepository() {
         : 1;
     return {
         repository,
-        ref: parameters.get("ref") || "main",
+        ref: parameters.get("ref") || "",
         path: parameters.get("path") || "",
         file,
         view: requestedView === "history" ||
@@ -846,6 +849,31 @@ function repositoryRenameControl(route, groupPath, repositoryName) {
         }
     });
     return { trigger, dialog };
+}
+function repositoryDefaultBranchControl(route, branches) {
+    if (!branches.canManage ||
+        route.ref === branches.defaultBranch ||
+        !branches.branches.some((branch) => branch.name === route.ref)) {
+        return null;
+    }
+    const trigger = actionButton("Set as default", "check", "secondary");
+    trigger.title = `Make ${route.ref} the default branch`;
+    trigger.addEventListener("click", async () => {
+        trigger.disabled = true;
+        try {
+            await request(repositoryDefaultBranchAPIURL(route.repository), {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ branch: route.ref }),
+            });
+            window.location.assign(repositoryBrowserURL(route.repository));
+        }
+        catch (reason) {
+            showStatus(reason instanceof Error ? reason.message : "Could not change the default branch.", true);
+            trigger.disabled = false;
+        }
+    });
+    return trigger;
 }
 function repositoryImportControl(groupPath) {
     const trigger = actionButton("Import bare Git", "download", "primary");
@@ -2374,9 +2402,10 @@ function repositoryBranchComparison(route, data) {
         sourceOption.value = branch.name;
         source.append(sourceOption);
     }
-    const selectedTarget = data.branches.some((branch) => branch.name === route.ref)
-        ? route.ref
-        : data.defaultBranch;
+    const selectedTarget = data.branches.find((branch) => branch.name === route.ref)?.name
+        ?? data.branches.find((branch) => branch.name === data.defaultBranch)?.name
+        ?? data.branches[0]?.name
+        ?? "";
     target.value = selectedTarget;
     const syncSource = () => {
         for (const option of source.options) {
@@ -3757,13 +3786,77 @@ async function repositoryReadme(route, content) {
         return null;
     }
 }
-async function renderRepositoryBrowser(route) {
-    stopRepositoryBuildPolling();
-    setRepositoryLocation(route);
+function renderEmptyRepositoryBrowser(route, branches, group) {
     const repositoryParts = route.repository.split("/");
     const repositoryName = repositoryParts.at(-1) ?? route.repository;
     const groupPath = repositoryParts.slice(0, -1).join("/");
-    const branchesRequest = request(repositoryBranchesAPIURL(route.repository));
+    const repository = group.repositories.find((candidate) => candidate.name === repositoryName);
+    document.title = `${route.repository} · GitOne`;
+    app.replaceChildren();
+    const repositoryDescription = element("p");
+    repositoryDescription.className = "repository-page-description";
+    repositoryDescription.append(element("strong", repositoryName));
+    const description = repository?.description.trim();
+    if (description) {
+        repositoryDescription.append(document.createTextNode(` — ${description}`));
+    }
+    const branchCreator = repositoryBranchCreator(route, branches);
+    const branchComparison = repositoryBranchComparison(route, branches);
+    const clone = cloneControl(repositoryURL(groupPath, repositoryName, group.username));
+    const rename = group.role === "maintainer" || group.role === "owner"
+        ? repositoryRenameControl(route, groupPath, repositoryName)
+        : null;
+    const branchLabel = element("label");
+    const branchLabelText = element("span");
+    branchLabelText.append(icon("git-branch"), document.createTextNode("Branch"));
+    const branchSelect = element("select");
+    branchSelect.disabled = true;
+    branchSelect.append(element("option", "No branches"));
+    branchLabel.append(branchLabelText, branchSelect);
+    const branchPicker = element("div");
+    branchPicker.className = "branch-picker";
+    branchPicker.append(branchLabel, branchCreator.trigger, branchComparison.trigger);
+    const branchControl = element("div");
+    branchControl.className = "branch-control";
+    branchControl.append(branchPicker);
+    const repositoryActions = element("div");
+    repositoryActions.className = "repository-actions";
+    repositoryActions.append(...(rename ? [rename.trigger] : []), clone.trigger);
+    const toolbar = element("div");
+    toolbar.className = "repository-toolbar";
+    toolbar.append(branchControl, repositoryActions);
+    const overview = element("section");
+    overview.className = "repository-overview";
+    overview.append(toolbar);
+    const content = element("section");
+    content.className = "content-section";
+    content.append(emptyState("This repository has no browsable default. Push a commit to create its first branch."));
+    app.append(repositoryDescription, overview, repositoryNavigation(route), branchCreator.dialog, branchComparison.dialog, clone.dialog, ...(rename ? [rename.dialog] : []), content);
+}
+async function renderRepositoryBrowser(route) {
+    stopRepositoryBuildPolling();
+    const repositoryParts = route.repository.split("/");
+    const repositoryName = repositoryParts.at(-1) ?? route.repository;
+    const groupPath = repositoryParts.slice(0, -1).join("/");
+    const [branches, group] = await Promise.all([
+        request(repositoryBranchesAPIURL(route.repository)),
+        request(apiGroupURL(groupPath)).catch(() => ({
+            path: groupPath,
+            description: "",
+            username: "",
+            role: "read",
+            subgroups: [],
+            repositories: [{ name: repositoryName, description: "" }],
+        })),
+    ]);
+    if (!route.ref) {
+        route = { ...route, ref: branches.defaultRef };
+    }
+    setRepositoryLocation(route);
+    if (!route.ref) {
+        renderEmptyRepositoryBrowser(route, branches, group);
+        return;
+    }
     const commitParameters = new URLSearchParams({
         page: String(route.view === "history" ? route.page : 1),
         perPage: String(route.view === "history" ? 50 : 1),
@@ -3781,19 +3874,9 @@ async function renderRepositoryBrowser(route) {
     const buildsRequest = route.view === "builds" || (route.view === "files" && route.file === null)
         ? request(repositoryBuildsAPIURL(route.repository))
         : Promise.resolve(null);
-    const groupRequest = request(apiGroupURL(groupPath)).catch(() => ({
-        path: groupPath,
-        description: "",
-        username: "",
-        role: "read",
-        subgroups: [],
-        repositories: [{ name: repositoryName, description: "" }],
-    }));
-    const [branches, commits, content, group, builds] = await Promise.all([
-        branchesRequest,
+    const [commits, content, builds] = await Promise.all([
         commitsRequest,
         contentRequest,
-        groupRequest,
         buildsRequest,
     ]);
     const repository = group.repositories.find((candidate) => candidate.name === repositoryName);
@@ -3823,7 +3906,9 @@ async function renderRepositoryBrowser(route) {
     branchLabel.append(branchLabelText);
     const branchSelect = element("select");
     for (const branch of branches.branches) {
-        const option = element("option", branch.name);
+        const option = element("option", branch.name === branches.defaultBranch
+            ? `${branch.name} (default)`
+            : branch.name);
         option.value = branch.name;
         branchSelect.append(option);
     }
@@ -3862,10 +3947,11 @@ async function renderRepositoryBrowser(route) {
     }
     const repositoryActions = element("div");
     repositoryActions.className = "repository-actions";
+    const setDefault = repositoryDefaultBranchControl(route, branches);
     const rename = group.role === "maintainer" || group.role === "owner"
         ? repositoryRenameControl(route, groupPath, repositoryName)
         : null;
-    repositoryActions.append(...(rename ? [rename.trigger] : []), archive.trigger, clone.trigger);
+    repositoryActions.append(...(setDefault ? [setDefault] : []), ...(rename ? [rename.trigger] : []), archive.trigger, clone.trigger);
     toolbar.append(branchControl, repositoryActions);
     overview.append(toolbar);
     const fileCreator = content !== null && "entries" in content && content.canEdit

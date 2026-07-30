@@ -48,6 +48,16 @@ type createRepositoryBranchInput struct {
 	From       string `query:"from" doc:"Existing branch from which the new branch is created"`
 }
 
+type updateRepositoryDefaultBranchBody struct {
+	Branch string `json:"branch" minLength:"1" doc:"Existing branch that becomes the repository default"`
+}
+
+type updateRepositoryDefaultBranchInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Body       updateRepositoryDefaultBranchBody
+}
+
 type compareRepositoryBranchesInput struct {
 	AuthInput
 	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
@@ -174,9 +184,19 @@ type repositoryBranch struct {
 type repositoryBranchesOutput struct {
 	Body struct {
 		Repository    string             `json:"repository"`
-		DefaultBranch string             `json:"defaultBranch"`
+		DefaultBranch string             `json:"defaultBranch" doc:"Existing branch selected by symbolic HEAD; empty when HEAD is detached, tag-backed, or missing"`
+		DefaultRef    string             `json:"defaultRef" doc:"Reference used when no branch is explicitly requested; empty only for repositories without a browsable commit"`
 		CanWrite      bool               `json:"canWrite" doc:"Whether the authenticated user can create branches and merge requests"`
+		CanManage     bool               `json:"canManage" doc:"Whether the authenticated user can change repository settings"`
 		Branches      []repositoryBranch `json:"branches"`
+	}
+}
+
+type updateRepositoryDefaultBranchOutput struct {
+	Body struct {
+		Repository    string `json:"repository"`
+		DefaultBranch string `json:"defaultBranch"`
+		DefaultRef    string `json:"defaultRef"`
 	}
 }
 
@@ -341,6 +361,14 @@ func registerRepositoryBrowser(api huma.API, service API) {
 	}), service.createRepositoryBranch)
 
 	huma.Register(api, protected(huma.Operation{
+		OperationID: "update-repository-default-branch",
+		Method:      http.MethodPut,
+		Path:        "/api/repositories/{repository}/default-branch",
+		Summary:     "Change the repository default branch",
+		Tags:        []string{"Repository browser"},
+	}), service.updateRepositoryDefaultBranch)
+
+	huma.Register(api, protected(huma.Operation{
 		OperationID: "compare-repository-branches",
 		Method:      http.MethodGet,
 		Path:        "/api/repositories/{repository}/compare",
@@ -471,13 +499,107 @@ func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranch
 	sort.Slice(branches, func(left, right int) bool {
 		return branches[left].Name < branches[right].Name
 	})
+	defaultBranch, defaultRef := repositoryDefaultReferences(repository, branches)
 
 	output := &repositoryBranchesOutput{}
 	output.Body.Repository = parsed.Full()
-	output.Body.DefaultBranch = "main"
+	output.Body.DefaultBranch = defaultBranch
+	output.Body.DefaultRef = defaultRef
 	_, writeErr := a.authorizeRepository(ctx, input.AuthInput, parsed, control.RoleDeveloper)
 	output.Body.CanWrite = writeErr == nil
+	_, manageErr := a.authorizeRepository(ctx, input.AuthInput, parsed, control.RoleMaintainer)
+	output.Body.CanManage = manageErr == nil
 	output.Body.Branches = branches
+	return output, nil
+}
+
+func repositoryDefaultReferences(
+	repository *git.Repository,
+	branches []repositoryBranch,
+) (string, string) {
+	available := make(map[string]struct{}, len(branches))
+	for _, branch := range branches {
+		available[branch.Name] = struct{}{}
+	}
+
+	if head, err := repository.Reference(plumbing.HEAD, false); err == nil &&
+		head.Type() == plumbing.SymbolicReference &&
+		head.Target().IsBranch() {
+		name := head.Target().Short()
+		if _, ok := available[name]; ok {
+			if _, commitErr := resolveBrowserCommit(repository, name); commitErr == nil {
+				return name, name
+			}
+		}
+	}
+	if _, err := resolveBrowserCommit(repository, plumbing.HEAD.Short()); err == nil {
+		return "", plumbing.HEAD.Short()
+	}
+	if _, ok := available["main"]; ok {
+		if _, err := resolveBrowserCommit(repository, "main"); err == nil {
+			return "", "main"
+		}
+	}
+	for _, branch := range branches {
+		if _, err := resolveBrowserCommit(repository, branch.Name); err == nil {
+			return "", branch.Name
+		}
+	}
+	return "", ""
+}
+
+func (a API) updateRepositoryDefaultBranch(
+	ctx context.Context,
+	input *updateRepositoryDefaultBranchInput,
+) (*updateRepositoryDefaultBranchOutput, error) {
+	branch, err := validatedBranchReference(input.Body.Branch)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid default branch", err)
+	}
+	parsed, err := parseRepositoryPath(input.Repository)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if parsed.Name == "control" {
+		return nil, huma.Error400BadRequest("the control repository default branch cannot be changed")
+	}
+	releaseOperation, err := a.acquireRepositoryOperationLocks(parsed)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+
+	repository, parsed, err := a.openRepository(
+		ctx,
+		input.AuthInput,
+		input.Repository,
+		control.RoleMaintainer,
+	)
+	if err != nil {
+		return nil, err
+	}
+	reference, err := repository.Reference(branch, true)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil, huma.Error404NotFound("default branch not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not read default branch", err)
+	}
+	if _, err = repository.CommitObject(reference.Hash()); err != nil {
+		return nil, huma.Error409Conflict("default branch does not point to a commit", err)
+	}
+	if err = repository.Storer.SetReference(
+		plumbing.NewSymbolicReference(plumbing.HEAD, branch),
+	); err != nil {
+		return nil, huma.Error409Conflict("could not change default branch", err)
+	}
+
+	output := &updateRepositoryDefaultBranchOutput{}
+	output.Body.Repository = parsed.Full()
+	output.Body.DefaultBranch = input.Body.Branch
+	output.Body.DefaultRef = input.Body.Branch
 	return output, nil
 }
 

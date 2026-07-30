@@ -2897,7 +2897,10 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if !strings.Contains(assetResponse.Body.String(), "repositoryBrowserURL") ||
 		!strings.Contains(assetResponse.Body.String(), "renderRepositoryBrowser") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryBranchesAPIURL") ||
-		!strings.Contains(assetResponse.Body.String(), `parameters.get("ref") || "main"`) ||
+		!strings.Contains(assetResponse.Body.String(), `parameters.get("ref") || ""`) ||
+		!strings.Contains(assetResponse.Body.String(), "branches.defaultRef") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryDefaultBranchAPIURL") ||
+		!strings.Contains(assetResponse.Body.String(), `"Set as default"`) ||
 		!strings.Contains(assetResponse.Body.String(), `branchSelect.addEventListener("change"`) ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryBranchCreator") ||
 		!strings.Contains(assetResponse.Body.String(), "repositoryBranchAPIURL") ||
