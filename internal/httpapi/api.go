@@ -543,7 +543,7 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	if !principal.Role.Allows(control.RoleOwner) {
 		if ownerOnlyGroupSettingsChanged(current, document) {
 			return nil, huma.Error403Forbidden(
-				"only group owners can change members, visibility, or LFS policy",
+				"only group owners can change members, visibility, inheritance, or LFS policy",
 			)
 		}
 		if ownerTokensChanged(current.Tokens, document.Tokens) {
@@ -569,8 +569,14 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 }
 
 func ownerOnlyGroupSettingsChanged(current, updated control.Document) bool {
+	// Inherit governs whether the subgroup falls through to its ancestors'
+	// members and tokens for authorization (see auth.Resolver, which walks
+	// parents only while Inherit is set). Flipping it re-scopes who can access
+	// the group, so it is an owner-only change exactly like membership,
+	// visibility, and LFS policy.
 	return !maps.Equal(current.Members, updated.Members) ||
 		current.Visibility != updated.Visibility ||
+		current.Inherit != updated.Inherit ||
 		current.LFS != updated.LFS
 }
 

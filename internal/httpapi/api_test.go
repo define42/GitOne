@@ -403,6 +403,12 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 			},
 		},
 		{
+			name: "inherit",
+			change: func(body *updateGroupSettingsBody) {
+				body.Inherit = !body.Inherit
+			},
+		},
+		{
 			name: "LFS policy",
 			change: func(body *updateGroupSettingsBody) {
 				body.LFS.MaximumObjectBytes = 1024
