@@ -23,12 +23,13 @@ export LDAP_URL='ldaps://localhost:389'
 export LDAP_BASE_DN='dc=glauth,dc=com'
 export LDAP_USER_DOMAIN='example.com'
 export LDAP_USER_FILTER='(mail=%s)'
+export LDAP_CANONICAL_ATTRIBUTE='mail'
 export GITONE_SESSION_HASH_KEY='<base64-encoded 64-byte key>'
 export GITONE_SESSION_BLOCK_KEY='<base64-encoded 32-byte key>'
 make run RUN_ARGS="-root ./data -listen :8080 -public-url http://localhost:8080"
 ```
 
-The included development directory uses a self-signed certificate, so its compose configuration sets `LDAP_SKIP_TLS_VERIFY=true`. Configure `LDAP_CA_FILE` instead for a trusted deployment. `LDAP_USER_DOMAIN` is appended to usernames that do not already contain `@`. Set `LDAP_STARTTLS=true` when using StartTLS over an `ldap://` URL. `LDAP_CONNECTION_TIMEOUT` defaults to `5s`.
+The included development directory uses a self-signed certificate, so its compose configuration sets `LDAP_SKIP_TLS_VERIFY=true`. Configure `LDAP_CA_FILE` instead for a trusted deployment. Users must log in with a complete address in `LDAP_USER_DOMAIN`; short names and other domains are rejected. After binding and finding exactly one entry with `LDAP_USER_FILTER`, GitOne uses the entry's single `LDAP_CANONICAL_ATTRIBUTE` value as the authorization and audit principal. The canonical attribute defaults to `mail`; canonical mail values are normalized to lowercase and must use `LDAP_USER_DOMAIN`. Set `LDAP_STARTTLS=true` when using StartTLS over an `ldap://` URL. `LDAP_CONNECTION_TIMEOUT` defaults to `5s`.
 
 The session keys encrypt and authenticate browser cookies and can be generated with `openssl rand -base64 64` and `openssl rand -base64 32`. When they are omitted, GitOne generates ephemeral keys and existing browser sessions end on restart. Sessions last 12 hours by default; configure `GITONE_SESSION_MAX_AGE` with a Go duration such as `8h`. Cookie `Secure` mode follows an HTTPS public URL and can be overridden with `GITONE_SESSION_SECURE`.
 
@@ -49,9 +50,9 @@ supported because they mutate server state only through the web API.
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and sign in with LDAP credentials. After LDAP validation, GitOne stores only the username in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner. Creating a subgroup requires maintainer access inherited from its parent; the subgroup starts without direct members, so its creator and all other users keep the roles they inherit from parent groups. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser.
+Open [http://localhost:8080](http://localhost:8080) and sign in with a full-domain LDAP identity such as `alice@example.com`. After LDAP validation, GitOne stores only the canonical directory identity in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner. Creating a subgroup requires maintainer access inherited from its parent; the subgroup starts without direct members, so its creator and all other users keep the roles they inherit from parent groups. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser.
 
-The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group maintainers can create repositories, mirror every Git ref and tag plus every reachable Git LFS object from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository. Archive uploads contain Git data only. Group maintainers can open Settings to change the group name and description, inheritance, and non-owner group tokens. Only group owners can change members and roles, repository visibility, the LFS policy, or owner tokens. Every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages let maintainers rename the repository, provide a copyable `git clone` command containing the authenticated username, such as `git clone http://alice@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
+The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group maintainers can create repositories, mirror every Git ref and tag plus every reachable Git LFS object from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository. Archive uploads contain Git data only. Group maintainers can open Settings to change the group name and description, inheritance, and non-owner group tokens. Only group owners can change members and roles, repository visibility, the LFS policy, or owner tokens. Every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages let maintainers rename the repository, provide a copyable `git clone` command containing the authenticated identity, such as `git clone http://alice%40example.com@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
 
 The repository viewer follows each repository's symbolic `HEAD`, can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Maintainers can select an existing branch as the repository default. Its Builds tab shows queued, running, successful, and failed jobs, polls active jobs automatically, and exposes expandable live logs. Users with developer access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
@@ -245,28 +246,28 @@ LFS pointer whose object is missing or has the wrong size.
 Create the first group with LDAP credentials. The authenticated user becomes its owner:
 
 ```bash
-curl -u alice:directory-password -X POST \
+curl -u 'alice@example.com:directory-password' -X POST \
   'http://localhost:8080/api/groups/engineering?description=Engineering%20projects'
 ```
 
 Create a subgroup as its parent owner:
 
 ```bash
-curl -u alice:directory-password -X POST \
+curl -u 'alice@example.com:directory-password' -X POST \
   'http://localhost:8080/api/groups/engineering%2Fbackend?description=Backend%20services'
 ```
 
 Create a repository:
 
 ```bash
-curl -u alice:directory-password -X POST \
+curl -u 'alice@example.com:directory-password' -X POST \
   'http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi?initializeReadme=true&description=Backend%20API'
 ```
 
 Import a bare repository archive:
 
 ```bash
-curl -u alice:directory-password -X POST \
+curl -u 'alice@example.com:directory-password' -X POST \
   -H 'Content-Type: application/gzip' \
   --data-binary @api.git.tar.gz \
   'http://localhost:8080/api/repositories/engineering%2Fbackend%2Fapi/import-archive?filename=api.git.tar.gz'
@@ -277,19 +278,19 @@ Uploaded archives are extracted with entry-count and expanded-size limits. Paths
 Clone the repository and enter the LDAP password when Git prompts:
 
 ```bash
-git clone http://alice@localhost:8080/engineering/backend/api.git
+git clone http://alice%40example.com@localhost:8080/engineering/backend/api.git
 ```
 
 List top-level groups:
 
 ```bash
-curl -u alice:directory-password http://localhost:8080/api/groups
+curl -u 'alice@example.com:directory-password' http://localhost:8080/api/groups
 ```
 
 Read a nested group:
 
 ```bash
-curl -u alice:directory-password \
+curl -u 'alice@example.com:directory-password' \
   http://localhost:8080/api/groups/engineering%2Fbackend
 ```
 
@@ -308,7 +309,7 @@ curl -u alice:directory-password \
     "maximumStorageBytes": 107374182400
   },
   "members": {
-    "alice": "owner"
+    "alice@example.com": "owner"
   },
   "tokens": [
     {
@@ -321,7 +322,7 @@ curl -u alice:directory-password \
 }
 ```
 
-Member entries contain only LDAP usernames and roles. GitOne binds directly with the submitted username plus the optional `LDAP_USER_DOMAIN`, searches for that authenticated identifier using `LDAP_USER_FILTER`, then matches the submitted username exactly against `members`; member passwords are never stored in `control.json`.
+Member entries contain canonical LDAP identities and roles. GitOne requires the submitted login to include `LDAP_USER_DOMAIN`, binds and searches with its normalized full-domain form, then reads the unique `LDAP_CANONICAL_ATTRIBUTE` value from the matched entry. Only that directory-supplied value is used for member authorization, sessions, merge-request identity, and audit authorship; member passwords are never stored in `control.json`.
 
 Group tokens are available for automation and use salted Argon2id hashes. GitOne generates every token secret from cryptographically secure randomness as exactly 32 URL-safe characters, returns it only in the successful create or regeneration response, and never accepts a user-chosen secret. Set `regenerate` to `true` on an existing token to rotate it. Direct `control.git` pushes may preserve or delete existing token hashes, but cannot add or replace one; token creation and rotation must use the settings API. A token's `key` is its HTTP Basic username, while `name` is only its display label. Its role applies to the whole group and follows the same `inherit` boundary as member access for subgroups.
 

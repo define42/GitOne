@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/auth"
+	"github.com/define42/GitOne/internal/control"
 	gitoneserver "github.com/define42/GitOne/internal/server"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -33,12 +34,13 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 
 	ldapURL := startGlauth(ctx, t)
 	directory, err := auth.NewLDAPAuthenticator(auth.LDAPConfig{
-		URL:               ldapURL,
-		BaseDN:            "dc=glauth,dc=com",
-		UserDomain:        "example.com",
-		UserFilter:        "(mail=%s)",
-		SkipTLSVerify:     true,
-		ConnectionTimeout: 5 * time.Second,
+		URL:                ldapURL,
+		BaseDN:             "dc=glauth,dc=com",
+		UserDomain:         "example.com",
+		UserFilter:         "(mail=%s)",
+		CanonicalAttribute: "mail",
+		SkipTLSVerify:      true,
+		ConnectionTimeout:  5 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("configure LDAP: %v", err)
@@ -52,8 +54,9 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 		t.Fatalf("configure sessions: %v", err)
 	}
 
+	root := t.TempDir()
 	server := httptest.NewServer(gitoneserver.New(gitoneserver.Config{
-		Root:      t.TempDir(),
+		Root:      root,
 		PublicURL: "http://gitone.test",
 		Directory: directory,
 		Sessions:  sessions,
@@ -75,7 +78,7 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 		requireStatus(t, response, http.StatusUnauthorized)
 
 		response = requestJSON(t, client, http.MethodPost, server.URL+"/api/session", map[string]string{
-			"username": "johndoe",
+			"username": "johndoe@example.com",
 			"password": "wrong",
 		})
 		requireStatus(t, response, http.StatusUnauthorized)
@@ -87,12 +90,18 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 			"username": "johndoe",
 			"password": "dogood",
 		})
+		requireStatus(t, response, http.StatusUnauthorized)
+
+		response = requestJSON(t, client, http.MethodPost, server.URL+"/api/session", map[string]string{
+			"username": "johndoe@example.com",
+			"password": "dogood",
+		})
 		requireStatus(t, response, http.StatusOK)
 		var login struct {
 			Username string `json:"username"`
 		}
 		decodeJSON(t, response, &login)
-		if login.Username != "johndoe" {
+		if login.Username != "johndoe@example.com" {
 			t.Fatalf("login returned username %q", login.Username)
 		}
 		cookies := jar.Cookies(mustParseURL(t, server.URL))
@@ -106,7 +115,7 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 			Username string `json:"username"`
 		}
 		decodeJSON(t, response, &currentSession)
-		if currentSession.Username != "johndoe" {
+		if currentSession.Username != "johndoe@example.com" {
 			t.Fatalf("session returned username %q", currentSession.Username)
 		}
 	})
@@ -120,6 +129,14 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 			nil,
 		)
 		requireStatus(t, response, http.StatusCreated)
+		document, loadErr := control.NewStore(root).Load(ctx, "engineering")
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if len(document.Members) != 1 ||
+			document.Members["johndoe@example.com"] != control.RoleOwner {
+			t.Fatalf("group owner is not the canonical LDAP identity: %#v", document.Members)
+		}
 
 		response = request(
 			t,
@@ -158,7 +175,7 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 
 		checkout := filepath.Join(t.TempDir(), "api")
 		credentials := &gittransport.BasicAuth{
-			Username: "johndoe",
+			Username: "johndoe@example.com",
 			Password: "dogood",
 		}
 		repository, err := git.PlainClone(checkout, false, &git.CloneOptions{

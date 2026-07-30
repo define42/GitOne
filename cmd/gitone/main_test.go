@@ -11,6 +11,8 @@ func setValidEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("LDAP_URL", "ldaps://directory.example:636")
 	t.Setenv("LDAP_BASE_DN", "dc=example,dc=com")
+	t.Setenv("LDAP_USER_DOMAIN", "example.com")
+	t.Setenv("LDAP_CANONICAL_ATTRIBUTE", "mail")
 	t.Setenv("GITONE_SESSION_HASH_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("h", 64))))
 	t.Setenv("GITONE_SESSION_BLOCK_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("b", 32))))
 	t.Setenv("GITONE_RUNNER_TOKEN", "")
@@ -57,6 +59,15 @@ func TestNewServerRejectsInvalidConfiguration(t *testing.T) {
 		t.Setenv("LDAP_URL", "http://directory.example")
 		if _, _, err := newServer(nil); err == nil {
 			t.Fatal("invalid LDAP scheme was accepted")
+		}
+	})
+
+	t.Run("missing LDAP user domain", func(t *testing.T) {
+		setValidEnvironment(t)
+		t.Setenv("LDAP_USER_DOMAIN", "")
+		if _, _, err := newServer(nil); err == nil ||
+			!strings.Contains(err.Error(), "LDAP user domain is required") {
+			t.Fatalf("missing LDAP user domain error = %v", err)
 		}
 	})
 

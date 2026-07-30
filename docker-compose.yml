@@ -9,6 +9,7 @@ services:
       - LDAP_BASE_DN=dc=glauth,dc=com
       - LDAP_USER_DOMAIN=example.com
       - LDAP_USER_FILTER=(mail=%s)
+      - LDAP_CANONICAL_ATTRIBUTE=mail
       - LDAP_SKIP_TLS_VERIFY=true
     depends_on:
       - ldap

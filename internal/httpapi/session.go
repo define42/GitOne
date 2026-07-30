@@ -9,7 +9,7 @@ import (
 )
 
 type loginBody struct {
-	Username string `json:"username" minLength:"1"`
+	Username string `json:"username" minLength:"1" doc:"Full LDAP identity in the configured domain"`
 	Password string `json:"password" minLength:"1"`
 }
 

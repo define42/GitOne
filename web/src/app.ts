@@ -1890,7 +1890,7 @@ function groupSettingsControl(
     remove.addEventListener("click", () => row.remove());
     row.append(
       legend,
-      fieldLabel("Username", memberName),
+      fieldLabel("Canonical LDAP identity", memberName),
       fieldLabel("Role", memberRole),
       remove,
     );
@@ -2148,7 +2148,7 @@ function groupSettingsControl(
         const username = row.querySelector<HTMLInputElement>(".member-name")?.value.trim() ?? "";
         const role = row.querySelector<HTMLSelectElement>(".member-role")?.value as GroupRole;
         if (!username) {
-          throw new Error("Every member needs a username.");
+          throw new Error("Every member needs a canonical LDAP identity.");
         }
         if (username in updatedMembers) {
           throw new Error(`Member ${username} is listed more than once.`);
@@ -5421,6 +5421,7 @@ function renderLogin(message = ""): void {
   username.autocomplete = "username";
   username.required = true;
   username.spellcheck = false;
+  username.placeholder = "alice@example.com";
   const password = element("input");
   password.name = "password";
   password.type = "password";
@@ -5433,7 +5434,7 @@ function renderLogin(message = ""): void {
   const submit = actionButton("Sign in", undefined, "primary login-submit");
   submit.type = "submit";
   form.append(
-    fieldLabel("Username", username),
+    fieldLabel("Full LDAP identity", username),
     fieldLabel("Password", password),
     error,
     submit,
@@ -5462,7 +5463,7 @@ function renderLogin(message = ""): void {
     } catch (reason) {
       const invalid = reason instanceof RequestError && reason.status === 401;
       error.textContent = invalid
-        ? "Invalid username or password."
+        ? "Invalid LDAP identity or password."
         : reason instanceof Error ? reason.message : "Could not sign in.";
       error.hidden = false;
       password.select();

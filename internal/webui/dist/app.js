@@ -1275,7 +1275,7 @@ function groupSettingsControl(path, settings, role) {
         const remove = removeButton(`Remove ${username || "member"}`);
         remove.disabled = !canManageOwnerSettings;
         remove.addEventListener("click", () => row.remove());
-        row.append(legend, fieldLabel("Username", memberName), fieldLabel("Role", memberRole), remove);
+        row.append(legend, fieldLabel("Canonical LDAP identity", memberName), fieldLabel("Role", memberRole), remove);
         members.append(row);
         if (!username) {
             memberName.focus();
@@ -1509,7 +1509,7 @@ function groupSettingsControl(path, settings, role) {
                 const username = row.querySelector(".member-name")?.value.trim() ?? "";
                 const role = row.querySelector(".member-role")?.value;
                 if (!username) {
-                    throw new Error("Every member needs a username.");
+                    throw new Error("Every member needs a canonical LDAP identity.");
                 }
                 if (username in updatedMembers) {
                     throw new Error(`Member ${username} is listed more than once.`);
@@ -4136,6 +4136,7 @@ function renderLogin(message = "") {
     username.autocomplete = "username";
     username.required = true;
     username.spellcheck = false;
+    username.placeholder = "alice@example.com";
     const password = element("input");
     password.name = "password";
     password.type = "password";
@@ -4147,7 +4148,7 @@ function renderLogin(message = "") {
     error.setAttribute("role", "alert");
     const submit = actionButton("Sign in", undefined, "primary login-submit");
     submit.type = "submit";
-    form.append(fieldLabel("Username", username), fieldLabel("Password", password), error, submit);
+    form.append(fieldLabel("Full LDAP identity", username), fieldLabel("Password", password), error, submit);
     view.append(heading, form);
     app.replaceChildren(view);
     username.focus();
@@ -4172,7 +4173,7 @@ function renderLogin(message = "") {
         catch (reason) {
             const invalid = reason instanceof RequestError && reason.status === 401;
             error.textContent = invalid
-                ? "Invalid username or password."
+                ? "Invalid LDAP identity or password."
                 : reason instanceof Error ? reason.message : "Could not sign in.";
             error.hidden = false;
             password.select();
