@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	gittransport "github.com/go-git/go-git/v5/plumbing/transport"
 )
 
 type importResolverFunc func(
@@ -36,6 +38,25 @@ func (f importDialerFunc) DialContext(
 	address string,
 ) (net.Conn, error) {
 	return f(ctx, network, address)
+}
+
+type recordingImportTransport struct {
+	received *gittransport.Endpoint
+}
+
+func (t *recordingImportTransport) NewUploadPackSession(
+	*gittransport.Endpoint,
+	gittransport.AuthMethod,
+) (gittransport.UploadPackSession, error) {
+	return nil, nil
+}
+
+func (t *recordingImportTransport) NewReceivePackSession(
+	endpoint *gittransport.Endpoint,
+	_ gittransport.AuthMethod,
+) (gittransport.ReceivePackSession, error) {
+	t.received = endpoint
+	return nil, nil
 }
 
 func requireBlockedImportAddress(t *testing.T, err error) {
@@ -154,6 +175,7 @@ func TestImportNetworkPolicyRejectsInvalidAllowlistEntries(t *testing.T) {
 		"*.example.com",
 		"bad host",
 		"/internal",
+		strings.Repeat("a", 64) + ".example",
 	} {
 		t.Run(entry, func(t *testing.T) {
 			if _, err := NewImportNetworkPolicy([]string{entry}); err == nil {
@@ -239,6 +261,180 @@ func TestImportDialPinsValidatedNumericAddress(t *testing.T) {
 	_ = peer.Close()
 	if dialedAddress != "8.8.8.8:443" {
 		t.Fatalf("dialed address = %q, want validated numeric address", dialedAddress)
+	}
+}
+
+func TestImportNetworkHelperFailurePaths(t *testing.T) {
+	if (ImportNetworkPolicy{}).resolverOrDefault() != net.DefaultResolver {
+		t.Fatal("zero-value policy did not use the default resolver")
+	}
+
+	if _, err := (ImportNetworkPolicy{}).resolveAllowed(
+		context.Background(),
+		" ",
+	); err == nil || !strings.Contains(err.Error(), "host is empty") {
+		t.Fatalf("empty host error = %v", err)
+	}
+
+	resolveError := errors.New("resolver failed")
+	policy := ImportNetworkPolicy{
+		resolver: importResolverFunc(func(
+			context.Context,
+			string,
+			string,
+		) ([]netip.Addr, error) {
+			return nil, resolveError
+		}),
+	}
+	if _, err := policy.resolveAllowed(
+		context.Background(),
+		"example.test",
+	); !errors.Is(err, resolveError) {
+		t.Fatalf("resolver error = %v, want %v", err, resolveError)
+	}
+
+	policy.resolver = importResolverFunc(func(
+		context.Context,
+		string,
+		string,
+	) ([]netip.Addr, error) {
+		return nil, nil
+	})
+	if _, err := policy.resolveAllowed(
+		context.Background(),
+		"example.test",
+	); err == nil || !strings.Contains(err.Error(), "no addresses") {
+		t.Fatalf("empty resolution error = %v", err)
+	}
+
+	if _, err := importDialContext(
+		context.Background(),
+		"tcp",
+		"missing-port",
+	); err == nil || !strings.Contains(err.Error(), "parse remote import address") {
+		t.Fatalf("invalid dial address error = %v", err)
+	}
+
+	policy.resolver = importResolverFunc(func(
+		context.Context,
+		string,
+		string,
+	) ([]netip.Addr, error) {
+		return []netip.Addr{
+			netip.MustParseAddr("1.1.1.1"),
+			netip.MustParseAddr("8.8.8.8"),
+		}, nil
+	})
+	var dialAttempts int
+	policy.dialer = importDialerFunc(func(
+		context.Context,
+		string,
+		string,
+	) (net.Conn, error) {
+		dialAttempts++
+		return nil, errors.New("dial failed")
+	})
+	ctx := WithImportNetworkPolicy(context.Background(), policy)
+	if _, err := importDialContext(
+		ctx,
+		"tcp",
+		"example.test:443",
+	); err == nil || !strings.Contains(err.Error(), "dial failed") {
+		t.Fatalf("failed dial error = %v", err)
+	}
+	if dialAttempts != 2 {
+		t.Fatalf("dial attempts = %d, want 2", dialAttempts)
+	}
+}
+
+func TestImportURLAndTransportHelpers(t *testing.T) {
+	for _, test := range []struct {
+		rawURL string
+		port   string
+	}{
+		{rawURL: "http://example.test/repository.git", port: "80"},
+		{rawURL: "https://example.test/repository.git", port: "443"},
+		{rawURL: "https://example.test:8443/repository.git", port: "8443"},
+	} {
+		parsed, err := url.Parse(test.rawURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if port := effectiveImportURLPort(parsed); port != test.port {
+			t.Fatalf("port for %q = %q, want %q", test.rawURL, port, test.port)
+		}
+	}
+
+	for _, test := range []struct {
+		rawURL      string
+		wantURL     string
+		wantHandled bool
+	}{
+		{
+			rawURL:      "http://example.test/repository.git",
+			wantURL:     importHTTPProtocol + "://example.test/repository.git",
+			wantHandled: true,
+		},
+		{
+			rawURL:      "https://example.test/repository.git",
+			wantURL:     importHTTPSProtocol + "://example.test/repository.git",
+			wantHandled: true,
+		},
+		{
+			rawURL:      "ssh://example.test/repository.git",
+			wantURL:     "ssh://example.test/repository.git",
+			wantHandled: false,
+		},
+		{
+			rawURL:      "%",
+			wantURL:     "%",
+			wantHandled: false,
+		},
+	} {
+		gotURL, handled := importTransportURL(test.rawURL)
+		if gotURL != test.wantURL || handled != test.wantHandled {
+			t.Fatalf(
+				"importTransportURL(%q) = (%q, %t), want (%q, %t)",
+				test.rawURL,
+				gotURL,
+				handled,
+				test.wantURL,
+				test.wantHandled,
+			)
+		}
+	}
+
+	delegate := &recordingImportTransport{}
+	wrapper := importHTTPTransport{
+		protocol: "https",
+		delegate: delegate,
+	}
+	original := &gittransport.Endpoint{
+		Protocol: importHTTPSProtocol,
+		Host:     "example.test",
+		Path:     "/repository.git",
+	}
+	if _, err := wrapper.NewReceivePackSession(original, nil); err != nil {
+		t.Fatal(err)
+	}
+	if delegate.received == nil || delegate.received.Protocol != "https" {
+		t.Fatalf("rewritten endpoint = %#v", delegate.received)
+	}
+	if original.Protocol != importHTTPSProtocol {
+		t.Fatalf("original endpoint protocol was mutated: %q", original.Protocol)
+	}
+}
+
+func TestImportRedirectLimit(t *testing.T) {
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"https://example.test/repository.git",
+		nil,
+	)
+	via := make([]*http.Request, 10)
+	if err := importCheckRedirect(request, via); err == nil ||
+		!strings.Contains(err.Error(), "too many redirects") {
+		t.Fatalf("redirect limit error = %v", err)
 	}
 }
 

@@ -97,6 +97,25 @@ func TestProtectWriterSlidesAndClearsWriteDeadline(t *testing.T) {
 	}
 }
 
+func TestDeadlineResponseWriterFlushesAndUnwraps(t *testing.T) {
+	response := &deadlineRecorder{header: http.Header{}}
+	writer := &deadlineResponseWriter{
+		ResponseWriter: response,
+		controller:     http.NewResponseController(response),
+		timeout:        time.Minute,
+	}
+	writer.Flush()
+	if !writer.wrote {
+		t.Fatal("flush did not mark the response as written")
+	}
+	if len(response.writeDeadlines) != 1 || response.writeDeadlines[0].IsZero() {
+		t.Fatal("flush did not install a write deadline")
+	}
+	if writer.Unwrap() != response {
+		t.Fatal("response writer did not unwrap to its delegate")
+	}
+}
+
 func TestBodyTooLargeRejectsOtherErrors(t *testing.T) {
 	if BodyTooLarge(errors.New("other")) {
 		t.Fatal("ordinary error was classified as an oversized body")

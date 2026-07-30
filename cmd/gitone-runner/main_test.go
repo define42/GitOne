@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -24,6 +26,25 @@ func TestNewRemoteRunner(t *testing.T) {
 			runnerID,
 			serverURL,
 		)
+	}
+}
+
+func TestRunReturnsConfigurationAndCancellationErrors(t *testing.T) {
+	t.Setenv("GITONE_RUNNER_TOKEN", "")
+	if err := run(context.Background(), nil); err == nil {
+		t.Fatal("run accepted a missing token")
+	}
+
+	t.Setenv("GITONE_RUNNER_TOKEN", "test-token")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := run(ctx, []string{
+		"-runner-url", "http://127.0.0.1:1",
+		"-runner-work-root", t.TempDir(),
+		"-runner-poll-interval", "250ms",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled run returned %v", err)
 	}
 }
 
