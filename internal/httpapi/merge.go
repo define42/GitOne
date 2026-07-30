@@ -23,9 +23,34 @@ import (
 )
 
 const (
-	maxAutomaticMergeBlobSize = 10 * 1024 * 1024
-	maxComparisonPatchSize    = 1024 * 1024
+	maxAutomaticMergeBlobSize       = 10 * 1024 * 1024
+	maxComparisonPatchSize          = 1024 * 1024
+	maxComparisonPatchBytes         = 8 * 1024 * 1024
+	maxComparisonBlobBytes    int64 = 2 * 1024 * 1024
+	maxComparisonFiles              = 1000
+	maxComparisonRenameFiles        = 50
 )
+
+type treeComparison struct {
+	Files     []repositoryComparisonFile
+	Truncated bool
+}
+
+type treeComparisonLimits struct {
+	files          int
+	filePatchBytes int
+	patchBytes     int
+	blobBytes      int64
+}
+
+func defaultTreeComparisonLimits() treeComparisonLimits {
+	return treeComparisonLimits{
+		files:          maxComparisonFiles,
+		filePatchBytes: maxComparisonPatchSize,
+		patchBytes:     maxComparisonPatchBytes,
+		blobBytes:      maxComparisonBlobBytes,
+	}
+}
 
 func (a API) compareRepositoryBranches(
 	ctx context.Context,
@@ -68,7 +93,7 @@ func (a API) compareRepositoryBranches(
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not load comparison head", err)
 	}
-	files, err := compareTrees(ctx, fromTree, toTree)
+	comparison, err := compareTrees(ctx, fromTree, toTree)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not create branch diff", err)
 	}
@@ -93,7 +118,8 @@ func (a API) compareRepositoryBranches(
 	output.Body.Mergeable = mergeable
 	output.Body.CanMerge = canMergeErr == nil
 	output.Body.Conflicts = conflicts
-	output.Body.Files = files
+	output.Body.Files = comparison.Files
+	output.Body.Truncated = comparison.Truncated
 	return output, nil
 }
 
@@ -493,16 +519,57 @@ func compareTrees(
 	ctx context.Context,
 	from *object.Tree,
 	to *object.Tree,
-) ([]repositoryComparisonFile, error) {
-	changes, err := object.DiffTreeWithOptions(ctx, from, to, object.DefaultDiffTreeOptions)
+) (treeComparison, error) {
+	return compareTreesWithLimits(ctx, from, to, defaultTreeComparisonLimits())
+}
+
+func compareTreesWithLimits(
+	ctx context.Context,
+	from *object.Tree,
+	to *object.Tree,
+	limits treeComparisonLimits,
+) (treeComparison, error) {
+	changes, err := object.DiffTreeWithOptions(ctx, from, to, nil)
 	if err != nil {
-		return nil, err
+		return treeComparison{}, err
 	}
-	files := make([]repositoryComparisonFile, 0, len(changes))
+	contentRenames, err := comparisonChangesFitBudget(
+		changes,
+		maxComparisonRenameFiles,
+		limits.blobBytes,
+	)
+	if err != nil {
+		return treeComparison{}, err
+	}
+	diffOptions := &object.DiffTreeOptions{
+		DetectRenames:    true,
+		RenameScore:      object.DefaultDiffTreeOptions.RenameScore,
+		RenameLimit:      uint(limits.files),
+		OnlyExactRenames: !contentRenames,
+	}
+	if contentRenames {
+		diffOptions.RenameLimit = maxComparisonRenameFiles
+	}
+	changes, err = object.DetectRenames(changes, diffOptions)
+	if err != nil {
+		return treeComparison{}, err
+	}
+	result := treeComparison{
+		Files: make(
+			[]repositoryComparisonFile,
+			0,
+			min(len(changes), limits.files),
+		),
+	}
+	patchBytes := 0
 	for _, change := range changes {
+		if len(result.Files) >= limits.files || patchBytes >= limits.patchBytes {
+			result.Truncated = true
+			break
+		}
 		fromFile, toFile, err := change.Files()
 		if err != nil {
-			return nil, err
+			return treeComparison{}, err
 		}
 		file := repositoryComparisonFile{Status: "modified"}
 		switch {
@@ -520,9 +587,22 @@ func compareTrees(
 			}
 		}
 
-		patch, err := change.Patch()
+		if comparisonBlobTooLarge(fromFile, toFile, limits.blobBytes) {
+			file.Binary, err = comparisonFilesBinary(fromFile, toFile)
+			if err != nil {
+				return treeComparison{}, err
+			}
+			if !file.Binary {
+				file.Truncated = true
+				result.Truncated = true
+			}
+			result.Files = append(result.Files, file)
+			continue
+		}
+
+		patch, err := change.PatchContext(ctx)
 		if err != nil {
-			return nil, err
+			return treeComparison{}, err
 		}
 		for _, filePatch := range patch.FilePatches() {
 			file.Binary = file.Binary || filePatch.IsBinary()
@@ -538,15 +618,87 @@ func compareTrees(
 			}
 		}
 		if !file.Binary {
-			file.Patch = patch.String()
-			if len(file.Patch) > maxComparisonPatchSize {
-				file.Patch = file.Patch[:maxComparisonPatchSize]
+			encoded := patch.String()
+			available := min(
+				limits.filePatchBytes,
+				limits.patchBytes-patchBytes,
+			)
+			if len(encoded) > available {
+				file.Patch = strings.Clone(encoded[:available])
 				file.Truncated = true
+				result.Truncated = true
+			} else {
+				file.Patch = encoded
 			}
+			patchBytes += len(file.Patch)
 		}
-		files = append(files, file)
+		result.Files = append(result.Files, file)
 	}
-	return files, nil
+	if len(result.Files) < len(changes) {
+		result.Truncated = true
+	}
+	return result, nil
+}
+
+func comparisonChangesFitBudget(
+	changes object.Changes,
+	maximumFiles int,
+	maximumBytes int64,
+) (bool, error) {
+	if len(changes) > maximumFiles {
+		return false, nil
+	}
+	total := int64(0)
+	for _, change := range changes {
+		from, to, err := change.Files()
+		if err != nil {
+			return false, err
+		}
+		for _, file := range []*object.File{from, to} {
+			if file == nil {
+				continue
+			}
+			if file.Size > maximumBytes-total {
+				return false, nil
+			}
+			total += file.Size
+		}
+	}
+	return true, nil
+}
+
+func comparisonBlobTooLarge(
+	from *object.File,
+	to *object.File,
+	maximum int64,
+) bool {
+	total := int64(0)
+	for _, file := range []*object.File{from, to} {
+		if file == nil {
+			continue
+		}
+		if file.Size > maximum-total {
+			return true
+		}
+		total += file.Size
+	}
+	return false
+}
+
+func comparisonFilesBinary(from *object.File, to *object.File) (bool, error) {
+	for _, file := range []*object.File{from, to} {
+		if file == nil {
+			continue
+		}
+		binary, err := file.IsBinary()
+		if err != nil {
+			return false, err
+		}
+		if binary {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func diffLineCount(content string) int {

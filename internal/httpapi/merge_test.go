@@ -743,6 +743,9 @@ func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
 	}
 	original := storeTestBlob(t, repository, []byte("one\ntwo\n"))
 	modified := storeTestBlob(t, repository, []byte("one\nchanged\nthree"))
+	renameBeforeContent := strings.Repeat("unchanged rename line\n", 20)
+	renameBefore := storeTestBlob(t, repository, []byte(renameBeforeContent))
+	renameAfter := storeTestBlob(t, repository, []byte(renameBeforeContent+"added line\n"))
 	added := storeTestBlob(t, repository, []byte("new\n"))
 	binaryBefore := storeTestBlob(t, repository, []byte{'a', 0, 'b'})
 	binaryAfter := storeTestBlob(t, repository, []byte{'c', 0, 'd'})
@@ -751,6 +754,7 @@ func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
 		repository,
 		object.TreeEntry{Name: "deleted.txt", Mode: filemode.Regular, Hash: original},
 		object.TreeEntry{Name: "modified.txt", Mode: filemode.Regular, Hash: original},
+		object.TreeEntry{Name: "old-name.txt", Mode: filemode.Regular, Hash: renameBefore},
 		object.TreeEntry{Name: "binary.dat", Mode: filemode.Regular, Hash: binaryBefore},
 	)
 	to := storeTestTree(
@@ -758,12 +762,14 @@ func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
 		repository,
 		object.TreeEntry{Name: "added.txt", Mode: filemode.Regular, Hash: added},
 		object.TreeEntry{Name: "modified.txt", Mode: filemode.Regular, Hash: modified},
+		object.TreeEntry{Name: "new-name.txt", Mode: filemode.Regular, Hash: renameAfter},
 		object.TreeEntry{Name: "binary.dat", Mode: filemode.Regular, Hash: binaryAfter},
 	)
-	files, err := compareTrees(context.Background(), from, to)
+	comparison, err := compareTrees(context.Background(), from, to)
 	if err != nil {
 		t.Fatal(err)
 	}
+	files := comparison.Files
 	byPath := make(map[string]repositoryComparisonFile, len(files))
 	for _, file := range files {
 		byPath[file.Path] = file
@@ -782,6 +788,103 @@ func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
 	if !byPath["binary.dat"].Binary || byPath["binary.dat"].Patch != "" {
 		t.Fatalf("unexpected binary modification: %#v", byPath["binary.dat"])
 	}
+	renamed := byPath["new-name.txt"]
+	if renamed.Status != "renamed" || renamed.OldPath != "old-name.txt" {
+		t.Fatalf("bounded content rename was not detected: %#v", renamed)
+	}
+	if comparison.Truncated {
+		t.Fatal("small comparison was unexpectedly truncated")
+	}
+}
+
+func TestCompareTreesEnforcesAggregateLimits(t *testing.T) {
+	repository, err := git.PlainInit(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := storeTestBlob(t, repository, []byte(strings.Repeat("changed line\n", 20)))
+	from := storeTestTree(t, repository)
+	to := storeTestTree(
+		t,
+		repository,
+		object.TreeEntry{Name: "first.txt", Mode: filemode.Regular, Hash: blob},
+		object.TreeEntry{Name: "second.txt", Mode: filemode.Regular, Hash: blob},
+		object.TreeEntry{Name: "third.txt", Mode: filemode.Regular, Hash: blob},
+	)
+
+	t.Run("file count", func(t *testing.T) {
+		comparison, compareErr := compareTreesWithLimits(
+			context.Background(),
+			from,
+			to,
+			treeComparisonLimits{
+				files:          2,
+				filePatchBytes: 1024,
+				patchBytes:     4096,
+				blobBytes:      4096,
+			},
+		)
+		if compareErr != nil {
+			t.Fatal(compareErr)
+		}
+		if !comparison.Truncated || len(comparison.Files) != 2 {
+			t.Fatalf("file-limited comparison = %#v", comparison)
+		}
+	})
+
+	t.Run("aggregate patches", func(t *testing.T) {
+		comparison, compareErr := compareTreesWithLimits(
+			context.Background(),
+			from,
+			to,
+			treeComparisonLimits{
+				files:          10,
+				filePatchBytes: 1024,
+				patchBytes:     150,
+				blobBytes:      4096,
+			},
+		)
+		if compareErr != nil {
+			t.Fatal(compareErr)
+		}
+		total := 0
+		for _, file := range comparison.Files {
+			total += len(file.Patch)
+		}
+		if !comparison.Truncated || total != 150 ||
+			len(comparison.Files) != 1 || !comparison.Files[0].Truncated {
+			t.Fatalf(
+				"patch-limited comparison has %d bytes: %#v",
+				total,
+				comparison,
+			)
+		}
+	})
+
+	t.Run("oversized text blob", func(t *testing.T) {
+		comparison, compareErr := compareTreesWithLimits(
+			context.Background(),
+			from,
+			to,
+			treeComparisonLimits{
+				files:          10,
+				filePatchBytes: 1024,
+				patchBytes:     4096,
+				blobBytes:      10,
+			},
+		)
+		if compareErr != nil {
+			t.Fatal(compareErr)
+		}
+		if !comparison.Truncated || len(comparison.Files) != 3 {
+			t.Fatalf("blob-limited comparison = %#v", comparison)
+		}
+		for _, file := range comparison.Files {
+			if file.Patch != "" || !file.Truncated {
+				t.Fatalf("oversized text file was materialized: %#v", file)
+			}
+		}
+	})
 }
 
 func TestMergeLineHelpers(t *testing.T) {

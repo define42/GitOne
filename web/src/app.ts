@@ -154,6 +154,7 @@ interface RepositoryCommitDiff {
   commit: string;
   parent?: string;
   files: RepositoryComparisonFile[];
+  truncated?: boolean;
 }
 
 interface RepositoryComparisonFile {
@@ -180,6 +181,7 @@ interface RepositoryComparison {
   canMerge: boolean;
   conflicts: string[];
   files: RepositoryComparisonFile[];
+  truncated?: boolean;
 }
 
 type RepositoryMergeRequestState = "open" | "closed" | "merged";
@@ -230,6 +232,7 @@ interface RepositoryMergeRequest {
   mergeable: boolean;
   conflicts: string[];
   files: RepositoryComparisonFile[];
+  truncated?: boolean;
   approvals: RepositoryMergeRequestApproval[];
   threads: RepositoryMergeRequestThread[];
   canApprove: boolean;
@@ -2818,6 +2821,9 @@ function repositoryCommitDiff(data: RepositoryCommitDiff): HTMLElement {
   );
   summary.append(parent, stats);
   content.append(summary);
+  if (data.truncated) {
+    content.append(comparisonTruncatedNotice());
+  }
 
   const files = element("div");
   files.className = "history-diff-files";
@@ -2990,6 +2996,15 @@ function comparisonStat(label: string, value: string): HTMLElement {
   return stat;
 }
 
+function comparisonTruncatedNotice(): HTMLElement {
+  const notice = element(
+    "p",
+    "Diff truncated after 1,000 files, 8 MiB of patches, or an oversized text file.",
+  );
+  notice.className = "diff-truncated";
+  return notice;
+}
+
 function comparisonDiff(file: RepositoryComparisonFile): HTMLElement {
   const section = element("section");
   section.className = "comparison-file";
@@ -3016,18 +3031,24 @@ function comparisonDiff(file: RepositoryComparisonFile): HTMLElement {
     const binary = element("p", "Binary files differ.");
     binary.className = "binary-diff";
     section.append(binary);
+    if (file.truncated) {
+      section.append(comparisonFileTruncatedNotice());
+    }
     return section;
   }
-  if (!file.patch) {
-    return section;
+  if (file.patch) {
+    section.append(diffPatch(file.patch.split("\n")));
   }
-  section.append(diffPatch(file.patch.split("\n")));
   if (file.truncated) {
-    const notice = element("p", "Diff truncated at 1 MiB.");
-    notice.className = "diff-truncated";
-    section.append(notice);
+    section.append(comparisonFileTruncatedNotice());
   }
   return section;
+}
+
+function comparisonFileTruncatedNotice(): HTMLElement {
+  const notice = element("p", "This file's diff was truncated.");
+  notice.className = "diff-truncated";
+  return notice;
 }
 
 function diffPatch(lines: string[]): HTMLPreElement {
@@ -3089,6 +3110,9 @@ function branchComparisonResult(
   );
   summary.append(direction, stats);
   result.append(summary);
+  if (comparison.truncated) {
+    result.append(comparisonTruncatedNotice());
+  }
 
   const mergeStatus = element("section");
   mergeStatus.className = comparison.mergeable
@@ -3778,6 +3802,9 @@ function mergeRequestChanges(
     stats,
   );
   changes.append(summary);
+  if (mergeRequest.truncated) {
+    changes.append(comparisonTruncatedNotice());
+  }
 
   const workflowReady = mergeRequest.state === "open" &&
     mergeRequest.mergeable &&

@@ -301,6 +301,7 @@ type repositoryCommitDiffOutput struct {
 		Commit     string                     `json:"commit"`
 		Parent     string                     `json:"parent,omitempty"`
 		Files      []repositoryComparisonFile `json:"files"`
+		Truncated  bool                       `json:"truncated,omitempty"`
 	}
 }
 
@@ -329,6 +330,7 @@ type compareRepositoryBranchesOutput struct {
 		CanMerge   bool                       `json:"canMerge"`
 		Conflicts  []string                   `json:"conflicts"`
 		Files      []repositoryComparisonFile `json:"files"`
+		Truncated  bool                       `json:"truncated,omitempty"`
 	}
 }
 

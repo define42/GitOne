@@ -134,6 +134,7 @@ type mergeRequestView struct {
 	Mergeable         bool                       `json:"mergeable"`
 	Conflicts         []string                   `json:"conflicts"`
 	Files             []repositoryComparisonFile `json:"files"`
+	Truncated         bool                       `json:"truncated,omitempty"`
 	Approvals         []mergeRequestApprovalView `json:"approvals"`
 	Threads           []review.Thread            `json:"threads"`
 	CanApprove        bool                       `json:"canApprove"`
@@ -168,6 +169,7 @@ type mergeRequestComparison struct {
 	Mergeable    bool
 	Conflicts    []string
 	Files        []repositoryComparisonFile
+	Truncated    bool
 }
 
 func registerReviewAPI(api huma.API, service API) {
@@ -1396,6 +1398,7 @@ func (a API) buildMergeRequestView(
 		Mergeable:         comparison.Mergeable,
 		Conflicts:         conflicts,
 		Files:             files,
+		Truncated:         comparison.Truncated,
 		Approvals:         approvals,
 		Threads:           threads,
 		CanApprove: stateOpen &&
@@ -1493,7 +1496,9 @@ func compareMergeRequest(
 	if err != nil {
 		return result, err
 	}
-	result.Files, err = compareTrees(ctx, fromTree, toTree)
+	comparison, err := compareTrees(ctx, fromTree, toTree)
+	result.Files = comparison.Files
+	result.Truncated = comparison.Truncated
 	return result, err
 }
 

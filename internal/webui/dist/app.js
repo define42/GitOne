@@ -2074,6 +2074,9 @@ function repositoryCommitDiff(data) {
     stats.append(comparisonStat(data.files.length === 1 ? "file changed" : "files changed", String(data.files.length)), comparisonStat("additions", `+${additions}`), comparisonStat("deletions", `−${deletions}`));
     summary.append(parent, stats);
     content.append(summary);
+    if (data.truncated) {
+        content.append(comparisonTruncatedNotice());
+    }
     const files = element("div");
     files.className = "history-diff-files";
     if (data.files.length === 0) {
@@ -2230,6 +2233,11 @@ function comparisonStat(label, value) {
     stat.append(element("strong", value), document.createTextNode(label));
     return stat;
 }
+function comparisonTruncatedNotice() {
+    const notice = element("p", "Diff truncated after 1,000 files, 8 MiB of patches, or an oversized text file.");
+    notice.className = "diff-truncated";
+    return notice;
+}
 function comparisonDiff(file) {
     const section = element("section");
     section.className = "comparison-file";
@@ -2252,18 +2260,23 @@ function comparisonDiff(file) {
         const binary = element("p", "Binary files differ.");
         binary.className = "binary-diff";
         section.append(binary);
+        if (file.truncated) {
+            section.append(comparisonFileTruncatedNotice());
+        }
         return section;
     }
-    if (!file.patch) {
-        return section;
+    if (file.patch) {
+        section.append(diffPatch(file.patch.split("\n")));
     }
-    section.append(diffPatch(file.patch.split("\n")));
     if (file.truncated) {
-        const notice = element("p", "Diff truncated at 1 MiB.");
-        notice.className = "diff-truncated";
-        section.append(notice);
+        section.append(comparisonFileTruncatedNotice());
     }
     return section;
+}
+function comparisonFileTruncatedNotice() {
+    const notice = element("p", "This file's diff was truncated.");
+    notice.className = "diff-truncated";
+    return notice;
 }
 function diffPatch(lines) {
     const code = element("code");
@@ -2309,6 +2322,9 @@ function branchComparisonResult(route, comparison, dialog) {
     stats.append(comparisonStat("commits ahead", String(comparison.ahead)), comparisonStat("behind", String(comparison.behind)), comparisonStat("files changed", String(comparison.files.length)), comparisonStat("additions", `+${additions}`), comparisonStat("deletions", `−${deletions}`));
     summary.append(direction, stats);
     result.append(summary);
+    if (comparison.truncated) {
+        result.append(comparisonTruncatedNotice());
+    }
     const mergeStatus = element("section");
     mergeStatus.className = comparison.mergeable
         ? "merge-status merge-ready"
@@ -2815,6 +2831,9 @@ function mergeRequestChanges(mergeRequest) {
     stats.append(comparisonStat("commits ahead", String(mergeRequest.ahead)), comparisonStat("behind", String(mergeRequest.behind)), comparisonStat("files changed", String(mergeRequest.files.length)), comparisonStat("additions", `+${additions}`), comparisonStat("deletions", `−${deletions}`));
     summary.append(mergeRequestDirection(mergeRequest.target, mergeRequest.source), stats);
     changes.append(summary);
+    if (mergeRequest.truncated) {
+        changes.append(comparisonTruncatedNotice());
+    }
     const workflowReady = mergeRequest.state === "open" &&
         mergeRequest.mergeable &&
         mergeRequest.currentApprovals >= mergeRequest.requiredApprovals &&
