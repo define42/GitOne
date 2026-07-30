@@ -132,59 +132,111 @@ func (c *Coordinator) Claim(runnerID string) (*Lease, error) {
 	if !validRunnerID(runnerID) {
 		return nil, errors.New("invalid runner ID")
 	}
-	releaseOperation, err := lockmgr.Process.Acquire(
-		lockmgr.CatalogRequest(c.storage.Root, lockmgr.Exclusive),
-		lockmgr.QueueRequest(c.storage.Root),
-	)
+	// Hold the queue lock for the whole claim so runners serialize against one
+	// another, but scan the catalog under a shared lock. The scan walks every
+	// group and re-reads every repository's build directory, and the catalog
+	// lock is also taken shared by git receive-pack/upload-pack, browsing, and
+	// LFS; taking it exclusive here stalled all of those behind the scan on
+	// every runner poll. Each selected job is then mutated under a brief
+	// exclusive catalog lock, which serializes the write against heartbeat and
+	// complete (they hold the catalog lock shared) exactly as before.
+	releaseQueue, err := lockmgr.Process.Acquire(lockmgr.QueueRequest(c.storage.Root))
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		releaseOperation()
-	}()
-	candidates, err := c.candidates(time.Now().UTC())
+	defer releaseQueue()
+
+	candidates, err := c.scanCandidates(time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
 	for _, candidate := range candidates {
-		config, configErr := c.buildConfig(candidate.repository, candidate.job)
-		if configErr != nil {
-			finished := time.Now().UTC()
-			candidate.job.Status = StatusFailed
-			candidate.job.FinishedAt = &finished
-			candidate.job.Error = "prepare remote build: " + configErr.Error()
-			candidate.job.LeaseExpiresAt = nil
-			if saveErr := c.state.save(candidate.repository, candidate.job); saveErr != nil {
-				return nil, errors.Join(configErr, saveErr)
-			}
-			continue
+		lease, claimed, claimErr := c.claimCandidate(candidate, runnerID)
+		if claimErr != nil {
+			return nil, claimErr
 		}
-
-		now := time.Now().UTC()
-		leaseExpires := now.Add(c.leaseDuration)
-		candidate.job.Repository = candidate.repository.Full()
-		candidate.job.Status = StatusRunning
-		if candidate.job.StartedAt == nil {
-			candidate.job.StartedAt = &now
+		if claimed {
+			return lease, nil
 		}
-		candidate.job.RunnerID = runnerID
-		candidate.job.Attempt++
-		candidate.job.LeaseExpiresAt = &leaseExpires
-		if err = c.state.save(candidate.repository, candidate.job); err != nil {
-			return nil, err
-		}
-		offset, err := c.state.logSize(candidate.repository, candidate.job.ID)
-		if err != nil {
-			return nil, err
-		}
-		return &Lease{
-			Job:          candidate.job,
-			Config:       config,
-			LogOffset:    offset,
-			LeaseSeconds: int(c.leaseDuration / time.Second),
-		}, nil
 	}
 	return nil, nil
+}
+
+// scanCandidates lists claimable jobs across the catalog under a shared lock so
+// the potentially long scan does not block concurrent repository operations.
+func (c *Coordinator) scanCandidates(now time.Time) ([]jobCandidate, error) {
+	release, err := lockmgr.Process.Acquire(
+		lockmgr.CatalogRequest(c.storage.Root, lockmgr.Shared),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return c.candidates(now)
+}
+
+// claimCandidate re-reads a scanned job under an exclusive catalog lock and, if
+// it is still claimable, leases it to the runner. Re-reading is required because
+// the shared scan may have raced with a heartbeat or completion that renewed or
+// finished the job. It returns claimed=false (without error) when the job is no
+// longer claimable or its build configuration is invalid, so the caller keeps
+// scanning the remaining candidates.
+func (c *Coordinator) claimCandidate(candidate jobCandidate, runnerID string) (*Lease, bool, error) {
+	release, err := lockmgr.Process.Acquire(
+		lockmgr.CatalogRequest(c.storage.Root, lockmgr.Exclusive),
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	defer release()
+
+	now := time.Now().UTC()
+	job, err := c.state.Get(candidate.repository, candidate.job.ID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if !claimable(job, now) {
+		return nil, false, nil
+	}
+
+	config, configErr := c.buildConfig(candidate.repository, job)
+	if configErr != nil {
+		finished := time.Now().UTC()
+		job.Status = StatusFailed
+		job.FinishedAt = &finished
+		job.Error = "prepare remote build: " + configErr.Error()
+		job.LeaseExpiresAt = nil
+		if saveErr := c.state.save(candidate.repository, job); saveErr != nil {
+			return nil, false, errors.Join(configErr, saveErr)
+		}
+		return nil, false, nil
+	}
+
+	leaseExpires := now.Add(c.leaseDuration)
+	job.Repository = candidate.repository.Full()
+	job.Status = StatusRunning
+	if job.StartedAt == nil {
+		job.StartedAt = &now
+	}
+	job.RunnerID = runnerID
+	job.Attempt++
+	job.LeaseExpiresAt = &leaseExpires
+	if err = c.state.save(candidate.repository, job); err != nil {
+		return nil, false, err
+	}
+	offset, err := c.state.logSize(candidate.repository, job.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	return &Lease{
+		Job:          job,
+		Config:       config,
+		LogOffset:    offset,
+		LeaseSeconds: int(c.leaseDuration / time.Second),
+	}, true, nil
 }
 
 func (c *Coordinator) Heartbeat(
@@ -294,6 +346,14 @@ type jobCandidate struct {
 	job        Job
 }
 
+// claimable reports whether a job is available for a runner to lease: it is
+// queued, or it is running with an expired (or absent) lease.
+func claimable(job Job, now time.Time) bool {
+	return job.Status == StatusQueued ||
+		(job.Status == StatusRunning &&
+			(job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now)))
+}
+
 func (c *Coordinator) candidates(now time.Time) ([]jobCandidate, error) {
 	groups, err := c.storage.ListGroups()
 	if err != nil {
@@ -312,9 +372,7 @@ func (c *Coordinator) candidates(now time.Time) ([]jobCandidate, error) {
 				return nil, listErr
 			}
 			for _, job := range jobs {
-				if job.Status == StatusQueued ||
-					(job.Status == StatusRunning &&
-						(job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(now))) {
+				if claimable(job, now) {
 					candidates = append(candidates, jobCandidate{
 						repository: repository,
 						job:        job,

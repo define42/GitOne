@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
@@ -208,6 +209,33 @@ func TestCoordinatorScheduleOperationLockVariants(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("standalone schedule did not resume after operation lock release")
+	}
+}
+
+func TestCoordinatorClaimScanDoesNotBlockSharedCatalogUsers(t *testing.T) {
+	root, _, _, coordinator := coordinatorRepository(t)
+	// Git receive-pack/upload-pack, browsing, and LFS all take the catalog lock
+	// shared. A runner's claim scan must not stall behind them, so hold the
+	// catalog lock shared and confirm a claim (with nothing to lease) still
+	// completes without waiting - it used to take the catalog lock exclusive.
+	release, err := lockmgr.Process.Acquire(lockmgr.CatalogRequest(root, lockmgr.Shared))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	done := make(chan error, 1)
+	go func() {
+		_, claimErr := coordinator.Claim("runner-one")
+		done <- claimErr
+	}()
+	select {
+	case claimErr := <-done:
+		if claimErr != nil {
+			t.Fatalf("claim failed: %v", claimErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("claim scan blocked behind a shared catalog lock")
 	}
 }
 
