@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,27 @@ import (
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
 )
+
+type stagedUploadReader struct {
+	data    []byte
+	offset  int
+	staged  chan<- struct{}
+	release <-chan struct{}
+}
+
+func (r *stagedUploadReader) Read(buffer []byte) (int, error) {
+	if r.offset < len(r.data) {
+		n := copy(buffer, r.data[r.offset:])
+		r.offset += n
+		return n, nil
+	}
+	select {
+	case r.staged <- struct{}{}:
+	default:
+	}
+	<-r.release
+	return 0, io.EOF
+}
 
 func TestUploadAndDownload(t *testing.T) {
 	root := t.TempDir()
@@ -115,6 +137,7 @@ func TestUploadEnforcesObjectAndStorageLimits(t *testing.T) {
 			"/g/r.git/info/lfs/objects/"+oid,
 			bytes.NewBufferString(data),
 		)
+		request.ContentLength = -1
 		response := httptest.NewRecorder()
 		h.ServeHTTP(response, request)
 		return response
@@ -157,6 +180,7 @@ func TestUploadStagingBoundedByStorageQuotaWithoutObjectLimit(t *testing.T) {
 			"/g/r.git/info/lfs/objects/"+oid,
 			bytes.NewBufferString(data),
 		)
+		request.ContentLength = -1
 		response := httptest.NewRecorder()
 		h.ServeHTTP(response, request)
 		return response
@@ -168,6 +192,134 @@ func TestUploadStagingBoundedByStorageQuotaWithoutObjectLimit(t *testing.T) {
 	// storage-quota-bounded staging path and is stored successfully.
 	if response := upload("small"); response.Code != http.StatusOK {
 		t.Fatalf("upload within storage quota returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConcurrentUploadsReserveQuotaBeforeStaging(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	const quota = int64(8)
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: quota}, nil
+		},
+	}
+
+	startUpload := func(
+		data []byte,
+		staged chan<- struct{},
+		release <-chan struct{},
+	) <-chan *httptest.ResponseRecorder {
+		t.Helper()
+		sum := sha256.Sum256(data)
+		oid := hex.EncodeToString(sum[:])
+		request := httptest.NewRequest(
+			http.MethodPut,
+			"/g/r.git/info/lfs/objects/"+oid,
+			&stagedUploadReader{
+				data:    data,
+				staged:  staged,
+				release: release,
+			},
+		)
+		request.ContentLength = int64(len(data))
+		response := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			response <- recorder
+		}()
+		return response
+	}
+
+	firstStaged := make(chan struct{}, 1)
+	firstRelease := make(chan struct{})
+	var releaseFirst sync.Once
+	unblockFirst := func() {
+		releaseFirst.Do(func() {
+			close(firstRelease)
+		})
+	}
+	defer unblockFirst()
+	firstResponse := startUpload(
+		[]byte("12345678"),
+		firstStaged,
+		firstRelease,
+	)
+	select {
+	case <-firstStaged:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first upload did not fill its reserved staging space")
+	}
+
+	stagingDirectory := filepath.Join(root, ".gitone", "uploads")
+	entries, err := os.ReadDir(stagingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("active upload created %d staging files, want 1", len(entries))
+	}
+	info, err := entries[0].Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != quota {
+		t.Fatalf("staged bytes = %d, want %d", info.Size(), quota)
+	}
+
+	secondStaged := make(chan struct{}, 1)
+	secondRelease := make(chan struct{})
+	var releaseSecond sync.Once
+	unblockSecond := func() {
+		releaseSecond.Do(func() {
+			close(secondRelease)
+		})
+	}
+	defer unblockSecond()
+	secondResponse := startUpload(
+		[]byte("abcdefgh"),
+		secondStaged,
+		secondRelease,
+	)
+	select {
+	case <-secondStaged:
+		t.Fatal("second upload bypassed the first upload's quota reservation")
+	case response := <-secondResponse:
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("concurrent quota overflow returned %d: %s", response.Code, response.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second upload was not rejected during quota admission")
+	}
+
+	entries, err = os.ReadDir(stagingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("quota-rejected upload left %d active staging files, want 1", len(entries))
+	}
+
+	unblockFirst()
+	select {
+	case response := <-firstResponse:
+		if response.Code != http.StatusOK {
+			t.Fatalf("reserved upload returned %d: %s", response.Code, response.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reserved upload did not finish")
+	}
+	entries, err = os.ReadDir(stagingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("completed concurrent uploads left %d staging files", len(entries))
 	}
 }
 
@@ -267,7 +419,7 @@ func TestUploadEnforcesStorageLimitAcrossGroupRepositories(t *testing.T) {
 	}
 }
 
-func TestUploadWaitsForRepositoryOperationLock(t *testing.T) {
+func TestUploadWaitsForRepositoryOperationLockBeforeStaging(t *testing.T) {
 	root := t.TempDir()
 	initializeLFSRepository(t, root)
 	data := []byte("operation-locked LFS object")
@@ -309,16 +461,12 @@ func TestUploadWaitsForRepositoryOperationLock(t *testing.T) {
 		t.Fatal("upload did not reach initial authorization")
 	}
 	stagingDirectory := filepath.Join(root, ".gitone", "uploads")
-	stagingDeadline := time.Now().Add(2 * time.Second)
-	for {
-		entries, readErr := os.ReadDir(stagingDirectory)
-		if readErr == nil && len(entries) == 1 {
-			break
-		}
-		if time.Now().After(stagingDeadline) {
-			t.Fatalf("upload was not staged before waiting for its lock: %v", readErr)
-		}
-		time.Sleep(5 * time.Millisecond)
+	entries, readErr := os.ReadDir(stagingDirectory)
+	if readErr == nil && len(entries) != 0 {
+		t.Fatalf("upload staged %d objects before quota admission", len(entries))
+	}
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
 	}
 	select {
 	case recorder := <-response:
@@ -339,7 +487,7 @@ func TestUploadWaitsForRepositoryOperationLock(t *testing.T) {
 	if authorizationCalls.Load() != 2 {
 		t.Fatalf("authorization calls = %d, want 2", authorizationCalls.Load())
 	}
-	entries, err := os.ReadDir(stagingDirectory)
+	entries, err = os.ReadDir(stagingDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}

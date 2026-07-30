@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/lockmgr"
@@ -27,6 +28,17 @@ var (
 	ErrObjectSizeMismatch = errors.New("LFS object size mismatch")
 	ErrObjectStorage      = errors.New("LFS object storage error")
 )
+
+type uploadReservations struct {
+	mutex sync.Mutex
+	bytes map[string]int64
+}
+
+// processUploadReservations coordinates quota admission for uploads that
+// release the group LFS lock while streaming request bodies.
+//
+//nolint:gochecknoglobals // GitOne intentionally coordinates uploads process-wide.
+var processUploadReservations = uploadReservations{bytes: map[string]int64{}}
 
 type Handler struct {
 	Storage   storage.Store
@@ -285,7 +297,64 @@ func (h Handler) object(
 			http.Error(w, "object exceeds the group LFS storage limit", http.StatusUnprocessableEntity)
 			return
 		}
-		stagedPath, stagedSize, err := h.stageUpload(r, oid, policy)
+		releaseAdmission, err := lockmgr.Process.Acquire(
+			lockmgr.LFSRequests(h.Storage.Root, repo.Group())...,
+		)
+		if err != nil {
+			http.Error(w, "could not lock LFS quota admission", http.StatusInternalServerError)
+			return
+		}
+		policy, ok = h.policy(w, r, repo)
+		if !ok {
+			releaseAdmission()
+			return
+		}
+		stageLimit := maximumUploadBytes
+		if policy.MaximumObjectBytes > 0 && policy.MaximumObjectBytes < stageLimit {
+			stageLimit = policy.MaximumObjectBytes
+		}
+		if r.ContentLength >= 0 && r.ContentLength > stageLimit {
+			releaseAdmission()
+			http.Error(w, "object exceeds the group LFS object limit", http.StatusUnprocessableEntity)
+			return
+		}
+		limitError := errors.New("object exceeds the group LFS object limit")
+		releaseReservation := func() {}
+		if policy.MaximumStorageBytes > 0 {
+			usage, usageErr := h.groupStorageUsage(repo.Group())
+			if usageErr != nil {
+				releaseAdmission()
+				http.Error(w, "could not inspect LFS storage", http.StatusInternalServerError)
+				return
+			}
+			groupRoot, pathErr := h.Storage.GroupPath(repo.Group())
+			if pathErr != nil {
+				releaseAdmission()
+				http.Error(w, "bad path", http.StatusBadRequest)
+				return
+			}
+			var reservationErr error
+			stageLimit, releaseReservation, reservationErr = processUploadReservations.reserve(
+				groupRoot,
+				usage,
+				policy.MaximumStorageBytes,
+				stageLimit,
+				r.ContentLength,
+			)
+			if reservationErr != nil {
+				releaseAdmission()
+				http.Error(w, reservationErr.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+			if stageLimit < maximumUploadBytes &&
+				(policy.MaximumObjectBytes == 0 || stageLimit < policy.MaximumObjectBytes) {
+				limitError = errors.New("object exceeds the group LFS storage limit")
+			}
+		}
+		releaseAdmission()
+		defer releaseReservation()
+
+		stagedPath, stagedSize, err := h.stageUpload(r, oid, stageLimit, limitError)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
@@ -338,6 +407,9 @@ func (h Handler) object(
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
+		// Atomically transition from reserved staging bytes to published bytes
+		// while the group LFS lock is still held.
+		releaseReservation()
 		w.WriteHeader(200)
 	case http.MethodGet, http.MethodHead:
 		p, err := h.objectPath(repo, oid)
@@ -376,7 +448,8 @@ func (h Handler) object(
 func (h Handler) stageUpload(
 	r *http.Request,
 	oid string,
-	policy control.LFSPolicy,
+	limit int64,
+	limitError error,
 ) (string, int64, error) {
 	root, err := repopath.SafeJoin(h.Storage.Root, ".gitone", "uploads")
 	if err != nil {
@@ -394,28 +467,22 @@ func (h Handler) stageUpload(
 		_ = temporary.Close()
 	}()
 	hash := sha256.New()
-	limit := maximumUploadBytes
-	if policy.MaximumObjectBytes > 0 && policy.MaximumObjectBytes < limit {
-		limit = policy.MaximumObjectBytes
-	}
-	// A single object can never be published if it alone exceeds the group's
-	// total storage quota, so cap the bytes streamed to the staging file at
-	// that quota. Without this, a group with only MaximumStorageBytes set (a
-	// common configuration) would let one request write up to 100 GiB into the
-	// staging directory before publishUpload rejects it, filling the disk.
-	if policy.MaximumStorageBytes > 0 && policy.MaximumStorageBytes < limit {
-		limit = policy.MaximumStorageBytes
-	}
-	n, err := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(r.Body, limit+1))
+	n, err := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(r.Body, limit))
 	if err != nil {
 		_ = temporary.Close()
 		_ = os.Remove(name)
 		return "", 0, err
 	}
-	if n > limit {
+	extra, err := io.ReadAll(io.LimitReader(r.Body, 1))
+	if err != nil {
 		_ = temporary.Close()
 		_ = os.Remove(name)
-		return "", 0, errors.New("object exceeds the group LFS object limit")
+		return "", 0, err
+	}
+	if len(extra) != 0 {
+		_ = temporary.Close()
+		_ = os.Remove(name)
+		return "", 0, limitError
 	}
 	if err = temporary.Sync(); err != nil {
 		_ = temporary.Close()
@@ -431,6 +498,51 @@ func (h Handler) stageUpload(
 		return "", 0, errors.New("sha256 mismatch")
 	}
 	return name, n, nil
+}
+
+func (r *uploadReservations) reserve(
+	key string,
+	usage int64,
+	quota int64,
+	maximum int64,
+	contentLength int64,
+) (int64, func(), error) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	available := int64(0)
+	if usage < quota {
+		available = quota - usage
+		if reserved := r.bytes[key]; reserved < available {
+			available -= reserved
+		} else {
+			available = 0
+		}
+	}
+	reservation := maximum
+	if contentLength >= 0 {
+		reservation = contentLength
+		if reservation > available {
+			return 0, func() {}, errors.New("object exceeds the group LFS storage limit")
+		}
+	} else if reservation > available {
+		reservation = available
+	}
+	if reservation == 0 {
+		return 0, func() {}, nil
+	}
+	r.bytes[key] += reservation
+	var once sync.Once
+	return reservation, func() {
+		once.Do(func() {
+			r.mutex.Lock()
+			r.bytes[key] -= reservation
+			if r.bytes[key] == 0 {
+				delete(r.bytes, key)
+			}
+			r.mutex.Unlock()
+		})
+	}, nil
 }
 
 func (h Handler) publishUpload(
