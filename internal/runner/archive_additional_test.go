@@ -114,6 +114,37 @@ func TestExtractSourceArchiveRejectsUnsafeAndUnsupportedEntries(t *testing.T) {
 	}
 }
 
+func TestExtractSourceArchiveRejectsSymlinkPrefixEscape(t *testing.T) {
+	// A lexical containment check is not enough: an archive can first extract a
+	// symlink that resolves inside the root ("a" -> ".") and then nest entries
+	// beneath it ("a/b" -> "../evil", "a/b/x"), so the later writes follow the
+	// on-disk symlink and land outside the extraction root.
+	contents := sourceArchive(t,
+		archiveTestEntry{
+			header: tar.Header{Name: "a", Typeflag: tar.TypeSymlink, Linkname: "."},
+		},
+		archiveTestEntry{
+			header: tar.Header{Name: "a/b", Typeflag: tar.TypeSymlink, Linkname: "../evil"},
+		},
+		archiveTestEntry{
+			header:  tar.Header{Name: "a/b/x", Typeflag: tar.TypeReg, Mode: 0o644},
+			content: "pwned\n",
+		},
+	)
+	outer := t.TempDir()
+	destination := filepath.Join(outer, "workspace")
+	if err := os.MkdirAll(destination, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	err := ExtractSourceArchive(bytes.NewReader(contents), destination)
+	if err == nil || !strings.Contains(err.Error(), "traverses a symlink") {
+		t.Fatalf("error = %v, want containing %q", err, "traverses a symlink")
+	}
+	if _, statErr := os.Lstat(filepath.Join(outer, "evil")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("extraction escaped the destination: %v", statErr)
+	}
+}
+
 func TestExtractSourceArchiveReportsInputAndFilesystemErrors(t *testing.T) {
 	t.Run("invalid gzip", func(t *testing.T) {
 		if err := ExtractSourceArchive(strings.NewReader("not gzip"), t.TempDir()); err == nil {
