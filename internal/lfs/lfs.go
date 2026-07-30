@@ -13,7 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/httpio"
 	"github.com/define42/GitOne/internal/lockmgr"
@@ -287,6 +289,12 @@ func (h Handler) authorize(w http.ResponseWriter, r *http.Request, repo repopath
 	authenticated, allowed := h.Authorize(r, repo, write)
 	if allowed {
 		return true
+	}
+	if retryAfter, limited := auth.RequestRateLimit(r.Context()); limited {
+		seconds := max(1, int((retryAfter+time.Second-1)/time.Second))
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		http.Error(w, "too many authentication attempts", http.StatusTooManyRequests)
+		return false
 	}
 	if !authenticated {
 		w.Header().Set("WWW-Authenticate", `Basic realm="GitOne"`)

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,28 @@ import (
 
 type staticDirectory map[string]string
 
+type countingRejectingDirectory struct {
+	mutex sync.Mutex
+	calls int
+}
+
+func (d *countingRejectingDirectory) Authenticate(
+	context.Context,
+	string,
+	string,
+) (string, error) {
+	d.mutex.Lock()
+	d.calls++
+	d.mutex.Unlock()
+	return "", errors.New("invalid credentials")
+}
+
+func (d *countingRejectingDirectory) Calls() int {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	return d.calls
+}
+
 func testLDAPDirectory() staticDirectory {
 	return staticDirectory{"alice": "secret"}
 }
@@ -47,6 +70,133 @@ func (d staticDirectory) Authenticate(
 		return "", errors.New("invalid credentials")
 	}
 	return username, nil
+}
+
+func TestAuthenticationRateLimitCoversEveryHTTPAuthPath(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repository, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controls := control.NewStore(root)
+	document, err := controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash, err := auth.HashSecret("actual-token-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tokens = []control.Token{{
+		Name: "CI",
+		Key:  "ci",
+		Hash: tokenHash,
+		Role: control.RoleRead,
+	}}
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		request func() *http.Request
+	}{
+		{
+			name: "browser login",
+			request: func() *http.Request {
+				return httptest.NewRequest(
+					http.MethodPost,
+					"/api/session",
+					strings.NewReader(`{"username":"ci","password":"wrong"}`),
+				)
+			},
+		},
+		{
+			name: "API Basic auth",
+			request: func() *http.Request {
+				request := httptest.NewRequest(
+					http.MethodGet,
+					"/api/groups/engineering",
+					nil,
+				)
+				request.SetBasicAuth("ci", "wrong")
+				return request
+			},
+		},
+		{
+			name: "Git Basic auth",
+			request: func() *http.Request {
+				request := httptest.NewRequest(
+					http.MethodGet,
+					"/engineering/api.git/info/refs?service=git-upload-pack",
+					nil,
+				)
+				request.SetBasicAuth("ci", "wrong")
+				return request
+			},
+		},
+		{
+			name: "LFS Basic auth",
+			request: func() *http.Request {
+				request := httptest.NewRequest(
+					http.MethodPost,
+					"/engineering/api.git/info/lfs/objects/batch",
+					strings.NewReader(`{"operation":"download","objects":[]}`),
+				)
+				request.SetBasicAuth("ci", "wrong")
+				return request
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := &countingRejectingDirectory{}
+			handler := New(Config{
+				Root:      root,
+				Directory: directory,
+				AuthAttempts: auth.NewAttemptLimiter(auth.AttemptLimiterOptions{
+					MaximumConcurrent: 1,
+					FailureThreshold:  1,
+					InitialBackoff:    time.Minute,
+					MaximumBackoff:    time.Minute,
+				}),
+			})
+
+			firstResponse := httptest.NewRecorder()
+			handler.ServeHTTP(firstResponse, test.request())
+			if firstResponse.Code != http.StatusUnauthorized {
+				t.Fatalf(
+					"first failed authentication returned %d: %s",
+					firstResponse.Code,
+					firstResponse.Body.String(),
+				)
+			}
+
+			limitedResponse := httptest.NewRecorder()
+			handler.ServeHTTP(limitedResponse, test.request())
+			if limitedResponse.Code != http.StatusTooManyRequests {
+				t.Fatalf(
+					"limited authentication returned %d: %s",
+					limitedResponse.Code,
+					limitedResponse.Body.String(),
+				)
+			}
+			if limitedResponse.Header().Get("Retry-After") == "" {
+				t.Fatal("429 response did not include Retry-After")
+			}
+			if calls := directory.Calls(); calls != 1 {
+				t.Fatalf("directory binds = %d, want 1", calls)
+			}
+		})
+	}
 }
 
 func TestCreateGroupUsesAuthenticatedUserAsOwner(t *testing.T) {

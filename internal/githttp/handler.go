@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
+	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/httpio"
 	"github.com/define42/GitOne/internal/lockmgr"
@@ -97,6 +100,12 @@ func (h Handler) authorize(
 	authenticated, allowed := h.Authorize(r, repository, write)
 	if allowed {
 		return true
+	}
+	if retryAfter, limited := auth.RequestRateLimit(r.Context()); limited {
+		seconds := max(1, int((retryAfter+time.Second-1)/time.Second))
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		http.Error(w, "too many authentication attempts", http.StatusTooManyRequests)
+		return false
 	}
 	if !authenticated {
 		w.Header().Set("WWW-Authenticate", `Basic realm="GitOne"`)

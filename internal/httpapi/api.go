@@ -358,6 +358,9 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 	output := &listGroupsOutput{}
 	output.Body.Groups = []groupSummary{}
 	identity, identityErr := a.authenticateIdentity(ctx, input.AuthInput)
+	if isTooManyRequests(identityErr) {
+		return nil, identityErr
+	}
 	authenticated := identityErr == nil
 	for _, group := range groups {
 		var principal auth.Principal
@@ -368,6 +371,9 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 			principal, resolveErr = a.authenticateBasicGroup(ctx, input.AuthInput, group.Path)
 		}
 		if resolveErr != nil {
+			if errors.Is(resolveErr, auth.ErrRateLimited) {
+				return nil, authenticationError(resolveErr)
+			}
 			continue
 		}
 		authenticated = true
@@ -554,6 +560,9 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 			}
 			hash, err = auth.HashSecret(secret)
 			if err != nil {
+				if errors.Is(err, auth.ErrRateLimited) {
+					return nil, authenticationError(err)
+				}
 				return nil, huma.Error500InternalServerError("could not secure token secret", err)
 			}
 			generatedSecrets = append(generatedSecrets, generatedGroupTokenSecret{
@@ -1060,7 +1069,7 @@ func (a API) authorizePrincipal(
 		principal, authErr = a.authenticateBasicGroup(ctx, credentials, group)
 	}
 	if authErr != nil {
-		return auth.Principal{}, huma.Error401Unauthorized("invalid credentials")
+		return auth.Principal{}, authenticationError(authErr)
 	}
 	if !principal.Role.Allows(need) {
 		return auth.Principal{}, huma.Error403Forbidden("forbidden")
@@ -1078,7 +1087,7 @@ func (a API) authenticateIdentity(ctx context.Context, credentials AuthInput) (a
 	}
 	principal, authErr := a.Resolver.AuthenticateIdentity(ctx, user, secret)
 	if authErr != nil {
-		return auth.Principal{}, huma.Error401Unauthorized("invalid credentials")
+		return auth.Principal{}, authenticationError(authErr)
 	}
 	return principal, nil
 }
@@ -1121,6 +1130,24 @@ func basicCredentials(header string) (string, string, error) {
 		return "", "", huma.Error401Unauthorized("authentication required")
 	}
 	return user, secret, nil
+}
+
+func authenticationError(err error) error {
+	if !errors.Is(err, auth.ErrRateLimited) {
+		return huma.Error401Unauthorized("invalid credentials")
+	}
+	retryAfter := auth.RetryAfter(err)
+	seconds := max(1, int((retryAfter+time.Second-1)/time.Second))
+	return huma.ErrorWithHeaders(
+		huma.Error429TooManyRequests("too many authentication attempts"),
+		http.Header{"Retry-After": []string{fmt.Sprintf("%d", seconds)}},
+	)
+}
+
+func isTooManyRequests(err error) bool {
+	var statusErr huma.StatusError
+	return errors.As(err, &statusErr) &&
+		statusErr.GetStatus() == http.StatusTooManyRequests
 }
 
 func canonicalGroup(value string) (string, error) {

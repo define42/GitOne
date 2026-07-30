@@ -28,6 +28,8 @@ const (
 type Resolver struct {
 	Controls  ControlStore
 	Directory IdentityProvider
+	Attempts  *AttemptLimiter
+	argon2    *argon2Limiter
 }
 
 type ControlStore interface {
@@ -46,6 +48,15 @@ type Principal struct {
 }
 
 func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string) (Principal, error) {
+	finish, err := r.beginAttempt(ctx, user)
+	if err != nil {
+		return Principal{}, err
+	}
+	succeeded := false
+	defer func() {
+		finish(succeeded)
+	}()
+
 	type groupControl struct {
 		path     string
 		document control.Document
@@ -63,7 +74,12 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 				(token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt)) {
 				continue
 			}
-			if VerifySecret(token.Hash, secret) {
+			matched, verifyErr := verifySecret(r.argon2Limiter(), token.Hash, secret)
+			if verifyErr != nil {
+				return Principal{}, verifyErr
+			}
+			if matched {
+				succeeded = true
 				return Principal{
 					Name:  user,
 					Role:  token.Role,
@@ -75,7 +91,7 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 			break
 		}
 	}
-	identity, err := r.AuthenticateIdentity(ctx, user, secret)
+	identity, err := r.authenticateIdentity(ctx, user, secret)
 	if err != nil {
 		return Principal{}, errors.New("invalid credentials")
 	}
@@ -83,6 +99,7 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 		if role, ok := candidate.document.Members[identity.Name]; ok {
 			identity.Role = role
 			identity.Group = candidate.path
+			succeeded = true
 			return identity, nil
 		}
 	}
@@ -90,6 +107,26 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 }
 
 func (r *Resolver) AuthenticateIdentity(
+	ctx context.Context,
+	user string,
+	secret string,
+) (Principal, error) {
+	finish, err := r.beginAttempt(ctx, user)
+	if err != nil {
+		return Principal{}, err
+	}
+	succeeded := false
+	defer func() {
+		finish(succeeded)
+	}()
+	principal, err := r.authenticateIdentity(ctx, user, secret)
+	if err == nil {
+		succeeded = true
+	}
+	return principal, err
+}
+
+func (r *Resolver) authenticateIdentity(
 	ctx context.Context,
 	user string,
 	secret string,
@@ -102,6 +139,23 @@ func (r *Resolver) AuthenticateIdentity(
 		return Principal{}, errors.New("invalid credentials")
 	}
 	return Principal{Name: canonical}, nil
+}
+
+func (r *Resolver) beginAttempt(
+	ctx context.Context,
+	user string,
+) (func(bool), error) {
+	if r.Attempts == nil {
+		return func(bool) {}, nil
+	}
+	return r.Attempts.Begin(ctx, user)
+}
+
+func (r *Resolver) argon2Limiter() *argon2Limiter {
+	if r.argon2 != nil {
+		return r.argon2
+	}
+	return processArgon2Limiter
 }
 
 func (r *Resolver) AuthorizeIdentity(
@@ -144,6 +198,11 @@ func HashSecret(secret string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("generate salt: %w", err)
 	}
+	release, err := processArgon2Limiter.acquire()
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	hash := argon2.IDKey([]byte(secret), salt, argonIterations, argonMemory, argonParallelism, argonKeyBytes)
 	return fmt.Sprintf(
 		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
@@ -171,37 +230,47 @@ func GenerateTokenSecret() (string, error) {
 }
 
 func VerifySecret(encoded, secret string) bool {
+	matched, err := verifySecret(processArgon2Limiter, encoded, secret)
+	return err == nil && matched
+}
+
+func verifySecret(limiter *argon2Limiter, encoded, secret string) (bool, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" {
-		return false
+		return false, nil
 	}
 	version, ok := parseValue(parts[2], "v")
 	if !ok || version != argon2.Version {
-		return false
+		return false, nil
 	}
 	var memory, iterations uint64
 	var parallelism uint64
 	parameters := strings.Split(parts[3], ",")
 	if len(parameters) != 3 {
-		return false
+		return false, nil
 	}
 	if memory, ok = parseValue(parameters[0], "m"); !ok || memory < 8*1024 || memory > 256*1024 {
-		return false
+		return false, nil
 	}
 	if iterations, ok = parseValue(parameters[1], "t"); !ok || iterations < 1 || iterations > 10 {
-		return false
+		return false, nil
 	}
 	if parallelism, ok = parseValue(parameters[2], "p"); !ok || parallelism < 1 || parallelism > 16 {
-		return false
+		return false, nil
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil || len(salt) < 16 || len(salt) > 64 {
-		return false
+		return false, nil
 	}
 	expected, err := base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil || len(expected) < 16 || len(expected) > 64 {
-		return false
+		return false, nil
 	}
+	release, err := limiter.acquire()
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	actual := argon2.IDKey(
 		[]byte(secret),
 		salt,
@@ -210,7 +279,7 @@ func VerifySecret(encoded, secret string) bool {
 		uint8(parallelism),
 		uint32(len(expected)),
 	)
-	return subtle.ConstantTimeCompare(actual, expected) == 1
+	return subtle.ConstantTimeCompare(actual, expected) == 1, nil
 }
 
 func parseValue(value, key string) (uint64, bool) {

@@ -75,6 +75,10 @@ func (a API) login(ctx context.Context, input *loginInput) (*loginOutput, error)
 	username := strings.TrimSpace(input.Body.Username)
 	principal, err := a.Resolver.AuthenticateIdentity(ctx, username, input.Body.Password)
 	if err != nil {
+		responseErr := authenticationError(err)
+		if isTooManyRequests(responseErr) {
+			return nil, responseErr
+		}
 		return nil, huma.Error401Unauthorized("invalid username or password")
 	}
 	cookie, err := a.Sessions.CookieHeader(principal.Name)

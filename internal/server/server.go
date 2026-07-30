@@ -24,14 +24,20 @@ type Config struct {
 	Coordinator         *runner.Coordinator
 	RunnerToken         string
 	ImportNetworkPolicy storage.ImportNetworkPolicy
+	AuthAttempts        *auth.AttemptLimiter
 }
 
 func New(c Config) http.Handler {
 	st := storage.Store{Root: c.Root}
 	cs := control.NewStore(c.Root)
+	attempts := c.AuthAttempts
+	if attempts == nil {
+		attempts = auth.NewAttemptLimiter(auth.AttemptLimiterOptions{})
+	}
 	ar := &auth.Resolver{
 		Controls:  cs,
 		Directory: c.Directory,
+		Attempts:  attempts,
 	}
 	sessions := c.Sessions
 	if sessions == nil {
@@ -54,6 +60,11 @@ func New(c Config) http.Handler {
 				}
 				if _, authErr := ar.AuthenticateIdentity(r.Context(), u, p); authErr == nil {
 					return true, true
+				} else if authErr != nil {
+					auth.MarkRequestRateLimited(r.Context(), authErr)
+					if _, limited := auth.RequestRateLimit(r.Context()); limited {
+						return false, false
+					}
 				}
 			}
 		}
@@ -63,6 +74,7 @@ func New(c Config) http.Handler {
 		}
 		pr, e := ar.Authenticate(r.Context(), repo.Group(), u, p)
 		if e != nil {
+			auth.MarkRequestRateLimited(r.Context(), e)
 			return false, false
 		}
 		need := control.RoleRead
@@ -150,7 +162,10 @@ func New(c Config) http.Handler {
 		}
 		gh.ServeHTTP(w, r)
 	}))
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := auth.WithClientIP(r.Context(), r.RemoteAddr)
+		mux.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func containsLFS(p string) bool {
