@@ -36,6 +36,37 @@ func TestControlRefValidation(t *testing.T) {
 	}
 }
 
+func TestGitRequestBodyLimitsRejectDeclaredOversize(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		path    string
+		maximum int64
+	}{
+		{
+			name:    "upload pack",
+			path:    "/engineering/api.git/git-upload-pack",
+			maximum: maximumUploadPackRequestBytes,
+		},
+		{
+			name:    "receive pack",
+			path:    "/engineering/api.git/git-receive-pack",
+			maximum: maximumReceivePackRequestBytes,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.path, http.NoBody)
+			request.ContentLength = test.maximum + 1
+			response := httptest.NewRecorder()
+
+			(Handler{}).ServeHTTP(response, request)
+
+			if response.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestControlRejectsTags(t *testing.T) {
 	req := packp.NewReferenceUpdateRequest()
 	req.Commands = []*packp.Command{{Name: plumbing.NewTagReferenceName("v1"), Old: plumbing.NewHash("1111111111111111111111111111111111111111"), New: plumbing.NewHash("2222222222222222222222222222222222222222")}}

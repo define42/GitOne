@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,6 +111,45 @@ func TestPolicyDisablesLFS(t *testing.T) {
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("expected disabled LFS to return 403, got %d", response.Code)
+	}
+}
+
+func TestLFSRequestBodyLimitsRejectDeclaredOversize(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		path    string
+		maximum int64
+	}{
+		{
+			name:    "batch metadata",
+			path:    "/g/r.git/info/lfs/objects/batch",
+			maximum: maximumMetadataBytes,
+		},
+		{
+			name:    "verify metadata",
+			path:    "/g/r.git/info/lfs/objects/verify",
+			maximum: maximumMetadataBytes,
+		},
+		{
+			name:    "object upload",
+			path:    "/g/r.git/info/lfs/objects/" + strings.Repeat("0", 64),
+			maximum: maximumUploadBytes,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.path, http.NoBody)
+			if test.name == "object upload" {
+				request.Method = http.MethodPut
+			}
+			request.ContentLength = test.maximum + 1
+			response := httptest.NewRecorder()
+
+			(Handler{}).ServeHTTP(response, request)
+
+			if response.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

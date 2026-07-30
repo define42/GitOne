@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/httpio"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
@@ -22,7 +23,11 @@ import (
 	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
 )
 
-const noThinCapability capability.Capability = "no-thin"
+const (
+	noThinCapability               capability.Capability = "no-thin"
+	maximumUploadPackRequestBytes  int64                 = 16 << 20
+	maximumReceivePackRequestBytes int64                 = 100 << 30
+)
 
 type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 
@@ -40,8 +45,28 @@ type Handler struct {
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	repo, suffix, err := repopath.ParseGitRequestPath(r.URL.Path)
+	maximumBodyBytes := int64(0)
+	if err == nil {
+		switch suffix {
+		case "/git-upload-pack":
+			maximumBodyBytes = maximumUploadPackRequestBytes
+		case "/git-receive-pack":
+			maximumBodyBytes = maximumReceivePackRequestBytes
+		}
+	}
+	w, cleanup := httpio.Protect(
+		w,
+		r,
+		httpio.DefaultIdleTimeout,
+		maximumBodyBytes,
+	)
+	defer cleanup()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if r.ContentLength > maximumBodyBytes {
+		http.Error(w, "Git request body is too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	write := suffix == "/git-receive-pack" || (suffix == "/info/refs" && r.URL.Query().Get("service") == "git-receive-pack")
@@ -166,6 +191,10 @@ func (h Handler) uploadPack(w http.ResponseWriter, r *http.Request, repo repopat
 	}()
 	req := packp.NewUploadPackRequest()
 	if err = req.Decode(r.Body); err != nil {
+		if httpio.BodyTooLarge(err) {
+			http.Error(w, "upload-pack request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "bad upload-pack request", 400)
 		return
 	}
@@ -185,6 +214,10 @@ func (h Handler) uploadPack(w http.ResponseWriter, r *http.Request, repo repopat
 func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
 	req := packp.NewReferenceUpdateRequest()
 	if err := req.Decode(r.Body); err != nil {
+		if httpio.BodyTooLarge(err) {
+			http.Error(w, "receive-pack request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "bad receive-pack request", 400)
 		return
 	}
@@ -238,10 +271,18 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 	reader := bufio.NewReader(req.Packfile)
 	if _, peekErr := reader.Peek(1); peekErr == nil {
 		if err = packfile.UpdateObjectStorage(repository.Storer, reader); err != nil {
+			if httpio.BodyTooLarge(err) {
+				http.Error(w, "receive-pack request is too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			h.writeReceiveError(w, req, err.Error(), err)
 			return
 		}
 	} else if !errors.Is(peekErr, io.EOF) {
+		if httpio.BodyTooLarge(peekErr) {
+			http.Error(w, "receive-pack request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		h.writeReceiveError(w, req, peekErr.Error(), peekErr)
 		return
 	}

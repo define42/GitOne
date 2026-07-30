@@ -15,13 +15,17 @@ import (
 	"sync"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/httpio"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
 )
 
-const maximumUploadBytes int64 = 100 << 30
+const (
+	maximumUploadBytes   int64 = 100 << 30
+	maximumMetadataBytes int64 = 1 << 20
+)
 
 var (
 	ErrInvalidObject      = errors.New("invalid LFS object")
@@ -76,8 +80,29 @@ type verifyRequest struct {
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	repo, suffix, e := repopath.ParseGitRequestPath(r.URL.Path)
+	maximumBodyBytes := int64(0)
+	if e == nil {
+		switch {
+		case suffix == "/info/lfs/objects/batch",
+			suffix == "/info/lfs/objects/verify":
+			maximumBodyBytes = maximumMetadataBytes
+		case strings.HasPrefix(suffix, "/info/lfs/objects/") && r.Method == http.MethodPut:
+			maximumBodyBytes = maximumUploadBytes
+		}
+	}
+	w, cleanup := httpio.Protect(
+		w,
+		r,
+		httpio.DefaultIdleTimeout,
+		maximumBodyBytes,
+	)
+	defer cleanup()
 	if e != nil {
-		http.Error(w, e.Error(), 400)
+		http.Error(w, e.Error(), http.StatusBadRequest)
+		return
+	}
+	if r.ContentLength > maximumBodyBytes {
+		http.Error(w, "LFS request body is too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	switch {
@@ -112,13 +137,21 @@ func (h Handler) verify(w http.ResponseWriter, r *http.Request, repo repopath.Re
 	}
 
 	var q verifyRequest
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&q); err != nil {
+		if httpio.BodyTooLarge(err) {
+			http.Error(w, "LFS verify request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if httpio.BodyTooLarge(err) {
+			http.Error(w, "LFS verify request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -138,9 +171,22 @@ func (h Handler) verify(w http.ResponseWriter, r *http.Request, repo repopath.Re
 
 func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
 	var q batchRequest
-	d := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	if d.Decode(&q) != nil {
+	d := json.NewDecoder(r.Body)
+	if err := d.Decode(&q); err != nil {
+		if httpio.BodyTooLarge(err) {
+			http.Error(w, "LFS batch request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid JSON", 400)
+		return
+	}
+	var trailing any
+	if err := d.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if httpio.BodyTooLarge(err) {
+			http.Error(w, "LFS batch request is too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 	if !h.authorize(w, r, repo, q.Operation == "upload") {
@@ -356,6 +402,10 @@ func (h Handler) object(
 
 		stagedPath, stagedSize, err := h.stageUpload(r, oid, stageLimit, limitError)
 		if err != nil {
+			if httpio.BodyTooLarge(err) {
+				http.Error(w, "LFS object is too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}

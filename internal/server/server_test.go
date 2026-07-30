@@ -1725,6 +1725,36 @@ func TestImportBareRepositoryFromArchiveUpload(t *testing.T) {
 	}
 }
 
+func TestImportRepositoryArchiveRejectsDeclaredOversize(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root:      root,
+		Directory: testLDAPDirectory(),
+	})
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Foversize/import-archive?filename=repo.zip",
+		http.NoBody,
+	)
+	request.Header.Set("Content-Type", "application/zip")
+	request.ContentLength = storage.MaximumImportArchiveBytes + 1
+	request.SetBasicAuth("alice", "secret")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("archive import: status %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "engineering", "oversize.git")); !os.IsNotExist(err) {
+		t.Fatalf("oversized archive created repository data: %v", err)
+	}
+}
+
 func repositoryZIPBytes(t *testing.T, repositoryPath string) []byte {
 	t.Helper()
 	var output bytes.Buffer

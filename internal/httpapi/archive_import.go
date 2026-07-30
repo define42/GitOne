@@ -9,6 +9,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/httpio"
 	"github.com/define42/GitOne/internal/storage"
 )
 
@@ -77,6 +78,13 @@ func registerRepositoryArchiveImport(mux *http.ServeMux, api huma.API, service A
 }
 
 func (a API) importRepositoryArchiveHTTP(w http.ResponseWriter, request *http.Request) {
+	w, cleanup := httpio.Protect(
+		w,
+		request,
+		httpio.DefaultIdleTimeout,
+		storage.MaximumImportArchiveBytes,
+	)
+	defer cleanup()
 	repository, err := parseRepositoryPath(request.PathValue("path"))
 	if err != nil {
 		writeArchiveImportProblem(w, http.StatusBadRequest, err.Error())
@@ -130,10 +138,18 @@ func (a API) importRepositoryArchiveHTTP(w http.ResponseWriter, request *http.Re
 
 	written, copyErr := io.Copy(
 		upload,
-		io.LimitReader(request.Body, storage.MaximumImportArchiveBytes+1),
+		request.Body,
 	)
 	closeErr := upload.Close()
 	if copyErr != nil {
+		if httpio.BodyTooLarge(copyErr) {
+			writeArchiveImportProblem(
+				w,
+				http.StatusRequestEntityTooLarge,
+				"archive upload exceeds the 1 GiB limit",
+			)
+			return
+		}
 		writeArchiveImportProblem(
 			w,
 			http.StatusBadRequest,

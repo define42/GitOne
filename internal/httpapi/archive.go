@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/define42/GitOne/internal/httpio"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -66,11 +67,16 @@ func (a API) downloadRepositoryArchive(
 			)
 			response.SetHeader("Cache-Control", "no-store")
 			response.SetHeader("X-Content-Type-Options", "nosniff")
+			output, cleanup := httpio.ProtectWriter(
+				response.BodyWriter(),
+				httpio.DefaultIdleTimeout,
+			)
+			defer cleanup()
 			var writeErr error
 			if format == "zip" {
-				writeErr = writeRepositoryZIP(tree, commit, prefix, response.BodyWriter())
+				writeErr = writeRepositoryZIP(tree, commit, prefix, output)
 			} else {
-				writeErr = writeRepositoryTarGzip(tree, commit, prefix, response.BodyWriter())
+				writeErr = writeRepositoryTarGzip(tree, commit, prefix, output)
 			}
 			if writeErr != nil {
 				log.Printf(
