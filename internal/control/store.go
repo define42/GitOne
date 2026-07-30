@@ -40,7 +40,7 @@ func (s *Store) Load(ctx context.Context, group string) (Document, error) {
 	c, ok := s.cache[group]
 	s.mu.RUnlock()
 	if ok && c.hash == ref.Hash() {
-		return c.doc, nil
+		return c.doc.clone(), nil
 	}
 	d, e := ReadDocument(r, ref.Hash(), group)
 	if e != nil {
@@ -49,7 +49,7 @@ func (s *Store) Load(ctx context.Context, group string) (Document, error) {
 	s.mu.Lock()
 	s.cache[group] = cached{ref.Hash(), d}
 	s.mu.Unlock()
-	return d, nil
+	return d.clone(), nil
 }
 
 func ReadDocument(repository *git.Repository, hash plumbing.Hash, group string) (Document, error) {
