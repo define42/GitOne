@@ -493,15 +493,15 @@ async function copyText(value) {
         input.remove();
     }
     if (!copied) {
-        throw new Error("Could not copy the clone command.");
+        throw new Error("Clipboard copy failed.");
     }
 }
-function copyButton(value) {
+function copyButton(value, description = "clone command") {
     const button = element("button");
     button.type = "button";
     button.className = "icon-button copy-button";
-    button.title = "Copy clone command";
-    button.setAttribute("aria-label", `Copy ${value}`);
+    button.title = `Copy ${description}`;
+    button.setAttribute("aria-label", `Copy ${description}`);
     button.append(icon("copy"));
     button.addEventListener("click", async () => {
         try {
@@ -509,19 +509,73 @@ function copyButton(value) {
             button.classList.add("copied");
             button.replaceChildren(icon("check"));
             button.title = "Copied";
-            button.setAttribute("aria-label", `Copied ${value}`);
+            button.setAttribute("aria-label", `Copied ${description}`);
             window.setTimeout(() => {
                 button.classList.remove("copied");
                 button.replaceChildren(icon("copy"));
-                button.title = "Copy clone command";
-                button.setAttribute("aria-label", `Copy ${value}`);
+                button.title = `Copy ${description}`;
+                button.setAttribute("aria-label", `Copy ${description}`);
             }, 1500);
         }
         catch (reason) {
-            showStatus(reason instanceof Error ? reason.message : "Could not copy the clone command.", true);
+            showStatus(reason instanceof Error ? reason.message : `Could not copy ${description}.`, true);
         }
     });
     return button;
+}
+function showGeneratedTokenSecrets(secrets) {
+    if (secrets.length === 0) {
+        return;
+    }
+    const dialog = element("dialog");
+    dialog.className = "action-dialog clone-dialog";
+    const content = element("div");
+    content.className = "dialog-form";
+    const header = element("div");
+    header.className = "dialog-header";
+    const title = element("h2", secrets.length === 1 ? "Token secret" : "Token secrets");
+    title.id = "token-secret-dialog-title";
+    dialog.setAttribute("aria-labelledby", title.id);
+    const close = actionButton("Close", "close", "icon-button");
+    close.setAttribute("aria-label", "Close");
+    close.title = "Close";
+    header.append(title, close);
+    const warning = element("p", "Copy these generated 32-character secrets now. GitOne will not show them again.");
+    warning.className = "dialog-description";
+    content.append(header, warning);
+    let firstInput;
+    for (const generated of secrets) {
+        const label = element("label", `${generated.name} (${generated.key})`);
+        const field = element("div");
+        field.className = "clone-field";
+        const input = element("input");
+        input.value = generated.secret;
+        input.readOnly = true;
+        input.spellcheck = false;
+        input.autocomplete = "off";
+        input.setAttribute("aria-label", `Generated secret for ${generated.name}`);
+        input.addEventListener("focus", () => input.select());
+        firstInput ??= input;
+        field.append(input, copyButton(generated.secret, `secret for ${generated.name}`));
+        label.append(field);
+        content.append(label);
+    }
+    const actions = element("div");
+    actions.className = "dialog-actions";
+    const done = actionButton("Done", undefined, "primary");
+    actions.append(done);
+    content.append(actions);
+    dialog.append(content);
+    document.body.append(dialog);
+    const dismiss = () => dialog.close();
+    close.addEventListener("click", dismiss);
+    done.addEventListener("click", dismiss);
+    dialog.addEventListener("cancel", (event) => {
+        event.preventDefault();
+    });
+    dialog.addEventListener("close", () => dialog.remove());
+    dialog.showModal();
+    firstInput?.focus();
 }
 function repositoryDeleteControl(groupPath, repositoryName) {
     const container = element("div");
@@ -1264,7 +1318,6 @@ function groupSettingsControl(path, settings, role) {
     const addTokenRow = (token = {
         name: "",
         key: "",
-        hash: "",
         role: "developer",
     }) => {
         const row = element("fieldset");
@@ -1293,19 +1346,6 @@ function groupSettingsControl(path, settings, role) {
         tokenKey.value = token.key;
         const tokenRole = roleSelect(token.role, canManageOwnerSettings);
         tokenRole.className = "token-role";
-        const tokenHash = element("input");
-        tokenHash.className = "token-hash";
-        tokenHash.readOnly = true;
-        tokenHash.autocomplete = "off";
-        tokenHash.spellcheck = false;
-        tokenHash.value = token.hash;
-        tokenKey.addEventListener("input", () => {
-            tokenHash.value = tokenKey.value.trim() === token.key ? token.hash : "";
-        });
-        const tokenSecret = element("input");
-        tokenSecret.className = "token-secret";
-        tokenSecret.type = "password";
-        tokenSecret.autocomplete = "new-password";
         const tokenExpiry = element("input");
         tokenExpiry.className = "token-expires";
         tokenExpiry.type = "datetime-local";
@@ -1317,7 +1357,28 @@ function groupSettingsControl(path, settings, role) {
         const disabledLabel = element("label");
         disabledLabel.className = "checkbox-label settings-checkbox";
         disabledLabel.append(tokenDisabled, document.createTextNode("Disabled"));
-        fields.append(fieldLabel("Token name", tokenName), fieldLabel("Login key", tokenKey), fieldLabel("Role", tokenRole), fieldLabel("Stored hash", tokenHash), fieldLabel("New secret", tokenSecret), fieldLabel("Expires", tokenExpiry), disabledLabel);
+        const regenerate = element("input");
+        regenerate.className = "token-regenerate";
+        regenerate.type = "checkbox";
+        const regenerateLabel = element("label");
+        regenerateLabel.className = "checkbox-label settings-checkbox";
+        const regenerateText = document.createTextNode("");
+        regenerateLabel.append(regenerate, regenerateText);
+        let regenerateExisting = false;
+        regenerate.addEventListener("change", () => {
+            regenerateExisting = regenerate.checked;
+        });
+        const refreshRegenerate = () => {
+            const existingKey = token.key !== "" && tokenKey.value.trim() === token.key;
+            regenerate.disabled = !existingKey;
+            regenerate.checked = existingKey ? regenerateExisting : true;
+            regenerateText.textContent = existingKey
+                ? "Generate a new 32-character secret on save"
+                : "A new 32-character secret will be generated on save";
+        };
+        tokenKey.addEventListener("input", refreshRegenerate);
+        refreshRegenerate();
+        fields.append(fieldLabel("Token name", tokenName), fieldLabel("Login key", tokenKey), fieldLabel("Role", tokenRole), fieldLabel("Expires", tokenExpiry), disabledLabel, regenerateLabel);
         row.append(legend, remove, fields);
         tokens.append(row);
         refreshTokenEmpty();
@@ -1459,23 +1520,17 @@ function groupSettingsControl(path, settings, role) {
             for (const row of tokens.querySelectorAll(".token-row")) {
                 const tokenName = row.querySelector(".token-name")?.value.trim() ?? "";
                 const key = row.querySelector(".token-key")?.value.trim() ?? "";
-                const secret = row.querySelector(".token-secret")?.value ?? "";
-                const hash = row.querySelector(".token-hash")?.value.trim() ?? "";
                 if (!tokenName || !key) {
                     throw new Error("Every token needs a name and key.");
-                }
-                if (!hash && !secret) {
-                    throw new Error("Every new token needs a secret.");
                 }
                 const expiry = row.querySelector(".token-expires")?.value ?? "";
                 updatedTokens.push({
                     name: tokenName,
                     key,
-                    hash,
-                    newSecret: secret || undefined,
                     role: row.querySelector(".token-role")?.value,
                     expiresAt: expiry ? new Date(expiry).toISOString() : undefined,
                     disabled: row.querySelector(".token-disabled")?.checked ?? false,
+                    regenerate: row.querySelector(".token-regenerate")?.checked ?? false,
                 });
             }
             const maximumObjectValue = maximumObject.value.trim();
@@ -1507,6 +1562,7 @@ function groupSettingsControl(path, settings, role) {
             });
             dialog.close();
             window.history.replaceState({}, "", groupURL(updated.path));
+            showGeneratedTokenSecrets(updated.generatedSecrets ?? []);
             await renderGroup(updated.path, "Group settings saved.");
         }
         catch (reason) {

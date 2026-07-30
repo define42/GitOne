@@ -1037,11 +1037,38 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 		"tokens": [{
 			"name": "deploy",
 			"key": "ci",
-			"newSecret": "deploy-secret",
 			"role": "developer",
 			"disabled": true
 		}]
 	}`
+	for _, credentialField := range []string{
+		`"newSecret": "weak"`,
+		`"hash": "hash-of-a-weak-secret"`,
+	} {
+		userChosenCredentialBody := strings.Replace(
+			body,
+			`"role": "developer"`,
+			credentialField+`, "role": "developer"`,
+			1,
+		)
+		rejectedRequest := httptest.NewRequest(
+			http.MethodPut,
+			"/api/groups/engineering/settings",
+			strings.NewReader(userChosenCredentialBody),
+		)
+		rejectedRequest.Header.Set("Content-Type", "application/json")
+		rejectedRequest.SetBasicAuth("alice", "secret")
+		rejectedResponse := httptest.NewRecorder()
+		handler.ServeHTTP(rejectedResponse, rejectedRequest)
+		if rejectedResponse.Code != http.StatusUnprocessableEntity {
+			t.Fatalf(
+				"user-chosen token credential %s: status %d: %s",
+				credentialField,
+				rejectedResponse.Code,
+				rejectedResponse.Body.String(),
+			)
+		}
+	}
 	updateRequest := httptest.NewRequest(
 		http.MethodPut,
 		"/api/groups/engineering/settings",
@@ -1053,6 +1080,28 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 	handler.ServeHTTP(updateResponse, updateRequest)
 	if updateResponse.Code != http.StatusOK {
 		t.Fatalf("update settings: status %d: %s", updateResponse.Code, updateResponse.Body.String())
+	}
+	if updateResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("token response cache control = %q", updateResponse.Header().Get("Cache-Control"))
+	}
+	var updateResult struct {
+		GeneratedSecrets []struct {
+			Name   string `json:"name"`
+			Key    string `json:"key"`
+			Secret string `json:"secret"`
+		} `json:"generatedSecrets"`
+	}
+	if err := json.Unmarshal(updateResponse.Body.Bytes(), &updateResult); err != nil {
+		t.Fatal(err)
+	}
+	if len(updateResult.GeneratedSecrets) != 1 ||
+		updateResult.GeneratedSecrets[0].Name != "deploy" ||
+		updateResult.GeneratedSecrets[0].Key != "ci" ||
+		len(updateResult.GeneratedSecrets[0].Secret) != auth.TokenSecretLength {
+		t.Fatalf("unexpected generated secrets: %#v", updateResult.GeneratedSecrets)
+	}
+	if strings.Contains(updateResponse.Body.String(), `"hash"`) {
+		t.Fatal("settings update response exposed a token hash")
 	}
 
 	controls := control.NewStore(root)
@@ -1070,6 +1119,7 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 		updated.Members["bob"] != control.RoleRead ||
 		len(updated.Tokens) != 1 ||
 		!strings.HasPrefix(updated.Tokens[0].Hash, "$argon2id$") ||
+		!auth.VerifySecret(updated.Tokens[0].Hash, updateResult.GeneratedSecrets[0].Secret) ||
 		updated.Visibility != "internal" ||
 		!updated.LFS.Enabled ||
 		updated.LFS.MaximumObjectBytes != 1024 ||
@@ -1078,6 +1128,20 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 	}
 	if descendant.Group != "product/backend" {
 		t.Fatalf("descendant control group was not renamed: %#v", descendant)
+	}
+	redactedRequest := httptest.NewRequest(http.MethodGet, "/api/groups/product/settings", nil)
+	redactedRequest.SetBasicAuth("alice", "secret")
+	redactedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(redactedResponse, redactedRequest)
+	if redactedResponse.Code != http.StatusOK {
+		t.Fatalf("get updated settings: status %d: %s", redactedResponse.Code, redactedResponse.Body.String())
+	}
+	if strings.Contains(redactedResponse.Body.String(), `"hash"`) ||
+		strings.Contains(redactedResponse.Body.String(), updateResult.GeneratedSecrets[0].Secret) {
+		t.Fatal("settings response exposed token credentials")
+	}
+	if redactedResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("settings cache control = %q", redactedResponse.Header().Get("Cache-Control"))
 	}
 
 	forbidden := httptest.NewRequest(http.MethodGet, "/api/groups/product/settings", nil)
@@ -3298,9 +3362,14 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	}
 	if !strings.Contains(assetResponse.Body.String(), "groupSettingsControl") ||
 		!strings.Contains(assetResponse.Body.String(), "groupSettingsAPIURL") ||
-		!strings.Contains(assetResponse.Body.String(), "newSecret: secret") ||
+		!strings.Contains(assetResponse.Body.String(), "showGeneratedTokenSecrets") ||
+		!strings.Contains(assetResponse.Body.String(), "regenerate:") ||
 		!strings.Contains(assetResponse.Body.String(), `method: "PUT"`) {
 		t.Fatal("served UI does not provide complete group control settings")
+	}
+	if strings.Contains(assetResponse.Body.String(), "newSecret") ||
+		strings.Contains(assetResponse.Body.String(), "tokenHash") {
+		t.Fatal("served UI still allows user-supplied token secrets or exposes token hashes")
 	}
 	if strings.Contains(assetResponse.Body.String(), "memberSecrets") ||
 		strings.Contains(assetResponse.Body.String(), "member-secret") {

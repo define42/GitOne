@@ -371,8 +371,25 @@ func validateControlUpdate(repository *git.Repository, group string, command *pa
 	if !fastForward {
 		return errors.New("control updates must be fast-forward")
 	}
-	if _, err = control.ReadDocument(repository, command.New, group); err != nil {
+	current, err := control.ReadDocument(repository, command.Old, group)
+	if err != nil {
+		return fmt.Errorf("invalid control.json at current revision: %w", err)
+	}
+	updated, err := control.ReadDocument(repository, command.New, group)
+	if err != nil {
 		return fmt.Errorf("invalid control.json: %w", err)
+	}
+	currentTokenHashes := make(map[string]string, len(current.Tokens))
+	for _, token := range current.Tokens {
+		currentTokenHashes[token.Key] = token.Hash
+	}
+	for _, token := range updated.Tokens {
+		hash, exists := currentTokenHashes[token.Key]
+		if !exists || hash != token.Hash {
+			return errors.New(
+				"token secrets can only be generated or regenerated through the group settings API",
+			)
+		}
 	}
 	return nil
 }

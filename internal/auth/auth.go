@@ -16,11 +16,13 @@ import (
 )
 
 const (
-	argonMemory      = 19 * 1024
-	argonIterations  = 2
-	argonParallelism = 1
-	argonSaltBytes   = 16
-	argonKeyBytes    = 32
+	argonMemory       = 19 * 1024
+	argonIterations   = 2
+	argonParallelism  = 1
+	argonSaltBytes    = 16
+	argonKeyBytes     = 32
+	tokenSecretBytes  = 24
+	TokenSecretLength = 32
 )
 
 type Resolver struct {
@@ -152,6 +154,20 @@ func HashSecret(secret string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(salt),
 		base64.RawStdEncoding.EncodeToString(hash),
 	), nil
+}
+
+// GenerateTokenSecret returns a cryptographically random, URL-safe token
+// secret. Twenty-four random bytes encode to exactly 32 base64url characters.
+func GenerateTokenSecret() (string, error) {
+	random := make([]byte, tokenSecretBytes)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate token secret: %w", err)
+	}
+	secret := base64.RawURLEncoding.EncodeToString(random)
+	if len(secret) != TokenSecretLength {
+		return "", fmt.Errorf("generated token secret has unexpected length %d", len(secret))
+	}
+	return secret, nil
 }
 
 func VerifySecret(encoded, secret string) bool {

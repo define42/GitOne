@@ -77,7 +77,27 @@ type groupDetailOutput struct {
 }
 
 type groupSettingsOutput struct {
-	Body control.Document
+	CacheControl string `header:"Cache-Control"`
+	Body         groupSettingsView
+}
+
+type groupSettingsView struct {
+	Version     int                     `json:"version"`
+	Group       string                  `json:"group"`
+	Description string                  `json:"description"`
+	Inherit     bool                    `json:"inherit"`
+	Visibility  string                  `json:"visibility" enum:"private,internal,public"`
+	LFS         control.LFSPolicy       `json:"lfs"`
+	Members     map[string]control.Role `json:"members"`
+	Tokens      []groupTokenView        `json:"tokens"`
+}
+
+type groupTokenView struct {
+	Name      string       `json:"name"`
+	Key       string       `json:"key"`
+	Role      control.Role `json:"role"`
+	ExpiresAt *time.Time   `json:"expiresAt,omitempty"`
+	Disabled  bool         `json:"disabled,omitempty"`
 }
 
 type updateGroupSettingsBody struct {
@@ -91,13 +111,12 @@ type updateGroupSettingsBody struct {
 }
 
 type groupTokenInput struct {
-	Name      string       `json:"name"`
-	Key       string       `json:"key"`
-	Hash      string       `json:"hash,omitempty"`
-	NewSecret string       `json:"newSecret,omitempty"`
-	Role      control.Role `json:"role"`
-	ExpiresAt *time.Time   `json:"expiresAt,omitempty"`
-	Disabled  bool         `json:"disabled,omitempty"`
+	Name       string       `json:"name"`
+	Key        string       `json:"key"`
+	Role       control.Role `json:"role"`
+	ExpiresAt  *time.Time   `json:"expiresAt,omitempty"`
+	Disabled   bool         `json:"disabled,omitempty"`
+	Regenerate bool         `json:"regenerate,omitempty"`
 }
 
 type updateGroupSettingsInput struct {
@@ -106,10 +125,18 @@ type updateGroupSettingsInput struct {
 }
 
 type updateGroupSettingsOutput struct {
-	Body struct {
-		Path     string           `json:"path"`
-		Settings control.Document `json:"settings"`
+	CacheControl string `header:"Cache-Control"`
+	Body         struct {
+		Path             string                      `json:"path"`
+		Settings         groupSettingsView           `json:"settings"`
+		GeneratedSecrets []generatedGroupTokenSecret `json:"generatedSecrets,omitempty"`
 	}
+}
+
+type generatedGroupTokenSecret struct {
+	Name   string `json:"name"`
+	Key    string `json:"key"`
+	Secret string `json:"secret"`
 }
 
 type repositorySummary struct {
@@ -454,7 +481,8 @@ func (a API) getGroupSettings(ctx context.Context, input *GroupPathInput) (*grou
 		return nil, huma.Error500InternalServerError("could not load group settings", err)
 	}
 	output := &groupSettingsOutput{}
-	output.Body = document
+	output.CacheControl = "no-store"
+	output.Body = settingsView(document)
 	return output, nil
 }
 
@@ -507,26 +535,32 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	if document.Members == nil {
 		document.Members = map[string]control.Role{}
 	}
+	currentTokens := make(map[string]control.Token, len(current.Tokens))
+	for _, token := range current.Tokens {
+		currentTokens[token.Key] = token
+	}
+	generatedSecrets := make([]generatedGroupTokenSecret, 0)
 	document.Tokens = make([]control.Token, 0, len(input.Body.Tokens))
 	for _, submitted := range input.Body.Tokens {
-		hash := ""
-		if submitted.NewSecret != "" {
-			hash, err = auth.HashSecret(submitted.NewSecret)
+		existing, exists := currentTokens[submitted.Key]
+		hash := existing.Hash
+		if !exists || submitted.Regenerate {
+			secret, generateErr := auth.GenerateTokenSecret()
+			if generateErr != nil {
+				return nil, huma.Error500InternalServerError(
+					"could not generate token secret",
+					generateErr,
+				)
+			}
+			hash, err = auth.HashSecret(secret)
 			if err != nil {
 				return nil, huma.Error500InternalServerError("could not secure token secret", err)
 			}
-		} else {
-			for _, existing := range current.Tokens {
-				if existing.Key == submitted.Key && existing.Hash == submitted.Hash {
-					hash = existing.Hash
-					break
-				}
-			}
-			if hash == "" {
-				return nil, huma.Error400BadRequest(
-					fmt.Sprintf("token %q needs a new secret", submitted.Name),
-				)
-			}
+			generatedSecrets = append(generatedSecrets, generatedGroupTokenSecret{
+				Name:   submitted.Name,
+				Key:    submitted.Key,
+				Secret: secret,
+			})
 		}
 		document.Tokens = append(document.Tokens, control.Token{
 			Name:      submitted.Name,
@@ -563,9 +597,34 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	}
 
 	output := &updateGroupSettingsOutput{}
+	output.CacheControl = "no-store"
 	output.Body.Path = target
-	output.Body.Settings = document
+	output.Body.Settings = settingsView(document)
+	output.Body.GeneratedSecrets = generatedSecrets
 	return output, nil
+}
+
+func settingsView(document control.Document) groupSettingsView {
+	tokens := make([]groupTokenView, 0, len(document.Tokens))
+	for _, token := range document.Tokens {
+		tokens = append(tokens, groupTokenView{
+			Name:      token.Name,
+			Key:       token.Key,
+			Role:      token.Role,
+			ExpiresAt: token.ExpiresAt,
+			Disabled:  token.Disabled,
+		})
+	}
+	return groupSettingsView{
+		Version:     document.Version,
+		Group:       document.Group,
+		Description: document.Description,
+		Inherit:     document.Inherit,
+		Visibility:  document.Visibility,
+		LFS:         document.LFS,
+		Members:     document.Members,
+		Tokens:      tokens,
+	}
 }
 
 func ownerOnlyGroupSettingsChanged(current, updated control.Document) bool {

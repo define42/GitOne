@@ -209,7 +209,7 @@ func TestRenameGroupControlsRejectsMissingAndExistingDestination(t *testing.T) {
 	}
 }
 
-func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
+func TestUpdateGroupSettingsGeneratesRotatesAndPreservesTokenSecrets(t *testing.T) {
 	service, credentials, _ := repositoryAPIFixture(t)
 	ctx := context.Background()
 
@@ -227,23 +227,6 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 	}
 
 	_, err := service.updateGroupSettings(ctx, &updateGroupSettingsInput{
-		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "engineering"},
-		Body: updateGroupSettingsBody{
-			Name:    "engineering",
-			Members: map[string]control.Role{"alice": control.RoleOwner},
-			Tokens: []groupTokenInput{{
-				Name: "automation",
-				Key:  "ci",
-				Hash: "untrusted-hash",
-				Role: control.RoleDeveloper,
-			}},
-		},
-	})
-	if err == nil {
-		t.Fatal("an unrecognized submitted token hash was accepted")
-	}
-
-	_, err = service.updateGroupSettings(ctx, &updateGroupSettingsInput{
 		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "engineering"},
 		Body: updateGroupSettingsBody{
 			Name:    "engineering",
@@ -267,10 +250,9 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 			},
 			Members: map[string]control.Role{"alice": control.RoleOwner},
 			Tokens: []groupTokenInput{{
-				Name:      "automation",
-				Key:       "ci",
-				NewSecret: "first-secret",
-				Role:      control.RoleDeveloper,
+				Name: "automation",
+				Key:  "ci",
+				Role: control.RoleDeveloper,
 			}},
 		},
 	})
@@ -278,9 +260,22 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := created.Body.Settings.Tokens[0]
-	if token.Hash == "" || token.Hash == "first-secret" ||
-		!auth.VerifySecret(token.Hash, "first-secret") {
-		t.Fatalf("new token secret was not secured: %#v", token)
+	if len(created.Body.GeneratedSecrets) != 1 {
+		t.Fatalf("generated secrets = %#v", created.Body.GeneratedSecrets)
+	}
+	generated := created.Body.GeneratedSecrets[0]
+	if generated.Name != token.Name || generated.Key != token.Key ||
+		len(generated.Secret) != auth.TokenSecretLength {
+		t.Fatalf("unexpected generated token secret: %#v", generated)
+	}
+	stored, err := service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalHash := stored.Tokens[0].Hash
+	if originalHash == "" || originalHash == generated.Secret ||
+		!auth.VerifySecret(originalHash, generated.Secret) {
+		t.Fatalf("new token secret was not secured: %#v", stored.Tokens[0])
 	}
 	if created.Body.Settings.Visibility != "internal" ||
 		!created.Body.Settings.LFS.Enabled ||
@@ -299,7 +294,6 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 			Tokens: []groupTokenInput{{
 				Name: "automation",
 				Key:  token.Key,
-				Hash: token.Hash,
 				Role: control.RoleMaintainer,
 			}},
 		},
@@ -307,8 +301,51 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preserved.Body.Settings.Tokens[0].Hash != token.Hash {
+	if len(preserved.Body.GeneratedSecrets) != 0 {
+		t.Fatalf("unchanged token generated a new secret: %#v", preserved.Body.GeneratedSecrets)
+	}
+	stored, err = service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Tokens[0].Hash != originalHash {
 		t.Fatal("unchanged token hash was not preserved")
+	}
+
+	rotated, err := service.updateGroupSettings(ctx, &updateGroupSettingsInput{
+		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "engineering"},
+		Body: updateGroupSettingsBody{
+			Name:        "engineering",
+			Description: preserved.Body.Settings.Description,
+			Visibility:  preserved.Body.Settings.Visibility,
+			LFS:         preserved.Body.Settings.LFS,
+			Members:     map[string]control.Role{"alice": control.RoleOwner},
+			Tokens: []groupTokenInput{{
+				Name:       "automation",
+				Key:        token.Key,
+				Role:       control.RoleMaintainer,
+				Regenerate: true,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rotated.Body.GeneratedSecrets) != 1 {
+		t.Fatalf("rotated secrets = %#v", rotated.Body.GeneratedSecrets)
+	}
+	rotatedSecret := rotated.Body.GeneratedSecrets[0].Secret
+	if rotatedSecret == generated.Secret || len(rotatedSecret) != auth.TokenSecretLength {
+		t.Fatalf("unexpected rotated secret: %q", rotatedSecret)
+	}
+	stored, err = service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Tokens[0].Hash == originalHash ||
+		!auth.VerifySecret(stored.Tokens[0].Hash, rotatedSecret) ||
+		auth.VerifySecret(stored.Tokens[0].Hash, generated.Secret) {
+		t.Fatal("token secret was not rotated")
 	}
 }
 
@@ -346,7 +383,6 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 			tokens = append(tokens, groupTokenInput{
 				Name:      token.Name,
 				Key:       token.Key,
-				Hash:      token.Hash,
 				Role:      token.Role,
 				ExpiresAt: token.ExpiresAt,
 				Disabled:  token.Disabled,
@@ -377,10 +413,9 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 	maintainerUpdate := settingsBody()
 	maintainerUpdate.Description = "Maintainers may change ordinary settings"
 	maintainerUpdate.Tokens = append(maintainerUpdate.Tokens, groupTokenInput{
-		Name:      "automation",
-		Key:       "ci",
-		NewSecret: "ci-secret",
-		Role:      control.RoleMaintainer,
+		Name: "automation",
+		Key:  "ci",
+		Role: control.RoleMaintainer,
 	})
 	if err = update(maintainerCredentials, maintainerUpdate); err != nil {
 		t.Fatalf("maintainer ordinary settings update failed: %v", err)
@@ -412,10 +447,9 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 			name: "owner token",
 			change: func(body *updateGroupSettingsBody) {
 				body.Tokens = append(body.Tokens, groupTokenInput{
-					Name:      "owner automation",
-					Key:       "owner-ci",
-					NewSecret: "owner-secret",
-					Role:      control.RoleOwner,
+					Name: "owner automation",
+					Key:  "owner-ci",
+					Role: control.RoleOwner,
 				})
 			},
 		},

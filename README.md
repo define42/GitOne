@@ -159,7 +159,7 @@ These endpoints require `Authorization: Bearer <GITONE_RUNNER_TOKEN>`.
 | `DELETE` | `/api/session` | Clear the current browser session. |
 | `GET` | `/api/groups` | List accessible top-level groups. |
 | `GET` | `/api/groups/{path}` | Get a group’s description, immediate subgroups, and repositories with their descriptions. |
-| `GET` | `/api/groups/{path}/settings` | Get the complete `control.json` document for a maintainer-authorized group. |
+| `GET` | `/api/groups/{path}/settings` | Get editable group settings for a maintainer-authorized group. Token hashes and secrets are omitted. |
 | `POST` | `/api/groups/{path}` | Create a group. Any LDAP user may create a top-level group; nested groups require parent maintainer access. Optional query parameter: `description`. |
 | `PUT` | `/api/groups/{path}/settings` | Replace group control settings and optionally rename the group through the `name` field. Changing members, visibility, LFS policy, or owner tokens requires owner access. |
 | `PATCH` | `/api/groups/{path}` | Rename or move a group. JSON field: `newPath`. A cross-parent move requires maintainer access to the source group and both non-root parent groups. |
@@ -323,7 +323,7 @@ curl -u alice:directory-password \
 
 Member entries contain only LDAP usernames and roles. GitOne binds directly with the submitted username plus the optional `LDAP_USER_DOMAIN`, searches for that authenticated identifier using `LDAP_USER_FILTER`, then matches the submitted username exactly against `members`; member passwords are never stored in `control.json`.
 
-Group tokens are available for automation and use salted Argon2id hashes. The settings API accepts a new token secret only for the duration of an update and hashes it on the server. A token's `key` is its HTTP Basic username, while `name` is only its display label. Its role applies to the whole group and follows the same `inherit` boundary as member access for subgroups.
+Group tokens are available for automation and use salted Argon2id hashes. GitOne generates every token secret from cryptographically secure randomness as exactly 32 URL-safe characters, returns it only in the successful create or regeneration response, and never accepts a user-chosen secret. Set `regenerate` to `true` on an existing token to rotate it. Direct `control.git` pushes may preserve or delete existing token hashes, but cannot add or replace one; token creation and rotation must use the settings API. A token's `key` is its HTTP Basic username, while `name` is only its display label. Its role applies to the whole group and follows the same `inherit` boundary as member access for subgroups.
 
 ### Role permissions
 

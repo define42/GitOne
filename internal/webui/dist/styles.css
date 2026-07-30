@@ -2154,12 +2154,6 @@ textarea:focus {
   padding-top: 0.5rem;
 }
 
-.token-hash,
-.token-secret {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.8rem;
-}
-
 .settings-empty {
   border: 1px dashed var(--border-strong);
   border-radius: 6px;

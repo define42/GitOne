@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -83,6 +84,37 @@ func TestHashSecretUsesArgon2id(t *testing.T) {
 		if auth.VerifySecret(encoded, "correct horse battery staple") {
 			t.Fatalf("malformed hash verified: %q", encoded)
 		}
+	}
+}
+
+func TestGenerateTokenSecretReturns32RandomURLSafeCharacters(t *testing.T) {
+	first, err := auth.GenerateTokenSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := auth.GenerateTokenSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != auth.TokenSecretLength || len(second) != auth.TokenSecretLength {
+		t.Fatalf("generated secret lengths = %d and %d", len(first), len(second))
+	}
+	if first == second {
+		t.Fatal("two generated token secrets were identical")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(first)
+	if err != nil {
+		t.Fatalf("generated secret is not unpadded base64url: %v", err)
+	}
+	if len(decoded) != 24 {
+		t.Fatalf("generated secret contains %d random bytes, want 24", len(decoded))
+	}
+	hash, err := auth.HashSecret(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !auth.VerifySecret(hash, first) {
+		t.Fatal("generated token secret did not verify against its hash")
 	}
 }
 

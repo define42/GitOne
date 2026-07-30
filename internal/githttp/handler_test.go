@@ -127,6 +127,58 @@ func TestValidateControlUpdateWithStoredHistory(t *testing.T) {
 		t.Fatalf("valid fast-forward control update: %v", err)
 	}
 
+	document.Tokens = []control.Token{{
+		Name: "automation",
+		Key:  "ci",
+		Hash: "user-managed-hash",
+		Role: control.RoleDeveloper,
+	}}
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	head, err = repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenAdded := head.Hash()
+	command.Old = updated
+	command.New = tokenAdded
+	if err = validateControlUpdate(repository, "engineering", command); err == nil ||
+		!strings.Contains(err.Error(), "group settings API") {
+		t.Fatalf("user-managed token secret returned %v", err)
+	}
+
+	document.Tokens[0].Name = "renamed automation"
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	head, err = repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenRenamed := head.Hash()
+	command.Old = tokenAdded
+	command.New = tokenRenamed
+	if err = validateControlUpdate(repository, "engineering", command); err != nil {
+		t.Fatalf("token metadata update with preserved secret: %v", err)
+	}
+
+	document.Tokens[0].Hash = "replacement-user-managed-hash"
+	if err = store.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	head, err = repository.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenRotated := head.Hash()
+	command.Old = tokenRenamed
+	command.New = tokenRotated
+	if err = validateControlUpdate(repository, "engineering", command); err == nil ||
+		!strings.Contains(err.Error(), "group settings API") {
+		t.Fatalf("user-rotated token secret returned %v", err)
+	}
+
 	missing := plumbing.NewHash("4444444444444444444444444444444444444444")
 	command.Old = missing
 	if err = validateControlUpdate(repository, "engineering", command); err == nil ||
@@ -671,6 +723,57 @@ func TestNativeGitRejectsInvalidControlDocument(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "at least one owner required") {
 		t.Fatalf("push did not report control validation failure:\n%s", output)
+	}
+}
+
+func TestNativeGitRejectsUserManagedTokenSecret(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git executable is not available")
+	}
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(Handler{Storage: store})
+	defer server.Close()
+	checkout := filepath.Join(t.TempDir(), "control")
+	runGit(t, "", "clone", server.URL+"/engineering/control.git", checkout)
+	runGit(t, checkout, "config", "user.name", "alice")
+	runGit(t, checkout, "config", "user.email", "alice@localhost")
+
+	controlPath := filepath.Join(checkout, "control.json")
+	contents, err := os.ReadFile(controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document control.Document
+	if err = json.Unmarshal(contents, &document); err != nil {
+		t.Fatal(err)
+	}
+	document.Tokens = []control.Token{{
+		Name: "automation",
+		Key:  "ci",
+		Hash: "user-managed-hash",
+		Role: control.RoleDeveloper,
+	}}
+	contents, err = json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(controlPath, append(contents, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, checkout, "add", "control.json")
+	runGit(t, checkout, "commit", "-m", "Add user-managed token secret")
+	command := exec.Command("git", "push", "origin", "main")
+	command.Dir = checkout
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("user-managed token secret push succeeded:\n%s", output)
+	}
+	if !strings.Contains(string(output), "group settings API") {
+		t.Fatalf("push did not report token secret policy failure:\n%s", output)
 	}
 }
 
