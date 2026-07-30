@@ -25,7 +25,16 @@ import (
 const (
 	maxAutomaticMergeBlobSize = 10 * 1024 * 1024
 	maxComparisonPatchSize    = 1024 * 1024
+	// maxComparisonPatchBudget caps the aggregate patch bytes across all files in
+	// one comparison; once spent, remaining files are reported without a patch.
+	maxComparisonPatchBudget = 64 * 1024 * 1024
 )
+
+// maxComparisonFiles bounds the number of files a commit or branch comparison
+// materializes. Such a comparison is reachable unauthenticated on a public
+// repository, so a commit touching an enormous number of files could otherwise
+// build an unbounded in-memory response. It is a var so tests can lower it.
+var maxComparisonFiles = 3000
 
 func (a API) compareRepositoryBranches(
 	ctx context.Context,
@@ -68,7 +77,7 @@ func (a API) compareRepositoryBranches(
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not load comparison head", err)
 	}
-	files, err := compareTrees(ctx, fromTree, toTree)
+	files, filesTruncated, err := compareTrees(ctx, fromTree, toTree)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not create branch diff", err)
 	}
@@ -94,6 +103,7 @@ func (a API) compareRepositoryBranches(
 	output.Body.CanMerge = canMergeErr == nil
 	output.Body.Conflicts = conflicts
 	output.Body.Files = files
+	output.Body.FilesTruncated = filesTruncated
 	return output, nil
 }
 
@@ -493,16 +503,22 @@ func compareTrees(
 	ctx context.Context,
 	from *object.Tree,
 	to *object.Tree,
-) ([]repositoryComparisonFile, error) {
+) ([]repositoryComparisonFile, bool, error) {
 	changes, err := object.DiffTreeWithOptions(ctx, from, to, object.DefaultDiffTreeOptions)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	truncated := false
+	if len(changes) > maxComparisonFiles {
+		changes = changes[:maxComparisonFiles]
+		truncated = true
 	}
 	files := make([]repositoryComparisonFile, 0, len(changes))
+	patchBudget := maxComparisonPatchBudget
 	for _, change := range changes {
 		fromFile, toFile, err := change.Files()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		file := repositoryComparisonFile{Status: "modified"}
 		switch {
@@ -522,7 +538,7 @@ func compareTrees(
 
 		patch, err := change.Patch()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, filePatch := range patch.FilePatches() {
 			file.Binary = file.Binary || filePatch.IsBinary()
@@ -538,15 +554,26 @@ func compareTrees(
 			}
 		}
 		if !file.Binary {
-			file.Patch = patch.String()
-			if len(file.Patch) > maxComparisonPatchSize {
-				file.Patch = file.Patch[:maxComparisonPatchSize]
+			if patchBudget <= 0 {
 				file.Truncated = true
+			} else {
+				file.Patch = patch.String()
+				if len(file.Patch) > maxComparisonPatchSize {
+					file.Patch = file.Patch[:maxComparisonPatchSize]
+					file.Truncated = true
+				}
+				if len(file.Patch) >= patchBudget {
+					file.Patch = file.Patch[:patchBudget]
+					file.Truncated = true
+					patchBudget = 0
+				} else {
+					patchBudget -= len(file.Patch)
+				}
 			}
 		}
 		files = append(files, file)
 	}
-	return files, nil
+	return files, truncated, nil
 }
 
 func diffLineCount(content string) int {

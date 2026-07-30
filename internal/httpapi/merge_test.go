@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -760,9 +761,12 @@ func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
 		object.TreeEntry{Name: "modified.txt", Mode: filemode.Regular, Hash: modified},
 		object.TreeEntry{Name: "binary.dat", Mode: filemode.Regular, Hash: binaryAfter},
 	)
-	files, err := compareTrees(context.Background(), from, to)
+	files, truncated, err := compareTrees(context.Background(), from, to)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("small comparison reported as truncated")
 	}
 	byPath := make(map[string]repositoryComparisonFile, len(files))
 	for _, file := range files {
@@ -781,6 +785,39 @@ func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
 	}
 	if !byPath["binary.dat"].Binary || byPath["binary.dat"].Patch != "" {
 		t.Fatalf("unexpected binary modification: %#v", byPath["binary.dat"])
+	}
+}
+
+func TestCompareTreesBoundsFileCount(t *testing.T) {
+	repository, err := git.PlainInit(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := maxComparisonFiles
+	maxComparisonFiles = 3
+	t.Cleanup(func() { maxComparisonFiles = previous })
+
+	entries := make([]object.TreeEntry, 0, maxComparisonFiles+2)
+	for i := 0; i < maxComparisonFiles+2; i++ {
+		blob := storeTestBlob(t, repository, []byte(fmt.Sprintf("file %d\n", i)))
+		entries = append(entries, object.TreeEntry{
+			Name: fmt.Sprintf("file-%03d.txt", i),
+			Mode: filemode.Regular,
+			Hash: blob,
+		})
+	}
+	to := storeTestTree(t, repository, entries...)
+	empty := storeTestTree(t, repository)
+
+	files, truncated, err := compareTrees(context.Background(), empty, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("comparison exceeding the file cap was not reported as truncated")
+	}
+	if len(files) != maxComparisonFiles {
+		t.Fatalf("returned %d files, want the cap of %d", len(files), maxComparisonFiles)
 	}
 }
 

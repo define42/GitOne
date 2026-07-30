@@ -297,10 +297,11 @@ type repositoryBlameOutput struct {
 
 type repositoryCommitDiffOutput struct {
 	Body struct {
-		Repository string                     `json:"repository"`
-		Commit     string                     `json:"commit"`
-		Parent     string                     `json:"parent,omitempty"`
-		Files      []repositoryComparisonFile `json:"files"`
+		Repository     string                     `json:"repository"`
+		Commit         string                     `json:"commit"`
+		Parent         string                     `json:"parent,omitempty"`
+		Files          []repositoryComparisonFile `json:"files"`
+		FilesTruncated bool                       `json:"filesTruncated,omitempty"`
 	}
 }
 
@@ -323,12 +324,13 @@ type compareRepositoryBranchesOutput struct {
 		BaseCommit string                     `json:"baseCommit"`
 		HeadCommit string                     `json:"headCommit"`
 		MergeBase  string                     `json:"mergeBase,omitempty"`
-		Ahead      int                        `json:"ahead"`
-		Behind     int                        `json:"behind"`
-		Mergeable  bool                       `json:"mergeable"`
-		CanMerge   bool                       `json:"canMerge"`
-		Conflicts  []string                   `json:"conflicts"`
-		Files      []repositoryComparisonFile `json:"files"`
+		Ahead          int                        `json:"ahead"`
+		Behind         int                        `json:"behind"`
+		Mergeable      bool                       `json:"mergeable"`
+		CanMerge       bool                       `json:"canMerge"`
+		Conflicts      []string                   `json:"conflicts"`
+		Files          []repositoryComparisonFile `json:"files"`
+		FilesTruncated bool                       `json:"filesTruncated,omitempty"`
 	}
 }
 

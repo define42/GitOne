@@ -46,7 +46,7 @@ func (a API) readRepositoryCommitDiff(
 		}
 		parentHash = parent.Hash.String()
 	}
-	files, err := compareTrees(ctx, fromTree, toTree)
+	files, filesTruncated, err := compareTrees(ctx, fromTree, toTree)
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not create commit diff", err)
 	}
@@ -56,5 +56,6 @@ func (a API) readRepositoryCommitDiff(
 	output.Body.Commit = commit.Hash.String()
 	output.Body.Parent = parentHash
 	output.Body.Files = files
+	output.Body.FilesTruncated = filesTruncated
 	return output, nil
 }
