@@ -296,6 +296,57 @@ func TestSmartHTTPRoutesAndMalformedRequests(t *testing.T) {
 	}
 }
 
+func TestUploadPackRequestBodyIsBounded(t *testing.T) {
+	store := storage.Store{Root: t.TempDir()}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "docs"}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gitPath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := packp.NewUploadPackRequest()
+	request.Wants = append(request.Wants, head.Hash())
+	var body bytes.Buffer
+	if err := request.UploadRequest.Encode(&body); err != nil {
+		t.Fatal(err)
+	}
+	handler := Handler{Storage: store}
+
+	accepted := httptest.NewRecorder()
+	handler.ServeHTTP(accepted, httptest.NewRequest(
+		http.MethodPost, "/engineering/docs.git/git-upload-pack", bytes.NewReader(body.Bytes())))
+	if accepted.Code == http.StatusBadRequest {
+		t.Fatalf("valid upload-pack negotiation was rejected: %s", accepted.Body.String())
+	}
+
+	previous := maxUploadPackRequestBytes
+	maxUploadPackRequestBytes = int64(body.Len()) - 1
+	t.Cleanup(func() { maxUploadPackRequestBytes = previous })
+	rejected := httptest.NewRecorder()
+	handler.ServeHTTP(rejected, httptest.NewRequest(
+		http.MethodPost, "/engineering/docs.git/git-upload-pack", bytes.NewReader(body.Bytes())))
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("over-limit upload-pack body: status = %d, want %d", rejected.Code, http.StatusBadRequest)
+	}
+}
+
 func TestReceiveStatusErrorFormats(t *testing.T) {
 	handler := Handler{}
 	request := packp.NewReferenceUpdateRequest()

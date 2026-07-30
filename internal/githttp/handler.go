@@ -24,6 +24,15 @@ import (
 
 const noThinCapability capability.Capability = "no-thin"
 
+// maxUploadPackRequestBytes bounds the git-upload-pack negotiation body. That
+// body carries only the client's wants, capabilities, and shallows, which stay
+// small even for very large repositories, so this ceiling never affects a
+// legitimate fetch. Reads on public-visibility repositories authorize without
+// credentials, so without a bound an anonymous client could stream an unbounded
+// pkt-line list and force the decoder to buffer it until memory is exhausted.
+// It is a package variable so tests can lower it.
+var maxUploadPackRequestBytes int64 = 16 << 20
+
 type Authorizer func(*http.Request, repopath.Repository, bool) (authenticated, allowed bool)
 
 type ReferenceUpdate struct {
@@ -165,7 +174,7 @@ func (h Handler) uploadPack(w http.ResponseWriter, r *http.Request, repo repopat
 		_ = s.Close()
 	}()
 	req := packp.NewUploadPackRequest()
-	if err = req.Decode(r.Body); err != nil {
+	if err = req.Decode(io.LimitReader(r.Body, maxUploadPackRequestBytes)); err != nil {
 		http.Error(w, "bad upload-pack request", 400)
 		return
 	}
