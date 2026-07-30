@@ -31,6 +31,70 @@ func testMergeRequest(title string) MergeRequest {
 	}
 }
 
+func TestWouldExceedContentLimit(t *testing.T) {
+	small := testMergeRequest("small")
+	if exceeds, err := WouldExceedContentLimit(small); err != nil || exceeds {
+		t.Fatalf("small record flagged over the content limit: exceeds=%v err=%v", exceeds, err)
+	}
+	big := testMergeRequest("big")
+	big.Description = strings.Repeat("x", MaxContentRecordBytes)
+	if exceeds, err := WouldExceedContentLimit(big); err != nil || !exceeds {
+		t.Fatalf("oversized record not flagged: exceeds=%v err=%v", exceeds, err)
+	}
+}
+
+func TestContentLimitLeavesHeadroomToCloseWedgedRecord(t *testing.T) {
+	root := t.TempDir()
+	repository := testRepository()
+	createTestGitStore(t, root, repository)
+	store := NewStore(root)
+	request := testMergeRequest("Large discussion")
+	if err := store.Create(repository, &request); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.Repeat("x", 256*1024)
+	filled, err := store.Update(repository, request.ID, func(r *MergeRequest) error {
+		for id := uint64(1); ; id++ {
+			candidate := Thread{
+				ID:        id,
+				CreatedAt: r.CreatedAt,
+				Comments: []Comment{
+					{ID: 1, Author: "eve", Body: body, CreatedAt: r.CreatedAt},
+				},
+			}
+			trial := *r
+			trial.Threads = append(append([]Thread(nil), r.Threads...), candidate)
+			exceeds, limitErr := WouldExceedContentLimit(trial)
+			if limitErr != nil {
+				return limitErr
+			}
+			if exceeds {
+				return nil
+			}
+			r.Threads = append(r.Threads, candidate)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filled.Threads) < 8 {
+		t.Fatalf("record did not fill near the content limit: %d threads", len(filled.Threads))
+	}
+
+	// A record padded to the content limit must still be closable; the reserved
+	// headroom below the hard record limit keeps it from wedging.
+	closedAt := request.CreatedAt.Add(time.Hour)
+	if _, err = store.Update(repository, request.ID, func(r *MergeRequest) error {
+		r.State = StateClosed
+		r.ClosedBy = "alice"
+		r.ClosedAt = &closedAt
+		return nil
+	}); err != nil {
+		t.Fatalf("closing a content-filled merge request failed (wedged): %v", err)
+	}
+}
+
 func createTestGitStore(t *testing.T, root string, repository repopath.Repository) {
 	t.Helper()
 	path, err := repositoryGitDirectory(root, repository)

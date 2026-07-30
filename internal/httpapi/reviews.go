@@ -515,7 +515,7 @@ func (a API) createReviewThread(
 			}},
 		})
 		request.UpdatedAt = now
-		return nil
+		return reviewContentLimitError(*request)
 	})
 	if err != nil {
 		return nil, reviewMutationError("could not create discussion thread", err)
@@ -580,7 +580,7 @@ func (a API) addReviewComment(
 				},
 			)
 			request.UpdatedAt = now
-			return nil
+			return reviewContentLimitError(*request)
 		}
 		return huma.Error404NotFound("discussion thread not found")
 	})
@@ -1509,6 +1509,20 @@ func validatedReviewBody(value string) (string, error) {
 		return "", huma.Error400BadRequest("comment body is too long")
 	}
 	return body, nil
+}
+
+// reviewContentLimitError rejects a discussion mutation that would grow the
+// merge request record past the content limit, keeping headroom so the record
+// can always still be merged or closed.
+func reviewContentLimitError(request review.MergeRequest) error {
+	exceeds, err := review.WouldExceedContentLimit(request)
+	if err != nil {
+		return huma.Error500InternalServerError("could not measure merge request size", err)
+	}
+	if exceeds {
+		return huma.Error409Conflict("merge request discussion has reached its size limit")
+	}
+	return nil
 }
 
 func reviewMutationError(message string, err error) error {

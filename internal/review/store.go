@@ -20,10 +20,30 @@ import (
 
 const maximumRecordBytes = 8 << 20
 
+// MaxContentRecordBytes bounds how large a merge request record may grow from
+// user-supplied content (discussion threads and comments). It sits below the
+// hard record limit so that state transitions which add only bookkeeping fields
+// - claiming a merge, closing - always fit under maximumRecordBytes. Without the
+// reservation a low-privilege user could pad a record to just under the hard
+// limit and permanently wedge the merge request, unable to be merged or closed.
+const MaxContentRecordBytes = maximumRecordBytes - 256<<10
+
 var (
 	ErrNotFound  = errors.New("merge request not found")
 	ErrDuplicate = errors.New("an open merge request already exists for these branches")
 )
+
+// WouldExceedContentLimit reports whether the request, once serialized the same
+// way it is persisted, exceeds MaxContentRecordBytes. Content-adding mutations
+// check this so user content cannot consume the headroom reserved for
+// bookkeeping writes.
+func WouldExceedContentLimit(request MergeRequest) (bool, error) {
+	contents, err := json.MarshalIndent(request, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	return len(contents)+1 > MaxContentRecordBytes, nil
+}
 
 type Store struct {
 	Root string
