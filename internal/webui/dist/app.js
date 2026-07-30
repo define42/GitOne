@@ -888,7 +888,7 @@ function repositoryImportControl(groupPath) {
     close.setAttribute("aria-label", "Close");
     close.title = "Close";
     header.append(title, close);
-    const description = element("p", "Import all Git refs and tags from a remote or an uploaded archive. Git LFS objects are not copied.");
+    const description = element("p", "Import all Git refs and tags from a remote or an uploaded archive. Remote imports also copy and verify every reachable Git LFS object; archive uploads contain Git data only.");
     description.className = "dialog-description";
     const methodTabs = element("div");
     methodTabs.className = "segmented-control repository-import-method";

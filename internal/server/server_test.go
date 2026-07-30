@@ -1118,6 +1118,8 @@ func TestCreateRepositoryFromPath(t *testing.T) {
 }
 
 func TestImportBareRepositoryFromHTTP(t *testing.T) {
+	const lfsContent = "complete remote LFS migration\n"
+
 	sourceRoot := t.TempDir()
 	sourceStore := storage.Store{Root: sourceRoot}
 	if err := sourceStore.CreateGroup("source", "alice", ""); err != nil {
@@ -1137,6 +1139,52 @@ func TestImportBareRepositoryFromHTTP(t *testing.T) {
 	}
 	sourceHead, err := sourceRepository.Head()
 	if err != nil {
+		t.Fatal(err)
+	}
+	lfsDigest := sha256.Sum256([]byte(lfsContent))
+	lfsOID := hex.EncodeToString(lfsDigest[:])
+	lfsPointer := "version https://git-lfs.github.com/spec/v1\n" +
+		"oid sha256:" + lfsOID + "\n" +
+		"size " + strconv.Itoa(len(lfsContent)) + "\n"
+	lfsCommit := commitBranchFile(
+		t,
+		filepath.Join(sourceRoot, "source", "api.git"),
+		"lfs-only",
+		"large.dat",
+		lfsPointer,
+		"Add LFS object on non-default branch",
+	)
+	lfsTag, err := sourceRepository.CreateTag("lfs-data", lfsCommit, &git.CreateTagOptions{
+		Tagger: &object.Signature{
+			Name:  "alice",
+			Email: "alice@localhost",
+			When:  time.Now().UTC(),
+		},
+		Message: "LFS data release",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = sourceRepository.Storer.RemoveReference(
+		plumbing.NewBranchReferenceName("lfs-only"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	sourceLFSPath, err := sourceStore.LFSPath(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceLFSObject := filepath.Join(
+		sourceLFSPath,
+		"objects",
+		lfsOID[:2],
+		lfsOID[2:4],
+		lfsOID,
+	)
+	if err = os.MkdirAll(filepath.Dir(sourceLFSObject), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(sourceLFSObject, []byte(lfsContent), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	for _, reference := range []plumbing.ReferenceName{
@@ -1215,6 +1263,23 @@ func TestImportBareRepositoryFromHTTP(t *testing.T) {
 			t.Fatalf("imported reference %s = %s, want %s", reference, importedReference.Hash(), sourceHead.Hash())
 		}
 	}
+	importedLFSTag, err := imported.Reference(
+		plumbing.NewTagReferenceName("lfs-data"),
+		true,
+	)
+	if err != nil {
+		t.Fatalf("imported LFS tag: %v", err)
+	}
+	if importedLFSTag.Hash() != lfsTag.Hash() {
+		t.Fatalf("imported LFS tag = %s, want %s", importedLFSTag.Hash(), lfsTag.Hash())
+	}
+	importedLFSTagObject, err := imported.TagObject(importedLFSTag.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if importedLFSTagObject.Target != lfsCommit {
+		t.Fatalf("imported LFS tag target = %s, want %s", importedLFSTagObject.Target, lfsCommit)
+	}
 	configuration, err := imported.Config()
 	if err != nil {
 		t.Fatal(err)
@@ -1229,6 +1294,22 @@ func TestImportBareRepositoryFromHTTP(t *testing.T) {
 	if _, err = os.Stat(filepath.Join(targetRoot, "engineering", "imported.lfs", "objects")); err != nil {
 		t.Fatalf("imported repository LFS storage: %v", err)
 	}
+	importedLFSObject := filepath.Join(
+		targetRoot,
+		"engineering",
+		"imported.lfs",
+		"objects",
+		lfsOID[:2],
+		lfsOID[2:4],
+		lfsOID,
+	)
+	importedLFSContent, err := os.ReadFile(importedLFSObject)
+	if err != nil {
+		t.Fatalf("read imported LFS object: %v", err)
+	}
+	if string(importedLFSContent) != lfsContent {
+		t.Fatalf("imported LFS content = %q, want %q", importedLFSContent, lfsContent)
+	}
 	description, err := targetStore.RepositoryDescription(repopath.Repository{
 		Groups: []string{"engineering"},
 		Name:   "imported",
@@ -1238,6 +1319,86 @@ func TestImportBareRepositoryFromHTTP(t *testing.T) {
 	}
 	if description != "Imported API" {
 		t.Fatalf("imported description = %q", description)
+	}
+}
+
+func TestImportRepositoryRejectsMissingLFSObjectAtomically(t *testing.T) {
+	const missingOID = "f7895326610712feb431767ef21f7e7eaec2bee6d99db789a212ed3a872b8f2a"
+
+	sourceRoot := t.TempDir()
+	sourceStore := storage.Store{Root: sourceRoot}
+	if err := sourceStore.CreateGroup("source", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := repopath.Repository{Groups: []string{"source"}, Name: "api"}
+	if err := sourceStore.CreateRepository(sourcePath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sourceGitPath, err := sourceStore.GitPath(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitBranchFile(
+		t,
+		sourceGitPath,
+		"main",
+		"missing.dat",
+		"version https://git-lfs.github.com/spec/v1\n"+
+			"oid sha256:"+missingOID+"\n"+
+			"size 22\n",
+		"Reference missing LFS object",
+	)
+
+	sourceServer := httptest.NewServer(New(Config{
+		Root:      sourceRoot,
+		Directory: testLDAPDirectory(),
+	}))
+	defer sourceServer.Close()
+
+	targetRoot := t.TempDir()
+	targetStore := storage.Store{Root: targetRoot}
+	if err = targetStore.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	importNetworkPolicy, err := storage.NewImportNetworkPolicy([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetHandler := New(Config{
+		Root:                targetRoot,
+		Directory:           testLDAPDirectory(),
+		ImportNetworkPolicy: importNetworkPolicy,
+	})
+	body, err := json.Marshal(map[string]string{
+		"url":      sourceServer.URL + "/source/api.git",
+		"username": "alice",
+		"password": "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fimported/import",
+		bytes.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.SetBasicAuth("alice", "secret")
+	response := httptest.NewRecorder()
+	targetHandler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("missing LFS import: status %d: %s", response.Code, response.Body.String())
+	}
+	for _, path := range []string{
+		filepath.Join(targetRoot, "engineering", "imported.git"),
+		filepath.Join(targetRoot, "engineering", "imported.lfs"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("failed LFS import published %s: %v", path, statErr)
+		}
 	}
 }
 

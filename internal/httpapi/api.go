@@ -285,7 +285,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 		OperationID:   "import-repository",
 		Method:        http.MethodPost,
 		Path:          "/api/repositories/{path}/import",
-		Summary:       "Import a bare repository from an HTTP or HTTPS remote",
+		Summary:       "Import a bare repository and its reachable LFS data from an HTTP or HTTPS remote",
 		Tags:          []string{"Repositories"},
 		DefaultStatus: http.StatusCreated,
 	}), service.importRepository)

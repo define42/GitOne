@@ -33,7 +33,7 @@ func TestRemoteImportErrorMessagesAndUnwrap(t *testing.T) {
 		{"authorization", gittransport.ErrAuthorizationFailed, "remote repository rejected the supplied credentials"},
 		{"not found", gittransport.ErrRepositoryNotFound, "remote repository was not found"},
 		{"empty", gittransport.ErrEmptyRemoteRepository, "remote repository is empty"},
-		{"other", errors.New("network failed"), "could not clone the remote repository"},
+		{"other", errors.New("network failed"), "could not import the remote repository"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := &RemoteImportError{Err: test.cause}

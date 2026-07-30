@@ -264,6 +264,29 @@ func TestImportRedirectPolicyRejectsPrivateTarget(t *testing.T) {
 	}
 }
 
+func TestImportRedirectDoesNotForwardAuthorizationAcrossOrigins(t *testing.T) {
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"https://8.8.8.8/repository.git",
+		nil,
+	)
+	request.Header.Set("Authorization", "Basic secret")
+	request = request.WithContext(
+		WithImportNetworkPolicy(request.Context(), ImportNetworkPolicy{}),
+	)
+	original := httptest.NewRequest(
+		http.MethodGet,
+		"https://1.1.1.1/repository.git",
+		nil,
+	)
+	if err := importCheckRedirect(request, []*http.Request{original}); err != nil {
+		t.Fatal(err)
+	}
+	if authorization := request.Header.Get("Authorization"); authorization != "" {
+		t.Fatalf("redirect forwarded authorization: %q", authorization)
+	}
+}
+
 func TestRemoteImportRejectsRedirectToPrivateAddress(t *testing.T) {
 	var privateTargetReached atomic.Bool
 	privateTarget := httptest.NewServer(http.HandlerFunc(func(

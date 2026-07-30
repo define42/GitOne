@@ -1415,7 +1415,7 @@ function repositoryImportControl(
 
   const description = element(
     "p",
-    "Import all Git refs and tags from a remote or an uploaded archive. Git LFS objects are not copied.",
+    "Import all Git refs and tags from a remote or an uploaded archive. Remote imports also copy and verify every reachable Git LFS object; archive uploads contain Git data only.",
   );
   description.className = "dialog-description";
 

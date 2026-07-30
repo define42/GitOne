@@ -303,7 +303,27 @@ func importCheckRedirect(request *http.Request, via []*http.Request) error {
 	if err := policy.ValidateURL(request.Context(), request.URL.String()); err != nil {
 		return fmt.Errorf("remote import redirect rejected: %w", err)
 	}
+	if len(via) > 0 && via[0].URL != nil &&
+		!sameImportURLOrigin(via[0].URL, request.URL) {
+		request.Header.Del("Authorization")
+	}
 	return nil
+}
+
+func sameImportURLOrigin(left, right *url.URL) bool {
+	return strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) &&
+		effectiveImportURLPort(left) == effectiveImportURLPort(right)
+}
+
+func effectiveImportURLPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	if value.Scheme == "https" {
+		return "443"
+	}
+	return "80"
 }
 
 type importHTTPTransport struct {
@@ -332,17 +352,7 @@ func (t importHTTPTransport) NewReceivePackSession(
 }
 
 func init() {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		panic("http.DefaultTransport is not *http.Transport")
-	}
-	safeTransport := base.Clone()
-	safeTransport.Proxy = nil
-	safeTransport.DialContext = importDialContext
-	client := &http.Client{
-		Transport:     safeTransport,
-		CheckRedirect: importCheckRedirect,
-	}
+	client := newImportHTTPClient()
 	gitClient := githttp.NewClient(client)
 	transportclient.InstallProtocol(importHTTPProtocol, importHTTPTransport{
 		protocol: "http",
@@ -352,6 +362,20 @@ func init() {
 		protocol: "https",
 		delegate: gitClient,
 	})
+}
+
+func newImportHTTPClient() *http.Client {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		panic("http.DefaultTransport is not *http.Transport")
+	}
+	safeTransport := base.Clone()
+	safeTransport.Proxy = nil
+	safeTransport.DialContext = importDialContext
+	return &http.Client{
+		Transport:     safeTransport,
+		CheckRedirect: importCheckRedirect,
+	}
 }
 
 func importTransportURL(rawURL string) (string, bool) {

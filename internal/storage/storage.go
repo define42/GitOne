@@ -58,7 +58,7 @@ func (e *RemoteImportError) Error() string {
 	case errors.Is(e.Err, gittransport.ErrEmptyRemoteRepository):
 		return "remote repository is empty"
 	default:
-		return "could not clone the remote repository"
+		return "could not import the remote repository"
 	}
 }
 
@@ -217,12 +217,12 @@ func (s Store) ImportRepositoryValidated(
 	if err := s.checkImportDestination(r); err != nil {
 		return err
 	}
-	temporaryPath, err := s.stageRemoteRepository(ctx, options)
+	staged, err := s.stageRemoteRepository(ctx, options)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = os.RemoveAll(temporaryPath)
+		_ = os.RemoveAll(staged.root)
 	}()
 
 	releaseOperation, err := lockmgr.Process.Acquire(
@@ -242,8 +242,8 @@ func (s Store) ImportRepositoryValidated(
 		if prepareErr != nil {
 			return prepareErr
 		}
-		return adoptImportedRepository(
-			temporaryPath,
+		return adoptStagedRemoteRepository(
+			staged,
 			destination.gitPath,
 			destination.lfsPath,
 		)
@@ -274,28 +274,39 @@ func (s Store) importRepository(
 	if err != nil {
 		return err
 	}
-	temporaryPath, err := s.stageRemoteRepository(ctx, options)
+	staged, err := s.stageRemoteRepository(ctx, options)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		_ = os.RemoveAll(temporaryPath)
+		_ = os.RemoveAll(staged.root)
 	}()
 
-	return adoptImportedRepository(
-		temporaryPath,
+	return adoptStagedRemoteRepository(
+		staged,
 		destination.gitPath,
 		destination.lfsPath,
 	)
 }
 
+type stagedRemoteRepository struct {
+	root    string
+	gitPath string
+	lfsPath string
+}
+
 func (s Store) stageRemoteRepository(
 	ctx context.Context,
 	options ImportRepositoryOptions,
-) (string, error) {
-	temporaryPath, err := s.newImportStagingDirectory()
+) (stagedRemoteRepository, error) {
+	temporaryRoot, err := s.newImportStagingDirectory()
 	if err != nil {
-		return "", err
+		return stagedRemoteRepository{}, err
+	}
+	staged := stagedRemoteRepository{
+		root:    temporaryRoot,
+		gitPath: filepath.Join(temporaryRoot, "repository.git"),
+		lfsPath: filepath.Join(temporaryRoot, "repository.lfs"),
 	}
 	cloneURL, usesImportTransport := importTransportURL(options.URL)
 	cloneOptions := &git.CloneOptions{
@@ -308,29 +319,55 @@ func (s Store) stageRemoteRepository(
 			Password: options.Password,
 		}
 	}
-	cloned, err := git.PlainCloneContext(ctx, temporaryPath, true, cloneOptions)
+	cloned, err := git.PlainCloneContext(ctx, staged.gitPath, true, cloneOptions)
 	if err != nil {
-		_ = os.RemoveAll(temporaryPath)
-		return "", &RemoteImportError{Err: err}
+		_ = os.RemoveAll(temporaryRoot)
+		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
 	}
 	if usesImportTransport {
 		configuration, configErr := cloned.Config()
 		if configErr != nil {
-			_ = os.RemoveAll(temporaryPath)
-			return "", configErr
+			_ = os.RemoveAll(temporaryRoot)
+			return stagedRemoteRepository{}, configErr
 		}
 		origin := configuration.Remotes[git.DefaultRemoteName]
 		if origin == nil {
-			_ = os.RemoveAll(temporaryPath)
-			return "", errors.New("imported repository has no origin remote")
+			_ = os.RemoveAll(temporaryRoot)
+			return stagedRemoteRepository{}, errors.New("imported repository has no origin remote")
 		}
 		origin.URLs = []string{options.URL}
 		if configErr = cloned.Storer.SetConfig(configuration); configErr != nil {
-			_ = os.RemoveAll(temporaryPath)
-			return "", configErr
+			_ = os.RemoveAll(temporaryRoot)
+			return stagedRemoteRepository{}, configErr
 		}
 	}
-	return temporaryPath, nil
+	if err = importRemoteLFS(ctx, cloned, options, staged.lfsPath); err != nil {
+		_ = os.RemoveAll(temporaryRoot)
+		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
+	}
+	return staged, nil
+}
+
+func adoptStagedRemoteRepository(
+	staged stagedRemoteRepository,
+	gitPath string,
+	lfsPath string,
+) error {
+	if err := os.Chmod(staged.gitPath, 0o750); err != nil {
+		return err
+	}
+	if err := os.Chmod(staged.lfsPath, 0o750); err != nil {
+		return err
+	}
+	if err := os.Rename(staged.gitPath, gitPath); err != nil {
+		return err
+	}
+	if err := os.Rename(staged.lfsPath, lfsPath); err != nil {
+		_ = os.RemoveAll(gitPath)
+		_ = os.RemoveAll(lfsPath)
+		return err
+	}
+	return nil
 }
 
 func (s Store) checkImportDestination(r repopath.Repository) error {
