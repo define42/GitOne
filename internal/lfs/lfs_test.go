@@ -146,21 +146,73 @@ func TestUploadStagingBoundedByStorageQuotaWithoutObjectLimit(t *testing.T) {
 			// MaximumObjectBytes unset (0) is a common configuration; the
 			// group storage quota must still bound how much a single upload
 			// streams to the staging directory.
-			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: 4}, nil
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: 16}, nil
 		},
 	}
-	data := "far larger than the quota"
-	sum := sha256.Sum256([]byte(data))
-	oid := hex.EncodeToString(sum[:])
+	upload := func(data string) *httptest.ResponseRecorder {
+		sum := sha256.Sum256([]byte(data))
+		oid := hex.EncodeToString(sum[:])
+		request := httptest.NewRequest(
+			http.MethodPut,
+			"/g/r.git/info/lfs/objects/"+oid,
+			bytes.NewBufferString(data),
+		)
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, request)
+		return response
+	}
+	if response := upload("far larger than the storage quota"); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("upload exceeding storage quota returned %d: %s", response.Code, response.Body.String())
+	}
+	// A small object within the quota still streams through the
+	// storage-quota-bounded staging path and is stored successfully.
+	if response := upload("small"); response.Code != http.StatusOK {
+		t.Fatalf("upload within storage quota returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestBatchRejectsSizeExceedingStorageQuota(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	h := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: 8}, nil
+		},
+	}
+	oid := hex.EncodeToString(make([]byte, 32))
+	// A size that alone exceeds the storage quota must be refused before it is
+	// summed into the running total, where MaxInt64 would otherwise overflow.
+	body := `{"operation":"upload","objects":[{"oid":"` + oid + `","size":9223372036854775807}]}`
 	request := httptest.NewRequest(
-		http.MethodPut,
-		"/g/r.git/info/lfs/objects/"+oid,
-		bytes.NewBufferString(data),
+		http.MethodPost,
+		"/g/r.git/info/lfs/objects/batch",
+		bytes.NewBufferString(body),
 	)
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, request)
-	if response.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("upload exceeding storage quota returned %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("batch returned %d: %s", response.Code, response.Body.String())
+	}
+	var decoded struct {
+		Objects []struct {
+			Actions map[string]any `json:"actions"`
+			Error   *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		} `json:"objects"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Objects) != 1 ||
+		decoded.Objects[0].Error == nil ||
+		decoded.Objects[0].Error.Code != http.StatusUnprocessableEntity ||
+		len(decoded.Objects[0].Actions) != 0 {
+		t.Fatalf("oversized batch object was not rejected: %s", response.Body.String())
 	}
 }
 

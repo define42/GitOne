@@ -547,6 +547,25 @@ func TestControlRepositoryAccessIsRestricted(t *testing.T) {
 		t.Fatalf("maintainer could not clone control.git: status %d", code)
 	}
 
+	pushControl := func(username, password string) int {
+		t.Helper()
+		request := httptest.NewRequest(
+			http.MethodGet,
+			"/engineering/control.git/info/refs?service=git-receive-pack",
+			nil,
+		)
+		request.SetBasicAuth(username, password)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	if code := pushControl("carol", "carol-secret"); code != http.StatusForbidden {
+		t.Fatalf("maintainer was allowed to push control.git: status %d", code)
+	}
+	if code := pushControl("alice", "secret"); code != http.StatusOK {
+		t.Fatalf("owner could not push control.git: status %d", code)
+	}
+
 	// The control repository must not be addressable through the repository
 	// API; otherwise a read member could dump control.json and a developer
 	// could rewrite it to escalate their own role.
