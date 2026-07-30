@@ -134,6 +134,36 @@ func TestUploadEnforcesObjectAndStorageLimits(t *testing.T) {
 	}
 }
 
+func TestUploadStagingBoundedByStorageQuotaWithoutObjectLimit(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepository(t, root)
+	h := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			// MaximumObjectBytes unset (0) is a common configuration; the
+			// group storage quota must still bound how much a single upload
+			// streams to the staging directory.
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: 4}, nil
+		},
+	}
+	data := "far larger than the quota"
+	sum := sha256.Sum256([]byte(data))
+	oid := hex.EncodeToString(sum[:])
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/g/r.git/info/lfs/objects/"+oid,
+		bytes.NewBufferString(data),
+	)
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("upload exceeding storage quota returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestUploadEnforcesStorageLimitAcrossGroupRepositories(t *testing.T) {
 	root := t.TempDir()
 	initializeLFSRepository(t, root)
