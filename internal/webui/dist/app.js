@@ -4149,10 +4149,11 @@ async function renderRoot(message) {
 async function renderGroup(path, message) {
     stopRepositoryBuildPolling();
     setGroupLocation(path);
-    const [data, controlSettings] = await Promise.all([
-        request(apiGroupURL(path)),
-        request(groupSettingsAPIURL(path)).catch(() => null),
-    ]);
+    const data = await request(apiGroupURL(path));
+    const canManageGroup = data.role === "maintainer" || data.role === "owner";
+    const controlSettings = canManageGroup
+        ? await request(groupSettingsAPIURL(path)).catch(() => null)
+        : null;
     document.title = `${data.path} · GitOne`;
     app.replaceChildren();
     const subgroupDescription = descriptionField();
@@ -4236,11 +4237,22 @@ async function renderGroup(path, message) {
     danger.append(settingsSummary, settingsContent);
     const pageActions = [
         ...(settingsControl ? [settingsControl.trigger] : []),
-        createSubgroup.trigger,
-        createRepository.trigger,
-        importRepository.trigger,
+        ...(canManageGroup
+            ? [
+                createSubgroup.trigger,
+                createRepository.trigger,
+                importRepository.trigger,
+            ]
+            : []),
     ];
-    app.append(pageHeader("Group", data.path, data.description, pageActions, [groupRoleBadge(data.role)]), subgroups, repositories, danger, createSubgroup.dialog, createRepository.dialog, importRepository.dialog, ...(settingsControl ? [settingsControl.dialog] : []));
+    app.append(pageHeader("Group", data.path, data.description, pageActions, [groupRoleBadge(data.role)]), subgroups, repositories, ...(canManageGroup
+        ? [
+            danger,
+            createSubgroup.dialog,
+            createRepository.dialog,
+            importRepository.dialog,
+        ]
+        : []), ...(settingsControl ? [settingsControl.dialog] : []));
     if (message) {
         showStatus(message);
     }

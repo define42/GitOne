@@ -3016,6 +3016,17 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	) {
 		t.Fatal("served UI does not show the current group name in the page header")
 	}
+	if !strings.Contains(
+		assetResponse.Body.String(),
+		`const canManageGroup = data.role === "maintainer" || data.role === "owner"`,
+	) ||
+		!strings.Contains(
+			assetResponse.Body.String(),
+			"const controlSettings = canManageGroup",
+		) ||
+		strings.Count(assetResponse.Body.String(), "...(canManageGroup") < 2 {
+		t.Fatal("served UI does not hide group management controls from read-only roles")
+	}
 	if !strings.Contains(assetResponse.Body.String(), "groupSettingsControl") ||
 		!strings.Contains(assetResponse.Body.String(), "groupSettingsAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), "newSecret: secret") ||

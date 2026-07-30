@@ -5452,10 +5452,11 @@ async function renderRoot(message?: string): Promise<void> {
 async function renderGroup(path: string, message?: string): Promise<void> {
   stopRepositoryBuildPolling();
   setGroupLocation(path);
-  const [data, controlSettings] = await Promise.all([
-    request<GroupDetail>(apiGroupURL(path)),
-    request<GroupControlSettings>(groupSettingsAPIURL(path)).catch(() => null),
-  ]);
+  const data = await request<GroupDetail>(apiGroupURL(path));
+  const canManageGroup = data.role === "maintainer" || data.role === "owner";
+  const controlSettings = canManageGroup
+    ? await request<GroupControlSettings>(groupSettingsAPIURL(path)).catch(() => null)
+    : null;
   document.title = `${data.path} · GitOne`;
   app.replaceChildren();
 
@@ -5577,9 +5578,13 @@ async function renderGroup(path: string, message?: string): Promise<void> {
 
   const pageActions = [
     ...(settingsControl ? [settingsControl.trigger] : []),
-    createSubgroup.trigger,
-    createRepository.trigger,
-    importRepository.trigger,
+    ...(canManageGroup
+      ? [
+        createSubgroup.trigger,
+        createRepository.trigger,
+        importRepository.trigger,
+      ]
+      : []),
   ];
 
   app.append(
@@ -5592,10 +5597,14 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     ),
     subgroups,
     repositories,
-    danger,
-    createSubgroup.dialog,
-    createRepository.dialog,
-    importRepository.dialog,
+    ...(canManageGroup
+      ? [
+        danger,
+        createSubgroup.dialog,
+        createRepository.dialog,
+        importRepository.dialog,
+      ]
+      : []),
     ...(settingsControl ? [settingsControl.dialog] : []),
   );
   if (message) {
