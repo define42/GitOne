@@ -240,7 +240,7 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 		},
 	})
 	if err == nil {
-		t.Fatal("an unrecognized submitted token hash was accepted")
+		t.Fatal("a token with no stored secret and no new secret was accepted")
 	}
 
 	_, err = service.updateGroupSettings(ctx, &updateGroupSettingsInput{
@@ -277,10 +277,8 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token := created.Body.Settings.Tokens[0]
-	if token.Hash == "" || token.Hash == "first-secret" ||
-		!auth.VerifySecret(token.Hash, "first-secret") {
-		t.Fatalf("new token secret was not secured: %#v", token)
+	if hash := created.Body.Settings.Tokens[0].Hash; hash != "" {
+		t.Fatalf("update response disclosed a token hash: %q", hash)
 	}
 	if created.Body.Settings.Visibility != "internal" ||
 		!created.Body.Settings.LFS.Enabled ||
@@ -288,6 +286,25 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 		t.Fatalf("group policy was not retained: %#v", created.Body.Settings)
 	}
 
+	storedToken := func() control.Token {
+		t.Helper()
+		document, loadErr := service.Resolver.Controls.Load(ctx, "engineering")
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if len(document.Tokens) != 1 {
+			t.Fatalf("expected one stored token, got %d", len(document.Tokens))
+		}
+		return document.Tokens[0]
+	}
+	stored := storedToken()
+	if stored.Hash == "" || stored.Hash == "first-secret" ||
+		!auth.VerifySecret(stored.Hash, "first-secret") {
+		t.Fatalf("new token secret was not secured: %#v", stored)
+	}
+
+	// Preserve the token without resubmitting its secret or hash - matching the
+	// login key is enough, and the redacted response never exposed the hash.
 	preserved, err := service.updateGroupSettings(ctx, &updateGroupSettingsInput{
 		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "engineering"},
 		Body: updateGroupSettingsBody{
@@ -298,8 +315,7 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 			Members:     map[string]control.Role{"alice": control.RoleOwner},
 			Tokens: []groupTokenInput{{
 				Name: "automation",
-				Key:  token.Key,
-				Hash: token.Hash,
+				Key:  stored.Key,
 				Role: control.RoleMaintainer,
 			}},
 		},
@@ -307,8 +323,59 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preserved.Body.Settings.Tokens[0].Hash != token.Hash {
-		t.Fatal("unchanged token hash was not preserved")
+	if hash := preserved.Body.Settings.Tokens[0].Hash; hash != "" {
+		t.Fatalf("update response disclosed a token hash: %q", hash)
+	}
+	afterPreserve := storedToken()
+	if afterPreserve.Hash != stored.Hash {
+		t.Fatal("unchanged token secret was not preserved by key")
+	}
+	if afterPreserve.Role != control.RoleMaintainer {
+		t.Fatalf("token role change was not applied: %#v", afterPreserve)
+	}
+}
+
+func TestGetGroupSettingsRedactsTokenHashes(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	ctx := context.Background()
+	if _, err := service.updateGroupSettings(ctx, &updateGroupSettingsInput{
+		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "engineering"},
+		Body: updateGroupSettingsBody{
+			Name:       "engineering",
+			Visibility: "private",
+			Members:    map[string]control.Role{"alice": control.RoleOwner},
+			Tokens: []groupTokenInput{{
+				Name:      "owner automation",
+				Key:       "owner-ci",
+				NewSecret: "owner-secret",
+				Role:      control.RoleOwner,
+			}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := service.getGroupSettings(ctx, &GroupPathInput{
+		AuthInput: credentials,
+		Path:      "engineering",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.Body.Tokens) != 1 {
+		t.Fatalf("expected one token, got %d", len(settings.Body.Tokens))
+	}
+	if hash := settings.Body.Tokens[0].Hash; hash != "" {
+		t.Fatalf("getGroupSettings disclosed a token hash: %q", hash)
+	}
+
+	// The hash remains server-side and still authenticates the secret.
+	document, err := service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !auth.VerifySecret(document.Tokens[0].Hash, "owner-secret") {
+		t.Fatal("stored owner-token hash no longer verifies its secret")
 	}
 }
 

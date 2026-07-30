@@ -454,8 +454,30 @@ func (a API) getGroupSettings(ctx context.Context, input *GroupPathInput) (*grou
 		return nil, huma.Error500InternalServerError("could not load group settings", err)
 	}
 	output := &groupSettingsOutput{}
-	output.Body = document
+	output.Body = documentWithoutTokenHashes(document)
 	return output, nil
+}
+
+// documentWithoutTokenHashes returns a copy of the document whose token hashes
+// are blanked. Token.Hash is Argon2id verifier material for a group credential;
+// a maintainer may read settings but may not manage owner tokens, so returning
+// owner-token hashes would hand a lower-privileged caller the offline material
+// to crack an owner credential. No client needs any token hash, and settings
+// updates preserve unchanged tokens by their login key rather than by
+// round-tripping the hash, so the server stays the sole authority for it. The
+// returned copy owns a fresh Tokens slice so blanking never mutates the caller's
+// document or the control cache.
+func documentWithoutTokenHashes(document control.Document) control.Document {
+	if document.Tokens == nil {
+		return document
+	}
+	tokens := make([]control.Token, len(document.Tokens))
+	copy(tokens, document.Tokens)
+	for i := range tokens {
+		tokens[i].Hash = ""
+	}
+	document.Tokens = tokens
+	return document
 }
 
 func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettingsInput) (*updateGroupSettingsOutput, error) {
@@ -516,8 +538,13 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 				return nil, huma.Error500InternalServerError("could not secure token secret", err)
 			}
 		} else {
+			// Preserve an existing token's secret by matching its login key.
+			// getGroupSettings no longer discloses token hashes, so the client
+			// cannot round-trip one; the server is the authority for the stored
+			// hash. A submitted key that matches no current token has no secret
+			// to inherit and must supply a new one.
 			for _, existing := range current.Tokens {
-				if existing.Key == submitted.Key && existing.Hash == submitted.Hash {
+				if existing.Key == submitted.Key {
 					hash = existing.Hash
 					break
 				}
@@ -564,7 +591,7 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 
 	output := &updateGroupSettingsOutput{}
 	output.Body.Path = target
-	output.Body.Settings = document
+	output.Body.Settings = documentWithoutTokenHashes(document)
 	return output, nil
 }
 

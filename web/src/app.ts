@@ -301,7 +301,7 @@ type GroupRole = "read" | "developer" | "maintainer" | "owner";
 interface GroupToken {
   name: string;
   key: string;
-  hash: string;
+  hash?: string;
   newSecret?: string;
   role: GroupRole;
   expiresAt?: string | null;
@@ -1869,11 +1869,15 @@ function groupSettingsControl(
   const addTokenRow = (token: GroupToken = {
     name: "",
     key: "",
-    hash: "",
     role: "developer",
   }): void => {
     const row = element("fieldset");
     row.className = "settings-item token-row";
+    // Remember the token's original login key so the save handler can tell an
+    // existing token (whose secret the server preserves by key) from a new or
+    // rekeyed one (which must supply a secret). The server no longer discloses
+    // the stored hash, so there is nothing to round-trip.
+    row.dataset.originalKey = token.key;
     const legend = element("legend", token.name || "New token");
     const remove = removeButton(`Remove ${token.name || "token"}`);
     remove.classList.add("settings-item-remove");
@@ -1899,15 +1903,6 @@ function groupSettingsControl(
     tokenKey.value = token.key;
     const tokenRole = roleSelect(token.role, canManageOwnerSettings);
     tokenRole.className = "token-role";
-    const tokenHash = element("input");
-    tokenHash.className = "token-hash";
-    tokenHash.readOnly = true;
-    tokenHash.autocomplete = "off";
-    tokenHash.spellcheck = false;
-    tokenHash.value = token.hash;
-    tokenKey.addEventListener("input", () => {
-      tokenHash.value = tokenKey.value.trim() === token.key ? token.hash : "";
-    });
     const tokenSecret = element("input");
     tokenSecret.className = "token-secret";
     tokenSecret.type = "password";
@@ -1927,7 +1922,6 @@ function groupSettingsControl(
       fieldLabel("Token name", tokenName),
       fieldLabel("Login key", tokenKey),
       fieldLabel("Role", tokenRole),
-      fieldLabel("Stored hash", tokenHash),
       fieldLabel("New secret", tokenSecret),
       fieldLabel("Expires", tokenExpiry),
       disabledLabel,
@@ -2088,18 +2082,18 @@ function groupSettingsControl(
         const tokenName = row.querySelector<HTMLInputElement>(".token-name")?.value.trim() ?? "";
         const key = row.querySelector<HTMLInputElement>(".token-key")?.value.trim() ?? "";
         const secret = row.querySelector<HTMLInputElement>(".token-secret")?.value ?? "";
-        const hash = row.querySelector<HTMLInputElement>(".token-hash")?.value.trim() ?? "";
+        const originalKey = row.dataset.originalKey ?? "";
         if (!tokenName || !key) {
           throw new Error("Every token needs a name and key.");
         }
-        if (!hash && !secret) {
+        const preservesExistingSecret = originalKey !== "" && key === originalKey;
+        if (!preservesExistingSecret && !secret) {
           throw new Error("Every new token needs a secret.");
         }
         const expiry = row.querySelector<HTMLInputElement>(".token-expires")?.value ?? "";
         updatedTokens.push({
           name: tokenName,
           key,
-          hash,
           newSecret: secret || undefined,
           role: row.querySelector<HTMLSelectElement>(".token-role")?.value as GroupRole,
           expiresAt: expiry ? new Date(expiry).toISOString() : undefined,
