@@ -21,14 +21,15 @@ import (
 )
 
 type API struct {
-	Storage     storage.Store
-	Resolver    *auth.Resolver
-	Sessions    *auth.SessionManager
-	Builds      *runner.Store
-	Reviews     *review.Store
-	Scheduler   runner.Scheduler
-	Coordinator *runner.Coordinator
-	RunnerToken string
+	Storage             storage.Store
+	Resolver            *auth.Resolver
+	Sessions            *auth.SessionManager
+	Builds              *runner.Store
+	Reviews             *review.Store
+	Scheduler           runner.Scheduler
+	Coordinator         *runner.Coordinator
+	RunnerToken         string
+	ImportNetworkPolicy storage.ImportNetworkPolicy
 }
 
 type AuthInput struct {
@@ -155,7 +156,7 @@ type createRepositoryInput struct {
 }
 
 type importRepositoryBody struct {
-	URL      string `json:"url" minLength:"1" doc:"HTTP or HTTPS Git remote URL"`
+	URL      string `json:"url" minLength:"1" doc:"HTTP or HTTPS Git remote URL; non-public destinations require an administrator allowlist"`
 	Username string `json:"username,omitempty" doc:"Optional HTTP Basic authentication username"`
 	Password string `json:"password,omitempty" doc:"Optional HTTP Basic password or access token"`
 }
@@ -879,7 +880,11 @@ func (a API) importRepository(ctx context.Context, input *importRepositoryInput)
 	); err != nil {
 		return nil, err
 	}
-	err = a.Storage.ImportRepositoryValidated(ctx, repository, storage.ImportRepositoryOptions{
+	if err = a.ImportNetworkPolicy.ValidateURL(ctx, remoteURL); err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	importContext := storage.WithImportNetworkPolicy(ctx, a.ImportNetworkPolicy)
+	err = a.Storage.ImportRepositoryValidated(importContext, repository, storage.ImportRepositoryOptions{
 		URL:      remoteURL,
 		Username: username,
 		Password: input.Body.Password,

@@ -297,8 +297,9 @@ func (s Store) stageRemoteRepository(
 	if err != nil {
 		return "", err
 	}
+	cloneURL, usesImportTransport := importTransportURL(options.URL)
 	cloneOptions := &git.CloneOptions{
-		URL:    options.URL,
+		URL:    cloneURL,
 		Mirror: true,
 	}
 	if options.Username != "" {
@@ -307,9 +308,27 @@ func (s Store) stageRemoteRepository(
 			Password: options.Password,
 		}
 	}
-	if _, err = git.PlainCloneContext(ctx, temporaryPath, true, cloneOptions); err != nil {
+	cloned, err := git.PlainCloneContext(ctx, temporaryPath, true, cloneOptions)
+	if err != nil {
 		_ = os.RemoveAll(temporaryPath)
 		return "", &RemoteImportError{Err: err}
+	}
+	if usesImportTransport {
+		configuration, configErr := cloned.Config()
+		if configErr != nil {
+			_ = os.RemoveAll(temporaryPath)
+			return "", configErr
+		}
+		origin := configuration.Remotes[git.DefaultRemoteName]
+		if origin == nil {
+			_ = os.RemoveAll(temporaryPath)
+			return "", errors.New("imported repository has no origin remote")
+		}
+		origin.URLs = []string{options.URL}
+		if configErr = cloned.Storer.SetConfig(configuration); configErr != nil {
+			_ = os.RemoveAll(temporaryPath)
+			return "", configErr
+		}
 	}
 	return temporaryPath, nil
 }

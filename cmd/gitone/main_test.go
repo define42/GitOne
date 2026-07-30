@@ -14,6 +14,7 @@ func setValidEnvironment(t *testing.T) {
 	t.Setenv("GITONE_SESSION_HASH_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("h", 64))))
 	t.Setenv("GITONE_SESSION_BLOCK_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("b", 32))))
 	t.Setenv("GITONE_RUNNER_TOKEN", "")
+	t.Setenv("GITONE_IMPORT_ALLOWLIST", "")
 }
 
 func TestNewServer(t *testing.T) {
@@ -63,6 +64,16 @@ func TestNewServerRejectsInvalidConfiguration(t *testing.T) {
 		setValidEnvironment(t)
 		if _, _, err := newServer([]string{"-public-url", "://invalid"}); err == nil {
 			t.Fatal("invalid public URL was accepted")
+		}
+	})
+
+	t.Run("invalid import allowlist", func(t *testing.T) {
+		setValidEnvironment(t)
+		if _, _, err := newServer([]string{
+			"-import-allowlist",
+			"https://git.internal.example",
+		}); err == nil || !strings.Contains(err.Error(), "allowlist") {
+			t.Fatalf("invalid import allowlist error = %v", err)
 		}
 	})
 

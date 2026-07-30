@@ -32,6 +32,8 @@ The included development directory uses a self-signed certificate, so its compos
 
 The session keys encrypt and authenticate browser cookies and can be generated with `openssl rand -base64 64` and `openssl rand -base64 32`. When they are omitted, GitOne generates ephemeral keys and existing browser sessions end on restart. Sessions last 12 hours by default; configure `GITONE_SESSION_MAX_AGE` with a Go duration such as `8h`. Cookie `Secure` mode follows an HTTPS public URL and can be overridden with `GITONE_SESSION_SECURE`.
 
+Remote HTTP(S) repository imports block loopback, private, link-local, metadata, shared, multicast, documentation, and reserved address ranges by default. DNS is checked again when connecting, the validated numeric address is dialed directly, and every redirect is subject to the same policy. Administrators can set `GITONE_IMPORT_ALLOWLIST` or `-import-allowlist` to a comma-separated list of exact hostnames, IP addresses, or CIDR prefixes, such as `git.internal.example,10.20.0.0/16`. Allowlist entries explicitly permit otherwise blocked destinations.
+
 The complete development stack can be started with:
 
 ```bash
@@ -163,7 +165,7 @@ These endpoints require `Authorization: Bearer <GITONE_RUNNER_TOKEN>`.
 | `PATCH` | `/api/groups/{path}` | Rename or move a group. JSON field: `newPath`. A cross-parent move requires maintainer access to the source group and both non-root parent groups. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.yaml`. |
-| `POST` | `/api/repositories/{path}/import` | Mirror all Git refs and tags from an HTTP or HTTPS remote into a new bare repository. JSON fields: `url`, optional `username`, and optional `password` or access token. Git LFS objects are not imported. |
+| `POST` | `/api/repositories/{path}/import` | Mirror all Git refs and tags from an HTTP or HTTPS remote into a new bare repository. Non-public network destinations are blocked unless administratively allowlisted. JSON fields: `url`, optional `username`, and optional `password` or access token. Git LFS objects are not imported. |
 | `POST` | `/api/repositories/{path}/import-archive?filename=repository.tar.gz` | Upload a `.zip`, `.tar`, `.tar.gz`, or `.tgz` file as the raw request body. The archive must contain one bare Git repository at its root or in one enclosing folder and may be up to 1 GiB compressed. Git LFS objects are not imported. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |

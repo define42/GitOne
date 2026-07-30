@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1159,9 +1160,14 @@ func TestImportBareRepositoryFromHTTP(t *testing.T) {
 	if err = targetStore.CreateGroup("engineering", "alice", ""); err != nil {
 		t.Fatal(err)
 	}
+	importNetworkPolicy, err := storage.NewImportNetworkPolicy([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	targetHandler := New(Config{
-		Root:      targetRoot,
-		Directory: testLDAPDirectory(),
+		Root:                targetRoot,
+		Directory:           testLDAPDirectory(),
+		ImportNetworkPolicy: importNetworkPolicy,
 	})
 	remoteURL := sourceServer.URL + "/source/api.git"
 	body, err := json.Marshal(map[string]string{
@@ -1259,6 +1265,48 @@ func TestImportRepositoryRejectsNonHTTPRemote(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "engineering", "imported.git")); !os.IsNotExist(err) {
 		t.Fatalf("non-HTTP import created repository data: %v", err)
+	}
+}
+
+func TestImportRepositoryRejectsPrivateRemote(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root:      root,
+		Directory: testLDAPDirectory(),
+	})
+	for _, remoteURL := range []string{
+		"http://127.0.0.1/repository.git",
+		"http://169.254.169.254/latest/meta-data",
+		"http://10.20.30.40/repository.git",
+		"http://[::1]/repository.git",
+	} {
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/repositories/engineering%2Fimported/import",
+			strings.NewReader(`{"url":`+strconv.Quote(remoteURL)+`}`),
+		)
+		request.Header.Set("Content-Type", "application/json")
+		request.SetBasicAuth("alice", "secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf(
+				"private import %q: status %d, want %d: %s",
+				remoteURL,
+				response.Code,
+				http.StatusBadRequest,
+				response.Body.String(),
+			)
+		}
+	}
+	if _, err := os.Stat(
+		filepath.Join(root, "engineering", "imported.git"),
+	); !os.IsNotExist(err) {
+		t.Fatalf("private import created repository data: %v", err)
 	}
 }
 

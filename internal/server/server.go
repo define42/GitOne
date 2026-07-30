@@ -18,11 +18,12 @@ import (
 )
 
 type Config struct {
-	Root, PublicURL string
-	Directory       auth.IdentityProvider
-	Sessions        *auth.SessionManager
-	Coordinator     *runner.Coordinator
-	RunnerToken     string
+	Root, PublicURL     string
+	Directory           auth.IdentityProvider
+	Sessions            *auth.SessionManager
+	Coordinator         *runner.Coordinator
+	RunnerToken         string
+	ImportNetworkPolicy storage.ImportNetworkPolicy
 }
 
 func New(c Config) http.Handler {
@@ -82,14 +83,15 @@ func New(c Config) http.Handler {
 		scheduler = c.Coordinator
 	}
 	httpapi.Register(mux, httpapi.API{
-		Storage:     st,
-		Resolver:    ar,
-		Sessions:    sessions,
-		Builds:      &buildStore,
-		Reviews:     reviewStore,
-		Scheduler:   scheduler,
-		Coordinator: c.Coordinator,
-		RunnerToken: c.RunnerToken,
+		Storage:             st,
+		Resolver:            ar,
+		Sessions:            sessions,
+		Builds:              &buildStore,
+		Reviews:             reviewStore,
+		Scheduler:           scheduler,
+		Coordinator:         c.Coordinator,
+		RunnerToken:         c.RunnerToken,
+		ImportNetworkPolicy: c.ImportNetworkPolicy,
 	})
 	ui := webui.Handler{}
 	mux.Handle("GET /{$}", ui)

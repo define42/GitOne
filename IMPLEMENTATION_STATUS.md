@@ -26,6 +26,7 @@ Implemented:
 - Repository ZIP/tar.gz downloads and branch-safe UI/API operations for creating, editing, renaming, and deleting files
 - Repository blame views and complete commit-history navigation with paginated API results
 - Persisted merge requests with exact-commit approvals, threaded discussions, and approval-gated merging
+- SSRF-resistant remote imports with private-network blocking, DNS-pinned dialing, redirect validation, and administrator allowlists
 
 Not production-complete yet:
 

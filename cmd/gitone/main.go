@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/define42/GitOne/internal/auth"
@@ -37,6 +38,11 @@ func newServer(args []string) (*http.Server, bool, error) {
 		os.Getenv("GITONE_RUNNER_TOKEN"),
 		"shared token enabling the remote runner API",
 	)
+	importAllowlist := flags.String(
+		"import-allowlist",
+		os.Getenv("GITONE_IMPORT_ALLOWLIST"),
+		"comma-separated exact hostnames, IP addresses, or CIDRs allowed for remote imports",
+	)
 	if err := flags.Parse(args); err != nil {
 		return nil, false, err
 	}
@@ -65,6 +71,12 @@ func newServer(args []string) (*http.Server, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	importNetworkPolicy, err := storage.NewImportNetworkPolicy(
+		strings.Split(*importAllowlist, ","),
+	)
+	if err != nil {
+		return nil, false, err
+	}
 	var coordinator *runner.Coordinator
 	if *runnerToken != "" {
 		coordinator, err = runner.NewCoordinator(runner.CoordinatorConfig{
@@ -76,12 +88,13 @@ func newServer(args []string) (*http.Server, bool, error) {
 		}
 	}
 	h := app.New(app.Config{
-		Root:        *root,
-		PublicURL:   *publicURL,
-		Directory:   directory,
-		Sessions:    sessions,
-		Coordinator: coordinator,
-		RunnerToken: *runnerToken,
+		Root:                *root,
+		PublicURL:           *publicURL,
+		Directory:           directory,
+		Sessions:            sessions,
+		Coordinator:         coordinator,
+		RunnerToken:         *runnerToken,
+		ImportNetworkPolicy: importNetworkPolicy,
 	})
 	server := &http.Server{
 		Addr:              *listen,
