@@ -1070,10 +1070,26 @@ func basicCredentials(header string) (string, string, error) {
 	return user, secret, nil
 }
 
+// reservedTopLevelGroups are first-path-segment names claimed by the web UI's
+// GET wildcard routes in server.New ("/groups/", "/repositories/", "/assets/").
+// Go 1.22 ServeMux precedence routes any GET whose leading segment matches one
+// of these to the SPA handler instead of the git/LFS catch-all, so a repository
+// under a group with one of these names would have its ref advertisement and
+// LFS downloads answered with index.html, silently breaking clone, fetch, push,
+// and LFS pull. Reserving the names prevents the collision from being created.
+var reservedTopLevelGroups = map[string]struct{}{
+	"groups":       {},
+	"repositories": {},
+	"assets":       {},
+}
+
 func canonicalGroup(value string) (string, error) {
 	parts, err := repopath.ParseGroup(value)
 	if err != nil {
 		return "", err
+	}
+	if _, reserved := reservedTopLevelGroups[parts[0]]; reserved {
+		return "", fmt.Errorf("reserved group name %q", parts[0])
 	}
 	return strings.Join(parts, "/"), nil
 }

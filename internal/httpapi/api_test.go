@@ -312,6 +312,30 @@ func TestUpdateGroupSettingsRotatesAndPreservesTokenSecrets(t *testing.T) {
 	}
 }
 
+func TestCreateGroupRejectsReservedTopLevelNames(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	ctx := context.Background()
+	for _, name := range []string{"groups", "repositories", "assets"} {
+		if _, err := service.createGroup(ctx, &createGroupInput{
+			GroupPathInput: GroupPathInput{AuthInput: credentials, Path: name},
+		}); err == nil {
+			t.Fatalf("reserved top-level group name %q was accepted", name)
+		}
+	}
+	if _, err := service.createGroup(ctx, &createGroupInput{
+		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "platform"},
+	}); err != nil {
+		t.Fatalf("ordinary group name rejected: %v", err)
+	}
+	// The reservation is scoped to the leading segment; a reserved word deeper
+	// in the path does not collide with the UI routes and stays allowed.
+	if _, err := service.createGroup(ctx, &createGroupInput{
+		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "engineering/assets"},
+	}); err != nil {
+		t.Fatalf("reserved word as a non-leading segment was rejected: %v", err)
+	}
+}
+
 func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 	service, ownerCredentials, _ := repositoryAPIFixture(t)
 	ctx := context.Background()
