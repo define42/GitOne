@@ -60,7 +60,15 @@ func (d Document) clone() Document {
 		copied.Members = members
 	}
 	if d.Tokens != nil {
-		copied.Tokens = append([]Token(nil), d.Tokens...)
+		tokens := make([]Token, len(d.Tokens))
+		for i, token := range d.Tokens {
+			if token.ExpiresAt != nil {
+				expiresAt := *token.ExpiresAt
+				token.ExpiresAt = &expiresAt
+			}
+			tokens[i] = token
+		}
+		copied.Tokens = tokens
 	}
 	return copied
 }

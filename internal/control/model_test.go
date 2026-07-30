@@ -1,6 +1,42 @@
 package control
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func TestCloneIsolatesDocumentState(t *testing.T) {
+	expiry := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	original := Document{
+		Version:    CurrentVersion,
+		Group:      "g",
+		Visibility: "private",
+		Members:    map[string]Role{"alice": RoleOwner},
+		Tokens: []Token{{
+			Name: "ci", Key: "deploy", Hash: "hash", Role: RoleDeveloper,
+			ExpiresAt: &expiry,
+		}},
+	}
+	cloned := original.clone()
+
+	cloned.Members["mallory"] = RoleOwner
+	if _, exists := original.Members["mallory"]; exists {
+		t.Fatal("clone shares the Members map with the original")
+	}
+
+	cloned.Tokens[0].Role = RoleOwner
+	if original.Tokens[0].Role != RoleDeveloper {
+		t.Fatal("clone shares the Tokens slice with the original")
+	}
+
+	*cloned.Tokens[0].ExpiresAt = expiry.Add(24 * time.Hour)
+	if !original.Tokens[0].ExpiresAt.Equal(expiry) {
+		t.Fatalf(
+			"clone shares the token ExpiresAt pointer: original = %s",
+			original.Tokens[0].ExpiresAt,
+		)
+	}
+}
 
 func TestRoleAllows(t *testing.T) {
 	if !RoleOwner.Allows(RoleDeveloper) {
