@@ -849,6 +849,87 @@ func TestMergeRequestHTTPRoutes(t *testing.T) {
 	}
 }
 
+func TestMergeGateDropsApprovalFromReviewerWhoLostAccess(t *testing.T) {
+	fixture := newMergeRequestAPIFixture(t)
+	ctx := context.Background()
+	created := createTestMergeRequest(t, fixture)
+
+	// An open discussion thread keeps the request from auto-merging on approval.
+	if _, err := fixture.service.createReviewThread(ctx, &createReviewThreadInput{
+		MergeRequestInput: mergeRequestInput{
+			AuthInput:  fixture.alice,
+			Repository: fixture.path.Full(),
+			ID:         created.Body.ID,
+		},
+		Body: createReviewThreadBody{Body: "Please clarify this change."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	approved, err := fixture.service.approveMergeRequest(ctx, &approveMergeRequestInput{
+		MergeRequestInput: mergeRequestInput{
+			AuthInput:  fixture.bob,
+			Repository: fixture.path.Full(),
+			ID:         created.Body.ID,
+		},
+		Body: approveMergeRequestBody{ExpectedHeadCommit: fixture.head.String()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Body.CurrentApprovals != 1 || approved.Body.State != review.StateOpen {
+		t.Fatalf("developer approval was not recorded: %#v", approved.Body)
+	}
+
+	// Bob is demoted to read-only after approving.
+	document, err := fixture.service.Resolver.Controls.Load(ctx, fixture.path.Group())
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Members["bob"] = control.RoleRead
+	if err = fixture.service.Storage.UpdateGroupControl(
+		fixture.path.Group(),
+		document,
+		"alice",
+	); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.Resolver.Controls.Invalidate(fixture.path.Group())
+
+	// Resolve the thread so the only remaining merge blocker is the approval.
+	resolved, err := fixture.service.updateReviewThread(ctx, &updateReviewThreadInput{
+		ReviewThreadInput: reviewThreadInput{
+			MergeRequestInput: mergeRequestInput{
+				AuthInput:  fixture.alice,
+				Repository: fixture.path.Full(),
+				ID:         created.Body.ID,
+			},
+			ThreadID: 1,
+		},
+		Body: updateReviewThreadBody{Resolved: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Body.CurrentApprovals != 0 ||
+		resolved.Body.StaleApprovals != 1 ||
+		resolved.Body.CanMerge ||
+		resolved.Body.Approvals[0].Current {
+		t.Fatalf("approval from a demoted reviewer still counts: %#v", resolved.Body)
+	}
+
+	// The merge is blocked because the only approval no longer counts.
+	_, err = fixture.service.mergeApprovedRequest(ctx, &approveMergeRequestInput{
+		MergeRequestInput: mergeRequestInput{
+			AuthInput:  fixture.alice,
+			Repository: fixture.path.Full(),
+			ID:         created.Body.ID,
+		},
+		Body: approveMergeRequestBody{ExpectedHeadCommit: fixture.head.String()},
+	})
+	requireReviewHTTPStatus(t, err, http.StatusConflict)
+}
+
 func TestMergeRequestDiscussionApprovalAndExplicitMergeRetry(t *testing.T) {
 	fixture := newMergeRequestAPIFixture(t)
 	ctx := context.Background()

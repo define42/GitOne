@@ -900,12 +900,17 @@ func (a API) mergeStoredRequest(
 			if stored.MergeInProgress {
 				return huma.Error409Conflict("merge request is currently being merged")
 			}
-			approvedBy := map[string]struct{}{}
-			for _, approval := range stored.Approvals {
-				if (approval.Author != stored.Author || approval.SelfApproval) &&
-					approval.HeadCommit == expectedHeadCommit {
-					approvedBy[approval.Author] = struct{}{}
-				}
+			approvedBy, authErr := a.authorizedApprovals(
+				ctx,
+				parsed.Group(),
+				*stored,
+				expectedHeadCommit,
+			)
+			if authErr != nil {
+				return huma.Error500InternalServerError(
+					"could not authorize approvals",
+					authErr,
+				)
 			}
 			if len(approvedBy) < stored.RequiredApprovals {
 				return huma.Error409Conflict("the current source commit is not approved")
@@ -1297,6 +1302,45 @@ func (a API) mergeRequestResponse(
 	return &mergeRequestOutput{Body: view}, nil
 }
 
+// authorizedApprovals returns the distinct authors whose approvals of the given
+// head commit still count toward the merge gate. An approval counts only if it
+// is not the merge request author's own (unless it is an explicit self-approval)
+// and the author still holds the required access - developer for a peer review,
+// maintainer for a self-approval. Approvals from principals who have since lost
+// access are dropped, matching how hosted forges dismiss approvals on offboarding.
+func (a API) authorizedApprovals(
+	ctx context.Context,
+	group string,
+	request review.MergeRequest,
+	headCommit string,
+) (map[string]struct{}, error) {
+	now := time.Now().UTC()
+	authorized := map[string]struct{}{}
+	for _, approval := range request.Approvals {
+		if approval.HeadCommit != headCommit {
+			continue
+		}
+		if approval.Author == request.Author && !approval.SelfApproval {
+			continue
+		}
+		if _, already := authorized[approval.Author]; already {
+			continue
+		}
+		need := control.RoleDeveloper
+		if approval.SelfApproval {
+			need = control.RoleMaintainer
+		}
+		role, ok, err := a.Resolver.ApproverRole(ctx, group, approval.Author, now)
+		if err != nil {
+			return nil, err
+		}
+		if ok && role.Allows(need) {
+			authorized[approval.Author] = struct{}{}
+		}
+	}
+	return authorized, nil
+}
+
 func (a API) buildMergeRequestView(
 	ctx context.Context,
 	credentials AuthInput,
@@ -1321,14 +1365,19 @@ func (a API) buildMergeRequestView(
 	canWrite := principalErr == nil && principal.Role.Allows(control.RoleDeveloper)
 	canApproveOwn := principalErr == nil &&
 		principal.Role.Allows(control.RoleMaintainer)
+	authorized, err := a.authorizedApprovals(ctx, parsed.Group(), request, comparison.HeadCommit)
+	if err != nil {
+		return mergeRequestView{}, huma.Error500InternalServerError(
+			"could not authorize merge request approvals",
+			err,
+		)
+	}
 	approvals := make([]mergeRequestApprovalView, 0, len(request.Approvals))
-	currentApprovals := 0
 	staleApprovals := 0
 	viewerApproved := false
-	currentAuthors := map[string]struct{}{}
 	for _, approval := range request.Approvals {
-		current := (approval.Author != request.Author || approval.SelfApproval) &&
-			approval.HeadCommit == comparison.HeadCommit
+		_, current := authorized[approval.Author]
+		current = current && approval.HeadCommit == comparison.HeadCommit
 		approvals = append(approvals, mergeRequestApprovalView{
 			Author:     approval.Author,
 			HeadCommit: approval.HeadCommit,
@@ -1336,10 +1385,6 @@ func (a API) buildMergeRequestView(
 			Current:    current,
 		})
 		if current {
-			if _, duplicate := currentAuthors[approval.Author]; !duplicate {
-				currentAuthors[approval.Author] = struct{}{}
-				currentApprovals++
-			}
 			if principalErr == nil && approval.Author == principal.Name {
 				viewerApproved = true
 			}
@@ -1347,6 +1392,7 @@ func (a API) buildMergeRequestView(
 			staleApprovals++
 		}
 	}
+	currentApprovals := len(authorized)
 	unresolved := 0
 	threads := append([]review.Thread(nil), request.Threads...)
 	if threads == nil {

@@ -125,6 +125,39 @@ func (r *Resolver) AuthorizeIdentity(
 	return Principal{}, errors.New("identity is not authorized")
 }
 
+// ApproverRole resolves the role a name currently holds in the group, whether
+// as a member (honoring inheritance) or as an enabled, unexpired token keyed by
+// that name, and reports whether any such grant exists. It lets callers drop
+// merge-request approvals from principals who have since lost access, so a
+// stale approval from an offboarded reviewer no longer gates a merge open.
+func (r *Resolver) ApproverRole(
+	ctx context.Context,
+	group string,
+	name string,
+	now time.Time,
+) (control.Role, bool, error) {
+	paths := parents(group)
+	for i := len(paths) - 1; i >= 0; i-- {
+		document, err := r.Controls.Load(ctx, paths[i])
+		if err != nil {
+			return "", false, fmt.Errorf("load group control %q: %w", paths[i], err)
+		}
+		if role, ok := document.Members[name]; ok {
+			return role, true, nil
+		}
+		for _, token := range document.Tokens {
+			if token.Key == name && !token.Disabled &&
+				(token.ExpiresAt == nil || !now.After(*token.ExpiresAt)) {
+				return token.Role, true, nil
+			}
+		}
+		if !document.Inherit {
+			break
+		}
+	}
+	return "", false, nil
+}
+
 func parents(g string) []string {
 	p := strings.Split(g, "/")
 	o := make([]string, len(p))
