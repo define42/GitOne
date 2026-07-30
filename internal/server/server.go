@@ -4,11 +4,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/githttp"
 	"github.com/define42/GitOne/internal/httpapi"
+	"github.com/define42/GitOne/internal/httpio"
 	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
@@ -162,9 +164,18 @@ func New(c Config) http.Handler {
 		}
 		gh.ServeHTTP(w, r)
 	}))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := auth.WithClientIP(r.Context(), r.RemoteAddr)
 		mux.ServeHTTP(w, r.WithContext(ctx))
+	})
+	return protectRequestIO(handler, httpio.DefaultIdleTimeout)
+}
+
+func protectRequestIO(handler http.Handler, timeout time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w, cleanup := httpio.Protect(w, r, timeout, -1)
+		defer cleanup()
+		handler.ServeHTTP(w, r)
 	})
 }
 

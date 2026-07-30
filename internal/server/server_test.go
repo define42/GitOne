@@ -24,6 +24,7 @@ import (
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/runner"
 	"github.com/define42/GitOne/internal/storage"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -38,6 +39,62 @@ type staticDirectory map[string]string
 type countingRejectingDirectory struct {
 	mutex sync.Mutex
 	calls int
+}
+
+type deadlineTrackingResponse struct {
+	*httptest.ResponseRecorder
+	readDeadlines          []time.Time
+	writeDeadlines         []time.Time
+	wroteWithWriteDeadline bool
+}
+
+func newDeadlineTrackingResponse() *deadlineTrackingResponse {
+	return &deadlineTrackingResponse{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (r *deadlineTrackingResponse) Write(buffer []byte) (int, error) {
+	r.observeWriteDeadline()
+	return r.ResponseRecorder.Write(buffer)
+}
+
+func (r *deadlineTrackingResponse) WriteHeader(status int) {
+	r.observeWriteDeadline()
+	r.ResponseRecorder.WriteHeader(status)
+}
+
+func (r *deadlineTrackingResponse) SetReadDeadline(deadline time.Time) error {
+	r.readDeadlines = append(r.readDeadlines, deadline)
+	return nil
+}
+
+func (r *deadlineTrackingResponse) SetWriteDeadline(deadline time.Time) error {
+	r.writeDeadlines = append(r.writeDeadlines, deadline)
+	return nil
+}
+
+func (r *deadlineTrackingResponse) observeWriteDeadline() {
+	if len(r.writeDeadlines) > 0 &&
+		!r.writeDeadlines[len(r.writeDeadlines)-1].IsZero() {
+		r.wroteWithWriteDeadline = true
+	}
+}
+
+type deadlineObservingBody struct {
+	reader   io.Reader
+	response *deadlineTrackingResponse
+	observed bool
+}
+
+func (b *deadlineObservingBody) Read(buffer []byte) (int, error) {
+	if len(b.response.readDeadlines) > 0 &&
+		!b.response.readDeadlines[len(b.response.readDeadlines)-1].IsZero() {
+		b.observed = true
+	}
+	return b.reader.Read(buffer)
+}
+
+func (*deadlineObservingBody) Close() error {
+	return nil
 }
 
 func (d *countingRejectingDirectory) Authenticate(
@@ -70,6 +127,91 @@ func (d staticDirectory) Authenticate(
 		return "", errors.New("invalid credentials")
 	}
 	return username, nil
+}
+
+func TestServerProtectsAPIUIAndRunnerSourceIO(t *testing.T) {
+	root := t.TempDir()
+	coordinator, err := runner.NewCoordinator(runner.CoordinatorConfig{
+		Storage: storage.Store{Root: root},
+		State:   runner.NewStore(root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(Config{
+		Root:        root,
+		Directory:   testLDAPDirectory(),
+		Coordinator: coordinator,
+		RunnerToken: "runner-secret",
+	})
+
+	t.Run("API request body", func(t *testing.T) {
+		response := newDeadlineTrackingResponse()
+		payload := `{"username":"alice","password":"wrong"}`
+		body := &deadlineObservingBody{
+			reader:   strings.NewReader(payload),
+			response: response,
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/session", nil)
+		request.Body = body
+		request.ContentLength = int64(len(payload))
+		request.Header.Set("Content-Type", "application/json")
+
+		handler.ServeHTTP(response, request)
+
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("login status = %d: %s", response.Code, response.Body.String())
+		}
+		if !body.observed {
+			t.Fatal("API body was read without an active read deadline")
+		}
+		assertRequestDeadlines(t, response)
+	})
+
+	for _, test := range []struct {
+		name   string
+		path   string
+		status int
+	}{
+		{name: "UI", path: "/", status: http.StatusOK},
+		{
+			name:   "runner source",
+			path:   "/api/runner/source",
+			status: http.StatusUnauthorized,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := newDeadlineTrackingResponse()
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != test.status {
+				t.Fatalf(
+					"%s status = %d: %s",
+					test.name,
+					response.Code,
+					response.Body.String(),
+				)
+			}
+			assertRequestDeadlines(t, response)
+		})
+	}
+}
+
+func assertRequestDeadlines(t *testing.T, response *deadlineTrackingResponse) {
+	t.Helper()
+	if !response.wroteWithWriteDeadline {
+		t.Fatal("response was written without an active write deadline")
+	}
+	if len(response.readDeadlines) == 0 ||
+		!response.readDeadlines[len(response.readDeadlines)-1].IsZero() {
+		t.Fatalf("read deadline was not cleared: %v", response.readDeadlines)
+	}
+	if len(response.writeDeadlines) == 0 ||
+		!response.writeDeadlines[len(response.writeDeadlines)-1].IsZero() {
+		t.Fatalf("write deadline was not cleared: %v", response.writeDeadlines)
+	}
 }
 
 func TestAuthenticationRateLimitCoversEveryHTTPAuthPath(t *testing.T) {
