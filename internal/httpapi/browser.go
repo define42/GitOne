@@ -31,9 +31,10 @@ import (
 )
 
 const (
-	maxBrowsableBlobSize   = 10 * 1024 * 1024
-	maxHighlightedBlobSize = 1024 * 1024
-	maxEditableBlobSize    = 1024 * 1024
+	maxBrowsableBlobSize     = 10 * 1024 * 1024
+	maxHighlightedBlobSize   = 1024 * 1024
+	maxEditableBlobSize      = 1024 * 1024
+	maximumCommitHistoryWalk = 10_000
 )
 
 type repositoryBranchesInput struct {
@@ -268,8 +269,8 @@ type repositoryCommitsOutput struct {
 		Ref         string                 `json:"ref"`
 		Page        int                    `json:"page"`
 		PerPage     int                    `json:"perPage"`
-		Total       int                    `json:"total" doc:"Total commits reachable from the selected reference"`
-		TotalPages  int                    `json:"totalPages"`
+		Total       *int                   `json:"total,omitempty" doc:"Exact total when the end of history was reached"`
+		TotalPages  *int                   `json:"totalPages,omitempty" doc:"Exact page count when the end of history was reached"`
 		HasPrevious bool                   `json:"hasPrevious"`
 		HasNext     bool                   `json:"hasNext"`
 		Commits     []repositoryCommitInfo `json:"commits"`
@@ -903,6 +904,9 @@ func highlightRepositoryBlob(path, content string) (string, string) {
 }
 
 func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommitsInput) (*repositoryCommitsOutput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	repository, parsed, err := a.openBrowsableRepository(ctx, input.AuthInput, input.Repository)
 	if err != nil {
 		return nil, err
@@ -929,13 +933,32 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 		return nil, huma.Error400BadRequest("invalid commit history page")
 	}
 	offset := (page - 1) * perPage
-	commits := make([]repositoryCommitInfo, 0, perPage)
-	total := 0
-	err = iterator.ForEach(func(current *object.Commit) error {
-		index := total
-		total++
-		if index < offset || len(commits) >= perPage {
-			return nil
+	if offset > maximumCommitHistoryWalk-perPage-1 {
+		return nil, huma.Error400BadRequest("commit history page is too deep")
+	}
+	commits := make([]repositoryCommitInfo, 0, perPage+1)
+	seen := 0
+	for seen < offset+perPage+1 {
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+		current, nextErr := iterator.Next()
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			return nil, huma.Error500InternalServerError(
+				"could not iterate over commits",
+				nextErr,
+			)
+		}
+		index := seen
+		seen++
+		if index < offset {
+			continue
 		}
 		commits = append(commits, repositoryCommitInfo{
 			Hash:      current.Hash.String(),
@@ -946,10 +969,10 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 			Committed: current.Committer.When,
 			Message:   current.Message,
 		})
-		return nil
-	})
-	if err != nil {
-		return nil, huma.Error500InternalServerError("could not iterate over commits", err)
+	}
+	hasNext := len(commits) > perPage
+	if hasNext {
+		commits = commits[:perPage]
 	}
 
 	output := &repositoryCommitsOutput{}
@@ -957,11 +980,15 @@ func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommits
 	output.Body.Ref = input.Ref
 	output.Body.Page = page
 	output.Body.PerPage = perPage
-	output.Body.Total = total
-	output.Body.TotalPages = (total + perPage - 1) / perPage
 	output.Body.HasPrevious = page > 1
-	output.Body.HasNext = page < output.Body.TotalPages
+	output.Body.HasNext = hasNext
 	output.Body.Commits = commits
+	if !hasNext {
+		total := seen
+		totalPages := (total + perPage - 1) / perPage
+		output.Body.Total = &total
+		output.Body.TotalPages = &totalPages
+	}
 	return output, nil
 }
 

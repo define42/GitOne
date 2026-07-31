@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -66,8 +67,8 @@ func TestRepositoryCommitPaginationBeyondHundred(t *testing.T) {
 	}
 	if first.Body.Page != 1 ||
 		first.Body.PerPage != 100 ||
-		first.Body.Total != 106 ||
-		first.Body.TotalPages != 2 ||
+		first.Body.Total != nil ||
+		first.Body.TotalPages != nil ||
 		first.Body.HasPrevious ||
 		!first.Body.HasNext ||
 		len(first.Body.Commits) != 100 ||
@@ -83,8 +84,10 @@ func TestRepositoryCommitPaginationBeyondHundred(t *testing.T) {
 		t.Fatal(err)
 	}
 	if second.Body.Page != 2 ||
-		second.Body.Total != 106 ||
-		second.Body.TotalPages != 2 ||
+		second.Body.Total == nil ||
+		*second.Body.Total != 106 ||
+		second.Body.TotalPages == nil ||
+		*second.Body.TotalPages != 2 ||
 		!second.Body.HasPrevious ||
 		second.Body.HasNext ||
 		len(second.Body.Commits) != 6 ||
@@ -97,6 +100,90 @@ func TestRepositoryCommitPaginationBeyondHundred(t *testing.T) {
 		Page: 1_000_001, PerPage: 50,
 	}); err == nil {
 		t.Fatal("invalid commit page was accepted")
+	}
+	if _, err = service.listRepositoryCommits(ctx, &repositoryCommitsInput{
+		AuthInput: credentials, Repository: "engineering/api", Ref: "main",
+		Page: maximumCommitHistoryWalk + 1, PerPage: 1,
+	}); err == nil {
+		t.Fatal("unbounded commit history page was accepted")
+	}
+}
+
+func TestRepositoryCommitPageStopsAfterLookahead(t *testing.T) {
+	service, credentials, head := repositoryAPIFixture(t)
+	repository, _, err := service.openBrowsableRepository(
+		context.Background(),
+		credentials,
+		"engineering/api",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := repository.CommitObject(plumbing.NewHash(head))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentHash := initial.Hash
+	for index := 1; index <= 2; index++ {
+		signature := object.Signature{
+			Name:  "alice",
+			Email: "alice@localhost",
+			When:  initial.Author.When.Add(time.Duration(index) * time.Minute),
+		}
+		commit := &object.Commit{
+			Author:       signature,
+			Committer:    signature,
+			Message:      fmt.Sprintf("bounded commit %d\n", index),
+			TreeHash:     initial.TreeHash,
+			ParentHashes: []plumbing.Hash{parentHash},
+		}
+		encoded := &plumbing.MemoryObject{}
+		if err = commit.Encode(encoded); err != nil {
+			t.Fatal(err)
+		}
+		parentHash, err = repository.Storer.SetEncodedObject(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("main"),
+		parentHash,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.DeleteObject(initial.Hash); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := service.listRepositoryCommits(
+		context.Background(),
+		&repositoryCommitsInput{
+			AuthInput: credentials, Repository: "engineering/api", Ref: "main",
+			Page: 1, PerPage: 1,
+		},
+	)
+	if err != nil {
+		t.Fatalf("first page traversed beyond its lookahead: %v", err)
+	}
+	if len(page.Body.Commits) != 1 ||
+		!page.Body.HasNext ||
+		page.Body.Total != nil ||
+		page.Body.Commits[0].Message != "bounded commit 2\n" {
+		t.Fatalf("bounded commit page = %#v", page.Body)
+	}
+}
+
+func TestRepositoryCommitPageHonorsCanceledContext(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := service.listRepositoryCommits(ctx, &repositoryCommitsInput{
+		AuthInput: credentials, Repository: "engineering/api", Ref: "main",
+		Page: 1, PerPage: 1,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled commit history request returned %v", err)
 	}
 }
 

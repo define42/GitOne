@@ -2039,8 +2039,11 @@ function repositoryHistory(route, data) {
         previous.disabled = true;
     }
     const start = (data.page - 1) * data.perPage + 1;
-    const end = Math.min(data.page * data.perPage, data.total);
-    const pageStatus = element("span", `Page ${data.page} of ${Math.max(data.totalPages, 1)} · ${start}–${end} of ${data.total}`);
+    const end = start + data.commits.length - 1;
+    const exactStatus = data.total !== undefined && data.totalPages !== undefined
+        ? `Page ${data.page} of ${Math.max(data.totalPages, 1)} · ${data.commits.length === 0 ? "No commits" : `${start}–${end} of ${data.total}`}`
+        : `Page ${data.page} · ${start}–${end}`;
+    const pageStatus = element("span", exactStatus);
     pageStatus.className = "history-page-status";
     const next = element(data.hasNext ? "a" : "button", "Next");
     next.className = "button secondary";
@@ -4015,9 +4018,11 @@ async function renderRepositoryBrowser(route) {
         const commit = element("div");
         commit.className = "current-commit";
         commit.append(element("span", "Commit"), element("code", shortCommitHash(commitHash)));
-        const total = element("span", `${commits.total} ${commits.total === 1 ? "commit" : "commits"}`);
-        total.className = "current-commit-total";
-        commit.append(total);
+        if (commits.total !== undefined) {
+            const total = element("span", `${commits.total} ${commits.total === 1 ? "commit" : "commits"}`);
+            total.className = "current-commit-total";
+            commit.append(total);
+        }
         branchControl.append(commit);
     }
     const repositoryActions = element("div");
