@@ -21,16 +21,8 @@ func TestLibvirtExecutorWithKVM(t *testing.T) {
 		t.Skip("set GITONE_RUNNER_LIBVIRT_TEST=1 on a dedicated KVM host")
 	}
 	baseVolume := os.Getenv("GITONE_RUNNER_LIBVIRT_BASE_VOLUME")
-	sshKey := os.Getenv("GITONE_RUNNER_LIBVIRT_SSH_KEY")
 	if baseVolume == "" {
 		baseVolume = "flatcar_production_qemu_image.img"
-	}
-	if sshKey == "" {
-		keyDirectory := t.TempDir()
-		if err := os.Chmod(keyDirectory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		sshKey = filepath.Join(keyDirectory, "id_ed25519")
 	}
 	poolName := libvirtEnvOrDefault(os.Getenv("GITONE_RUNNER_LIBVIRT_POOL_NAME"), "default")
 	poolPath := libvirtEnvOrDefault(
@@ -47,7 +39,6 @@ func TestLibvirtExecutorWithKVM(t *testing.T) {
 		BaseVolumeName: baseVolume,
 		NetworkName:    "gitone-runner-integration",
 		SSHUser:        "core",
-		SSHKeyPath:     sshKey,
 		IdleCount:      1,
 		MaxInstances:   2,
 		ReadyTimeout:   10 * time.Minute,

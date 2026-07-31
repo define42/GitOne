@@ -91,6 +91,16 @@ func TestNewRemoteRunnerRejectsInvalidConfiguration(t *testing.T) {
 			args:    []string{"-libvirt-base-image-sha512", "bad"},
 			message: "SHA-512",
 		},
+		{
+			name: "removed SSH key flag", token: "test-token",
+			args:    []string{"-libvirt-ssh-key", "/tmp/id_ed25519"},
+			message: "flag provided but not defined",
+		},
+		{
+			name: "removed SSH command flag", token: "test-token",
+			args:    []string{"-libvirt-ssh-command", "ssh"},
+			message: "flag provided but not defined",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -47,8 +47,6 @@ services:
       - ${GITONE_LIBVIRT_BASE_IMAGE_SHA512:-9cd59da624ad47c58686ea05ab216e0343fa1181219f493f27a81256c68170817f2f40759f9437fad80958f671e658cff9f84a67b2cb40fdc90931ce74651a21}
       - -libvirt-network-cidr
       - ${GITONE_LIBVIRT_NETWORK_CIDR:-}
-      - -libvirt-ssh-key
-      - /etc/gitone-runner/id_ed25519
     environment:
       - GITONE_RUNNER_TOKEN=${GITONE_RUNNER_TOKEN:-gitone-development-runner-token}
     depends_on:
@@ -61,7 +59,6 @@ services:
       - /var/lib/gitone-runner:/var/lib/gitone-runner
       - ${GITONE_LIBVIRT_SOCKET:-/var/run/libvirt/libvirt-sock}:/var/run/libvirt/libvirt-sock
       - ${GITONE_LIBVIRT_POOL_PATH:-/var/lib/libvirt/images}:${GITONE_LIBVIRT_POOL_PATH:-/var/lib/libvirt/images}
-      - ${GITONE_LIBVIRT_SSH_DIR:-/etc/gitone-runner}:/etc/gitone-runner
   ldap:
     image: glauth/glauth
     container_name: ldap

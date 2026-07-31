@@ -4,21 +4,78 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/define42/GitOne/internal/repoconfig"
+	"golang.org/x/crypto/ssh"
 )
 
 type recordingLibvirtCommandRunner struct {
 	command   string
 	arguments []string
 	run       func(io.Reader, io.Writer, io.Writer) error
+}
+
+type recordingLibvirtGuestSSH struct {
+	mu            sync.Mutex
+	commands      []string
+	forgotten     []string
+	run           func(context.Context, io.Reader, io.Writer, io.Writer, string) error
+	authorizedKey string
+}
+
+func (s *recordingLibvirtGuestSSH) AuthorizedKey() string {
+	if s.authorizedKey != "" {
+		return s.authorizedKey
+	}
+	return "ssh-ed25519 AAAATEST gitone-test"
+}
+
+func (s *recordingLibvirtGuestSSH) Run(
+	ctx context.Context,
+	_ vmInstance,
+	input io.Reader,
+	output io.Writer,
+	errorOutput io.Writer,
+	command string,
+) error {
+	s.mu.Lock()
+	s.commands = append(s.commands, command)
+	run := s.run
+	s.mu.Unlock()
+	if run == nil {
+		return nil
+	}
+	return run(ctx, input, output, errorOutput, command)
+}
+
+func (s *recordingLibvirtGuestSSH) ForgetHost(name string) {
+	s.mu.Lock()
+	s.forgotten = append(s.forgotten, name)
+	s.mu.Unlock()
+}
+
+func (s *recordingLibvirtGuestSSH) lastCommand() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.commands) == 0 {
+		return ""
+	}
+	return s.commands[len(s.commands)-1]
 }
 
 func (r *recordingLibvirtCommandRunner) LookPath(command string) (string, error) {
@@ -43,22 +100,18 @@ func (r *recordingLibvirtCommandRunner) Run(
 
 func TestRunSSHDoesNotExposeRemoteCommand(t *testing.T) {
 	const secret = "TOP_SECRET_BUILD_VALUE"
-	runner := &recordingLibvirtCommandRunner{
-		run: func(_ io.Reader, _ io.Writer, errorOutput io.Writer) error {
+	guestSSH := &recordingLibvirtGuestSSH{
+		run: func(_ context.Context, _ io.Reader, _ io.Writer, errorOutput io.Writer, _ string) error {
 			_, _ = io.WriteString(errorOutput, "remote shell diagnostic")
 			return errors.New("exit status 17")
 		},
 	}
 	provider := &virshVMProvider{
 		config: LibvirtConfig{
-			SSHCommand:    "/usr/bin/ssh",
-			SSHPort:       22,
-			SSHKeyPath:    "/run/gitone/id_ed25519",
 			SSHUser:       "core",
 			DockerCommand: "docker",
-			PoolPath:      "/run/gitone",
 		},
-		runner: runner,
+		guestSSH: guestSSH,
 	}
 	instance := vmInstance{Name: "owned-warm-vm", Address: "192.0.2.20"}
 	remoteCommand := "docker run --env TOKEN=" + secret + " image /bin/sh -ec 'echo secret'"
@@ -73,13 +126,390 @@ func TestRunSSHDoesNotExposeRemoteCommand(t *testing.T) {
 	if !strings.Contains(err.Error(), "ssh "+instance.Name) {
 		t.Fatalf("SSH error does not identify the instance: %v", err)
 	}
-	if runner.command != "/usr/bin/ssh" || runner.arguments[len(runner.arguments)-1] != remoteCommand {
-		t.Fatalf("SSH invocation = %q %#v", runner.command, runner.arguments)
+	if guestSSH.lastCommand() != remoteCommand {
+		t.Fatalf("native SSH command = %q, want %q", guestSSH.lastCommand(), remoteCommand)
 	}
-	wantKnownHosts := "UserKnownHostsFile=" + provider.instanceKnownHostsPath(instance)
-	if !containsString(runner.arguments, wantKnownHosts) {
-		t.Fatalf("SSH did not use per-instance known-hosts file %q: %#v", wantKnownHosts, runner.arguments)
+}
+
+func TestRunSSHPreservesControlledTransportDiagnostic(t *testing.T) {
+	guestSSH := &recordingLibvirtGuestSSH{
+		run: func(context.Context, io.Reader, io.Writer, io.Writer, string) error {
+			return &libvirtSSHTransportError{message: "VM SSH host key changed"}
+		},
 	}
+	provider := &virshVMProvider{guestSSH: guestSSH}
+	instance := vmInstance{Name: "owned-warm-vm", Address: "192.0.2.20"}
+	err := provider.runSSH(context.Background(), instance, nil, io.Discard, io.Discard, "secret")
+	if err == nil || !strings.Contains(err.Error(), "VM SSH host key changed") {
+		t.Fatalf("controlled SSH transport diagnostic = %v", err)
+	}
+}
+
+func TestNativeLibvirtSSHGeneratesFreshInMemoryEd25519Identity(t *testing.T) {
+	first, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(first.AuthorizedKey()))
+	if err != nil {
+		t.Fatalf("parse generated authorized key: %v", err)
+	}
+	if publicKey.Type() != ssh.KeyAlgoED25519 {
+		t.Fatalf("generated key type = %q, want %q", publicKey.Type(), ssh.KeyAlgoED25519)
+	}
+	if first.AuthorizedKey() == second.AuthorizedKey() {
+		t.Fatal("two runner SSH transports reused an identity")
+	}
+}
+
+func TestNativeLibvirtSSHPinsHostKeyInMemoryPerVM(t *testing.T) {
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstHostKey := newTestSSHSigner(t).PublicKey()
+	secondHostKey := newTestSSHSigner(t).PublicKey()
+	callback := transport.hostKeyCallback("warm-vm-1")
+	if err = callback("ignored", nil, firstHostKey); err != nil {
+		t.Fatalf("pin first host key: %v", err)
+	}
+	if err = callback("ignored", nil, firstHostKey); err != nil {
+		t.Fatalf("accept pinned host key: %v", err)
+	}
+	if err = callback("ignored", nil, secondHostKey); err == nil ||
+		!strings.Contains(err.Error(), "host key changed") {
+		t.Fatalf("changed host-key error = %v", err)
+	}
+	transport.ForgetHost("warm-vm-1")
+	if err = callback("ignored", nil, secondHostKey); err != nil {
+		t.Fatalf("accept host key after VM destruction: %v", err)
+	}
+}
+
+func TestNativeLibvirtSSHConcurrentFirstHostKeyHasSingleWinner(t *testing.T) {
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostKeys := []ssh.PublicKey{
+		newTestSSHSigner(t).PublicKey(),
+		newTestSSHSigner(t).PublicKey(),
+	}
+	start := make(chan struct{})
+	results := make(chan error, len(hostKeys))
+	for _, hostKey := range hostKeys {
+		go func() {
+			<-start
+			results <- transport.hostKeyCallback("warm-vm-1")("ignored", nil, hostKey)
+		}()
+	}
+	close(start)
+	accepted := 0
+	rejected := 0
+	for range hostKeys {
+		if err = <-results; err == nil {
+			accepted++
+		} else {
+			rejected++
+		}
+	}
+	if accepted != 1 || rejected != 1 {
+		t.Fatalf("concurrent first host keys: accepted %d, rejected %d", accepted, rejected)
+	}
+}
+
+func TestNativeLibvirtSSHStreamsCommandWithoutOpenSSHProcess(t *testing.T) {
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestSSHServer(t, transport.signer.PublicKey(), func(command string, channel ssh.Channel) {
+		contents, readErr := io.ReadAll(channel)
+		if readErr != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(channel, "stdout:%s:%s", command, contents)
+		_, _ = fmt.Fprint(channel.Stderr(), "stderr")
+	})
+	defer server.Close()
+	host, portText, err := net.SplitHostPort(server.Address())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.port = port
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err = transport.Run(
+		context.Background(),
+		vmInstance{Name: "warm-vm-1", Address: host},
+		strings.NewReader("archive"),
+		&stdout,
+		&stderr,
+		"consume-stream",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "stdout:consume-stream:archive" || stderr.String() != "stderr" {
+		t.Fatalf("native SSH streams = stdout %q, stderr %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestNativeLibvirtSSHSerializesStdoutAndStderr(t *testing.T) {
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestSSHServer(t, transport.signer.PublicKey(), func(_ string, channel ssh.Channel) {
+		var writers sync.WaitGroup
+		writers.Add(2)
+		go func() {
+			defer writers.Done()
+			for range 64 {
+				_, _ = channel.Write([]byte("stdout"))
+			}
+		}()
+		go func() {
+			defer writers.Done()
+			for range 64 {
+				_, _ = channel.Stderr().Write([]byte("stderr"))
+			}
+		}()
+		writers.Wait()
+	})
+	defer server.Close()
+	host, portText, err := net.SplitHostPort(server.Address())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.port, err = strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := &concurrencyDetectingWriter{}
+	err = transport.Run(
+		context.Background(),
+		vmInstance{Name: "warm-vm-1", Address: host},
+		nil,
+		output,
+		output,
+		"concurrent-output",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.concurrent.Load() {
+		t.Fatal("stdout and stderr wrote to the build log concurrently")
+	}
+	if output.bytes.Load() == 0 {
+		t.Fatal("native SSH did not forward command output")
+	}
+}
+
+func TestNativeLibvirtSSHCancelsSilentHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- connection
+		}
+	}()
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.port, err = strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- transport.Run(
+			ctx,
+			vmInstance{Name: "warm-vm-1", Address: host},
+			nil,
+			io.Discard,
+			io.Discard,
+			"never-started",
+		)
+	}()
+	connection := <-accepted
+	cancel()
+	defer func() { _ = connection.Close() }()
+	select {
+	case err = <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("silent-handshake cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSH handshake did not stop after cancellation")
+	}
+}
+
+func TestNativeLibvirtSSHCancelsHungCommand(t *testing.T) {
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := newTestSSHServer(t, transport.signer.PublicKey(), func(_ string, _ ssh.Channel) {
+		close(started)
+		<-release
+	})
+	defer server.Close()
+	defer close(release)
+	host, portText, err := net.SplitHostPort(server.Address())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.port, err = strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- transport.Run(
+			ctx,
+			vmInstance{Name: "warm-vm-1", Address: host},
+			nil,
+			io.Discard,
+			io.Discard,
+			"hang",
+		)
+	}()
+	<-started
+	cancel()
+	select {
+	case err = <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("hung-command cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSH command did not stop after cancellation")
+	}
+}
+
+func TestNativeLibvirtSSHClosesConnectionWhenKeepAliveIsUnanswered(t *testing.T) {
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.keepAliveInterval = 10 * time.Millisecond
+	transport.keepAliveCountMax = 2
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := newTestSSHServer(t, transport.signer.PublicKey(), func(_ string, _ ssh.Channel) {
+		close(started)
+		<-release
+	})
+	server.ignoreGlobalRequests.Store(true)
+	defer server.Close()
+	defer close(release)
+	host, portText, err := net.SplitHostPort(server.Address())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.port, err = strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- transport.Run(
+			context.Background(),
+			vmInstance{Name: "warm-vm-1", Address: host},
+			nil,
+			io.Discard,
+			io.Discard,
+			"wait-for-keepalive",
+		)
+	}()
+	<-started
+	select {
+	case err = <-result:
+		if err == nil {
+			t.Fatal("unanswered SSH keepalive did not fail the command")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unanswered SSH keepalive did not close the connection")
+	}
+}
+
+func TestRunSSHSanitizesRealServerExitSignal(t *testing.T) {
+	const secret = "TOP_SECRET_REMOTE_COMMAND"
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestSSHServer(t, transport.signer.PublicKey(), func(_ string, channel ssh.Channel) {
+		_, _ = channel.SendRequest("exit-signal", false, ssh.Marshal(struct {
+			SignalName   string
+			CoreDumped   bool
+			ErrorMessage string
+			LanguageTag  string
+		}{"TERM", false, secret, "en"}))
+	})
+	server.sendExitStatus.Store(false)
+	defer server.Close()
+	host, portText, err := net.SplitHostPort(server.Address())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.port, err = strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &virshVMProvider{guestSSH: transport}
+	err = provider.runSSH(
+		context.Background(),
+		vmInstance{Name: "warm-vm-1", Address: host},
+		nil,
+		io.Discard,
+		io.Discard,
+		"docker run --env TOKEN="+secret,
+	)
+	if err == nil {
+		t.Fatal("exit signal unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "docker run") {
+		t.Fatalf("SSH error exposed remote content: %v", err)
+	}
+}
+
+type concurrencyDetectingWriter struct {
+	active     atomic.Int32
+	concurrent atomic.Bool
+	bytes      atomic.Int64
+}
+
+func (w *concurrencyDetectingWriter) Write(contents []byte) (int, error) {
+	if w.active.Add(1) != 1 {
+		w.concurrent.Store(true)
+	}
+	time.Sleep(100 * time.Microsecond)
+	w.bytes.Add(int64(len(contents)))
+	w.active.Add(-1)
+	return len(contents), nil
 }
 
 func TestRunLibvirtCommandDoesNotCaptureStreamedStderr(t *testing.T) {
@@ -159,21 +589,15 @@ func TestDockerRunArgumentsMatchContainerIsolationContract(t *testing.T) {
 }
 
 func TestUploadMakesWorkspaceUsableByNonRootImageUser(t *testing.T) {
-	runner := &recordingLibvirtCommandRunner{
-		run: func(input io.Reader, _ io.Writer, _ io.Writer) error {
+	guestSSH := &recordingLibvirtGuestSSH{
+		run: func(_ context.Context, input io.Reader, _ io.Writer, _ io.Writer, _ string) error {
 			_, err := io.Copy(io.Discard, input)
 			return err
 		},
 	}
 	provider := &virshVMProvider{
-		config: LibvirtConfig{
-			SSHCommand: "/usr/bin/ssh",
-			SSHPort:    22,
-			SSHKeyPath: "/run/gitone/id_ed25519",
-			SSHUser:    "core",
-			PoolPath:   "/run/gitone",
-		},
-		runner: runner,
+		config:   LibvirtConfig{SSHUser: "core"},
+		guestSSH: guestSSH,
 	}
 	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, "source.txt"), []byte("source"), 0o600); err != nil {
@@ -188,9 +612,133 @@ func TestUploadMakesWorkspaceUsableByNonRootImageUser(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	remoteCommand := runner.arguments[len(runner.arguments)-1]
+	remoteCommand := guestSSH.lastCommand()
 	if !strings.Contains(remoteCommand, "chmod -R a+rwX -- '/var/tmp/gitone-build-1'") {
 		t.Fatalf("upload did not make the workspace usable by an arbitrary image user: %q", remoteCommand)
+	}
+}
+
+type testSSHServer struct {
+	listener             net.Listener
+	config               *ssh.ServerConfig
+	handler              func(string, ssh.Channel)
+	ignoreGlobalRequests atomic.Bool
+	ignoredRequests      atomic.Int64
+	sendExitStatus       atomic.Bool
+	wait                 sync.WaitGroup
+}
+
+func newTestSSHServer(
+	t *testing.T,
+	authorizedKey ssh.PublicKey,
+	handler func(string, ssh.Channel),
+) *testSSHServer {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &testSSHServer{
+		listener: listener,
+		handler:  handler,
+		config: &ssh.ServerConfig{
+			PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+				if !bytes.Equal(key.Marshal(), authorizedKey.Marshal()) {
+					return nil, errors.New("unauthorized test key")
+				}
+				return nil, nil
+			},
+		},
+	}
+	server.sendExitStatus.Store(true)
+	server.config.AddHostKey(newTestSSHSigner(t))
+	server.wait.Add(1)
+	go server.serve()
+	return server
+}
+
+func newTestSSHSigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signer
+}
+
+func (s *testSSHServer) Address() string {
+	return s.listener.Addr().String()
+}
+
+func (s *testSSHServer) Close() {
+	_ = s.listener.Close()
+	s.wait.Wait()
+}
+
+func (s *testSSHServer) serve() {
+	defer s.wait.Done()
+	for {
+		connection, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		s.wait.Add(1)
+		go func() {
+			defer s.wait.Done()
+			s.serveConnection(connection)
+		}()
+	}
+}
+
+func (s *testSSHServer) serveConnection(connection net.Conn) {
+	serverConnection, channels, requests, err := ssh.NewServerConn(connection, s.config)
+	if err != nil {
+		_ = connection.Close()
+		return
+	}
+	defer func() { _ = serverConnection.Close() }()
+	if s.ignoreGlobalRequests.Load() {
+		go func() {
+			for range requests {
+				s.ignoredRequests.Add(1)
+			}
+		}()
+	} else {
+		go ssh.DiscardRequests(requests)
+	}
+	for request := range channels {
+		if request.ChannelType() != "session" {
+			_ = request.Reject(ssh.UnknownChannelType, "session channel required")
+			continue
+		}
+		channel, channelRequests, err := request.Accept()
+		if err != nil {
+			continue
+		}
+		for channelRequest := range channelRequests {
+			if channelRequest.Type != "exec" {
+				_ = channelRequest.Reply(false, nil)
+				continue
+			}
+			var payload struct{ Command string }
+			if err = ssh.Unmarshal(channelRequest.Payload, &payload); err != nil {
+				_ = channelRequest.Reply(false, nil)
+				continue
+			}
+			_ = channelRequest.Reply(true, nil)
+			if s.handler != nil {
+				s.handler(payload.Command, channel)
+			}
+			if s.sendExitStatus.Load() {
+				_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+			}
+			_ = channel.Close()
+			break
+		}
 	}
 }
 

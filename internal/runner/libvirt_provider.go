@@ -1,18 +1,13 @@
 package runner
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/pem"
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -23,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 )
 
@@ -31,7 +25,6 @@ const (
 	libvirtInstanceTimestampLayout = "20060102150405"
 	libvirtInstanceSuffixBytes     = 3
 	libvirtMaximumNameAttempts     = 16
-	libvirtMaximumSSHKeyBytes      = 1024 * 1024
 )
 
 var (
@@ -53,6 +46,7 @@ type virshVMProvider struct {
 	prepared  bool
 	publicKey string
 	lockFile  *os.File
+	guestSSH  libvirtGuestSSH
 
 	identityMu            sync.Mutex
 	allocatedNames        map[string]string
@@ -72,7 +66,6 @@ type libvirtOwnedDomainDescription struct {
 }
 
 func newVirshVMProvider(config LibvirtConfig) vmProvider {
-	config.SSHKeyPath = filepath.Clean(config.SSHKeyPath)
 	ownerPrefix := libvirtOwnerPrefix(config.URI, config.PoolName, config.RunnerID)
 	return &virshVMProvider{
 		config:                config,
@@ -124,18 +117,14 @@ func (p *virshVMProvider) Prepare(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("find virsh command %q: %w", p.config.VirshCommand, err)
 	}
-	sshPath, err := p.runner.LookPath(p.config.SSHCommand)
-	if err != nil {
-		return fmt.Errorf("find SSH command %q: %w", p.config.SSHCommand, err)
-	}
 	p.config.VirshCommand = virshPath
-	p.config.SSHCommand = sshPath
-
-	publicKey, err := loadLibvirtSSHPublicKey(p.config.SSHKeyPath)
-	if err != nil {
-		return err
+	if p.guestSSH == nil {
+		p.guestSSH, err = newNativeLibvirtSSH(p.config.SSHUser, p.config.SSHPort)
+		if err != nil {
+			return err
+		}
 	}
-	p.publicKey = publicKey
+	p.publicKey = p.guestSSH.AuthorizedKey()
 
 	if err = p.acquireLock(); err != nil {
 		return err
@@ -184,12 +173,12 @@ func (p *virshVMProvider) validateRuntimeConfig() error {
 		return errors.New("invalid guest Docker command")
 	case strings.TrimSpace(p.config.URI) == "" || containsControlCharacter(p.config.URI):
 		return errors.New("invalid libvirt URI")
+	case libvirtURIUsesExternalSSH(p.config.URI):
+		return errors.New("libvirt +ssh transport is unsupported; use a local libvirt socket")
 	case !filepath.IsAbs(p.config.PoolPath):
 		return errors.New("libvirt storage pool path must be absolute")
 	case strings.ContainsAny(p.config.PoolPath, ",\r\n\x00"):
 		return errors.New("libvirt storage pool path contains unsupported characters")
-	case !filepath.IsAbs(p.config.SSHKeyPath):
-		return errors.New("libvirt SSH key path must be absolute")
 	}
 	if err := validateFlatcarPoolDirectory(p.config.PoolPath); err != nil {
 		return err
@@ -215,288 +204,6 @@ func containsControlCharacter(value string) bool {
 		}
 	}
 	return false
-}
-
-func loadLibvirtSSHPublicKey(path string) (publicKey string, returnErr error) {
-	directory := filepath.Dir(path)
-	if err := ensureLibvirtSSHKeyDirectory(directory); err != nil {
-		return "", err
-	}
-	lockPath := filepath.Join(directory, "."+filepath.Base(path)+".gitone.lock")
-	lockFile, err := os.OpenFile(
-		lockPath,
-		os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW,
-		0o600,
-	)
-	if err != nil {
-		return "", fmt.Errorf("open libvirt SSH key lock: %w", err)
-	}
-	var lockStat unix.Stat_t
-	if err = unix.Fstat(int(lockFile.Fd()), &lockStat); err != nil {
-		_ = lockFile.Close()
-		return "", fmt.Errorf("inspect libvirt SSH key lock: %w", err)
-	}
-	if lockStat.Mode&unix.S_IFMT != unix.S_IFREG {
-		_ = lockFile.Close()
-		return "", errors.New("libvirt SSH key lock must be a regular file")
-	}
-	if lockStat.Uid != uint32(os.Geteuid()) {
-		_ = lockFile.Close()
-		return "", errors.New("libvirt SSH key lock must be owned by the runner user")
-	}
-	if err = unix.Flock(int(lockFile.Fd()), unix.LOCK_EX); err != nil {
-		_ = lockFile.Close()
-		return "", fmt.Errorf("lock libvirt SSH key: %w", err)
-	}
-	defer func() {
-		unlockErr := unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
-		closeErr := lockFile.Close()
-		if unlockErr != nil {
-			unlockErr = fmt.Errorf("unlock libvirt SSH key: %w", unlockErr)
-		}
-		if closeErr != nil {
-			closeErr = fmt.Errorf("close libvirt SSH key lock: %w", closeErr)
-		}
-		returnErr = errors.Join(returnErr, unlockErr, closeErr)
-	}()
-	return loadLibvirtSSHPublicKeyLocked(path)
-}
-
-func ensureLibvirtSSHKeyDirectory(path string) (returnErr error) {
-	cleanPath := filepath.Clean(path)
-	if !filepath.IsAbs(cleanPath) {
-		return errors.New("libvirt SSH key directory must be absolute")
-	}
-	directoryFD, err := unix.Open(
-		string(filepath.Separator),
-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-		0,
-	)
-	if err != nil {
-		return fmt.Errorf("open root directory for libvirt SSH key: %w", err)
-	}
-	defer func() {
-		if directoryFD >= 0 {
-			if closeErr := unix.Close(directoryFD); closeErr != nil {
-				returnErr = errors.Join(
-					returnErr,
-					fmt.Errorf("close libvirt SSH key directory: %w", closeErr),
-				)
-			}
-		}
-	}()
-
-	relativePath := strings.TrimPrefix(cleanPath, string(filepath.Separator))
-	var components []string
-	if relativePath != "" {
-		components = strings.Split(relativePath, string(filepath.Separator))
-	}
-	currentPath := string(filepath.Separator)
-	if err = validateLibvirtSSHDirectoryFD(directoryFD, currentPath, len(components) == 0); err != nil {
-		return err
-	}
-	for index, component := range components {
-		nextPath := filepath.Join(currentPath, component)
-		nextFD, openErr := unix.Openat(
-			directoryFD,
-			component,
-			unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-			0,
-		)
-		if errors.Is(openErr, unix.ENOENT) {
-			if makeErr := unix.Mkdirat(directoryFD, component, 0o700); makeErr != nil &&
-				!errors.Is(makeErr, unix.EEXIST) {
-				return fmt.Errorf("create libvirt SSH key directory %q: %w", nextPath, makeErr)
-			}
-			nextFD, openErr = unix.Openat(
-				directoryFD,
-				component,
-				unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC,
-				0,
-			)
-		}
-		if openErr != nil {
-			return fmt.Errorf("open libvirt SSH key directory %q without symlinks: %w", nextPath, openErr)
-		}
-		if closeErr := unix.Close(directoryFD); closeErr != nil {
-			_ = unix.Close(nextFD)
-			directoryFD = -1
-			return fmt.Errorf("close parent libvirt SSH key directory: %w", closeErr)
-		}
-		directoryFD = nextFD
-		currentPath = nextPath
-		if err = validateLibvirtSSHDirectoryFD(
-			directoryFD,
-			currentPath,
-			index == len(components)-1,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateLibvirtSSHDirectoryFD(fd int, path string, keyDirectory bool) error {
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return fmt.Errorf("inspect libvirt SSH key directory %q: %w", path, err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return fmt.Errorf("libvirt SSH key path component %q must be a directory", path)
-	}
-	effectiveUID := uint32(os.Geteuid())
-	if keyDirectory {
-		if stat.Uid != effectiveUID {
-			return fmt.Errorf("libvirt SSH key directory %q must be owned by the runner user", path)
-		}
-		if stat.Mode&0o022 != 0 {
-			return fmt.Errorf(
-				"libvirt SSH key directory %q must not be writable by group or others (mode %#o)",
-				path,
-				stat.Mode&0o777,
-			)
-		}
-		return nil
-	}
-	if stat.Uid != 0 && stat.Uid != effectiveUID {
-		return fmt.Errorf(
-			"libvirt SSH key directory ancestor %q must be owned by root or the runner user",
-			path,
-		)
-	}
-	if stat.Mode&0o022 != 0 && !(stat.Uid == 0 && stat.Mode&unix.S_ISVTX != 0) {
-		return fmt.Errorf(
-			"libvirt SSH key directory ancestor %q must not be writable by group or others",
-			path,
-		)
-	}
-	return nil
-}
-
-func loadLibvirtSSHPublicKeyLocked(path string) (string, error) {
-	const attempts = 4
-	for range attempts {
-		info, err := os.Lstat(path)
-		switch {
-		case err == nil && info.IsDir():
-			entries, readErr := os.ReadDir(path)
-			if readErr != nil {
-				return "", fmt.Errorf("inspect libvirt SSH key directory at private-key path: %w", readErr)
-			}
-			if len(entries) != 0 {
-				return "", errors.New("libvirt SSH private-key path is a non-empty directory")
-			}
-			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				return "", fmt.Errorf(
-					"replace empty directory at libvirt SSH private-key path (mount its parent directory, not the key path): %w",
-					removeErr,
-				)
-			}
-			continue
-		case err == nil:
-			return readLibvirtSSHPublicKey(path)
-		case !errors.Is(err, os.ErrNotExist):
-			return "", fmt.Errorf("inspect libvirt SSH private key: %w", err)
-		}
-
-		if err = createLibvirtSSHPrivateKey(path); err != nil {
-			// Another local controller may have won the exclusive atomic create.
-			// Only retry when a complete filesystem object is now present.
-			if _, statErr := os.Lstat(path); statErr == nil {
-				continue
-			}
-			return "", err
-		}
-		log.Printf("generated libvirt runner SSH key %s", path)
-	}
-	return "", errors.New("libvirt SSH private key changed repeatedly during creation")
-}
-
-func createLibvirtSSHPrivateKey(path string) error {
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("generate libvirt Ed25519 SSH key: %w", err)
-	}
-	privateBlock, err := ssh.MarshalPrivateKey(privateKey, "gitone-runner")
-	if err != nil {
-		return fmt.Errorf("marshal libvirt Ed25519 SSH key: %w", err)
-	}
-	contents := pem.EncodeToMemory(privateBlock)
-	if len(contents) == 0 {
-		return errors.New("encode libvirt Ed25519 SSH key")
-	}
-	if err = writeLibvirtFileAtomic(path, contents, 0o600); err != nil {
-		return fmt.Errorf("write libvirt SSH private key: %w", err)
-	}
-	return nil
-}
-
-func readLibvirtSSHPublicKey(path string) (publicKey string, returnErr error) {
-	privateFile, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return "", fmt.Errorf("open libvirt SSH private key: %w", err)
-	}
-	defer func() {
-		if closeErr := privateFile.Close(); closeErr != nil {
-			returnErr = errors.Join(
-				returnErr,
-				fmt.Errorf("close libvirt SSH private key: %w", closeErr),
-			)
-		}
-	}()
-
-	var stat unix.Stat_t
-	if err = unix.Fstat(int(privateFile.Fd()), &stat); err != nil {
-		return "", fmt.Errorf("inspect libvirt SSH private key: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
-		return "", errors.New("libvirt SSH private key must be a regular file")
-	}
-	if stat.Uid != uint32(os.Geteuid()) {
-		return "", errors.New("libvirt SSH private key must be owned by the runner user")
-	}
-	if stat.Mode&0o077 != 0 {
-		return "", errors.New("libvirt SSH private key must not be accessible by group or others")
-	}
-	privateKey, err := io.ReadAll(io.LimitReader(privateFile, libvirtMaximumSSHKeyBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("read libvirt SSH private key: %w", err)
-	}
-	if len(privateKey) > libvirtMaximumSSHKeyBytes {
-		return "", errors.New("libvirt SSH private key is too large")
-	}
-	signer, err := ssh.ParsePrivateKey(privateKey)
-	if err != nil {
-		return "", fmt.Errorf("parse libvirt SSH private key: %w", err)
-	}
-	publicKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	publicContents := []byte(publicKey + "\n")
-	if err = ensureLibvirtSSHPublicKeyFile(path+".pub", publicContents); err != nil {
-		return "", err
-	}
-	return publicKey, nil
-}
-
-func ensureLibvirtSSHPublicKeyFile(path string, contents []byte) error {
-	info, err := os.Lstat(path)
-	if err == nil {
-		if !info.Mode().IsRegular() {
-			return errors.New("libvirt SSH public-key path must be a regular file")
-		}
-		existing, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return fmt.Errorf("read libvirt SSH public key: %w", readErr)
-		}
-		if bytes.Equal(existing, contents) {
-			return nil
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect libvirt SSH public key: %w", err)
-	}
-	if err = writeLibvirtFileReplacingAtomic(path, contents, 0o644); err != nil {
-		return fmt.Errorf("write libvirt SSH public key: %w", err)
-	}
-	return nil
 }
 
 func (p *virshVMProvider) acquireLock() error {
@@ -899,9 +606,6 @@ func (p *virshVMProvider) Create(ctx context.Context) (instance vmInstance, err 
 	if err = writeLibvirtFileAtomic(instance.IgnitionPath, ignition, 0o644); err != nil {
 		return instance, fmt.Errorf("write VM Ignition: %w", err)
 	}
-	if err = writeLibvirtFileAtomic(p.instanceKnownHostsPath(instance), nil, 0o600); err != nil {
-		return instance, fmt.Errorf("write VM SSH known-hosts file: %w", err)
-	}
 
 	if _, err = p.virsh(
 		ctx,
@@ -1291,11 +995,11 @@ func (p *virshVMProvider) Destroy(ctx context.Context, instance vmInstance) erro
 	if err := os.Remove(instance.IgnitionPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("delete VM Ignition: %w", err))
 	}
-	if err := os.Remove(p.instanceKnownHostsPath(instance)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, fmt.Errorf("delete VM SSH known-hosts file: %w", err))
-	}
 	result := errors.Join(errs...)
 	if result == nil {
+		if p.guestSSH != nil {
+			p.guestSSH.ForgetHost(instance.Name)
+		}
 		p.releaseInstanceIdentity(instance)
 	}
 	return result
@@ -1321,10 +1025,6 @@ func (p *virshVMProvider) verifyDomainOwnership(ctx context.Context, instance vm
 		}
 	}
 	return fmt.Errorf("refusing to destroy KVM domain without owned disk %q", expectedDiskPath)
-}
-
-func (p *virshVMProvider) instanceKnownHostsPath(instance vmInstance) string {
-	return filepath.Join(p.config.PoolPath, "."+instance.Name+".known_hosts")
 }
 
 func (p *virshVMProvider) ownsInstance(instance vmInstance) bool {
@@ -1466,20 +1166,24 @@ func (p *virshVMProvider) cleanupOwnedResources(ctx context.Context) error {
 		}
 	}
 
-	knownHostsPattern := filepath.Join(p.config.PoolPath, "."+p.ownerPrefix+"-*.known_hosts")
-	knownHostsPaths, globErr := filepath.Glob(knownHostsPattern)
+	// Releases before the native Go SSH transport kept public host-key pins in
+	// the pool. Remove those legacy files only after confirming their one-use VM
+	// no longer exists; current releases never create them.
+	legacyKnownHostsPattern := filepath.Join(p.config.PoolPath, "."+p.ownerPrefix+"-*.known_hosts")
+	legacyKnownHostsPaths, globErr := filepath.Glob(legacyKnownHostsPattern)
 	if globErr != nil {
-		errs = append(errs, fmt.Errorf("find stale VM SSH known-hosts files: %w", globErr))
+		errs = append(errs, fmt.Errorf("find legacy VM SSH known-hosts files: %w", globErr))
 	}
-	for _, knownHostsPath := range knownHostsPaths {
+	for _, knownHostsPath := range legacyKnownHostsPaths {
 		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(knownHostsPath), "."), ".known_hosts")
 		if !p.ownsName(name) || !safeToDeleteArtifacts(name) {
 			continue
 		}
 		if removeErr := os.Remove(knownHostsPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("delete stale VM SSH known-hosts file %q: %w", knownHostsPath, removeErr))
+			errs = append(errs, fmt.Errorf("delete legacy VM SSH known-hosts file %q: %w", knownHostsPath, removeErr))
 		}
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -1596,33 +1300,4 @@ func writeLibvirtFileAtomic(path string, contents []byte, mode os.FileMode) (err
 		committed = false
 	}
 	return err
-}
-
-func writeLibvirtFileReplacingAtomic(
-	path string,
-	contents []byte,
-	mode os.FileMode,
-) (err error) {
-	temporary, err := writeLibvirtTemporaryFile(
-		filepath.Dir(path),
-		".gitone-ssh-public-key-*.tmp",
-		contents,
-		mode,
-	)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if removeErr := os.Remove(temporary); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			err = errors.Join(err, removeErr)
-		}
-	}()
-	if err = os.Rename(temporary, path); err != nil {
-		return err
-	}
-	directory, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	return errors.Join(directory.Sync(), directory.Close())
 }

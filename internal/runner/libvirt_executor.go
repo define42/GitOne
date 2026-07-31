@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +27,6 @@ const (
 	defaultLibvirtNetworkName    = "gitone-runner"
 	defaultLibvirtSSHUser        = "core"
 	defaultLibvirtVirshCommand   = "virsh"
-	defaultLibvirtSSHCommand     = "ssh"
 	defaultLibvirtDockerCommand  = "docker"
 	defaultLibvirtSSHPort        = 22
 	defaultLibvirtVCPUs          = 2
@@ -55,9 +53,7 @@ type LibvirtConfig struct {
 	NetworkName        string
 	NetworkCIDR        string
 	SSHUser            string
-	SSHKeyPath         string
 	VirshCommand       string
-	SSHCommand         string
 	DockerCommand      string
 	SSHPort            int
 	VCPUs              int
@@ -190,12 +186,7 @@ func normalizeLibvirtConfig(config LibvirtConfig) (LibvirtConfig, error) {
 		return LibvirtConfig{}, err
 	}
 	config.SSHUser = defaultString(config.SSHUser, defaultLibvirtSSHUser)
-	config.SSHKeyPath = strings.TrimSpace(config.SSHKeyPath)
-	if config.SSHKeyPath != "" {
-		config.SSHKeyPath = filepath.Clean(config.SSHKeyPath)
-	}
 	config.VirshCommand = defaultString(config.VirshCommand, defaultLibvirtVirshCommand)
-	config.SSHCommand = defaultString(config.SSHCommand, defaultLibvirtSSHCommand)
 	config.DockerCommand = defaultString(config.DockerCommand, defaultLibvirtDockerCommand)
 	if config.SSHPort == 0 {
 		config.SSHPort = defaultLibvirtSSHPort
@@ -239,10 +230,10 @@ func normalizeLibvirtConfig(config LibvirtConfig) (LibvirtConfig, error) {
 	switch {
 	case !validRunnerID(config.RunnerID):
 		return LibvirtConfig{}, errors.New("valid libvirt runner ID is required")
+	case libvirtURIUsesExternalSSH(config.URI):
+		return LibvirtConfig{}, errors.New("libvirt +ssh transport is unsupported; use a local libvirt socket")
 	case config.BaseVolumeName == "":
 		return LibvirtConfig{}, errors.New("libvirt base volume name is required")
-	case config.SSHKeyPath == "":
-		return LibvirtConfig{}, errors.New("libvirt SSH key path is required")
 	case config.SSHPort < 1 || config.SSHPort > 65535:
 		return LibvirtConfig{}, errors.New("libvirt SSH port must be between 1 and 65535")
 	case config.VCPUs < 1:
@@ -273,6 +264,11 @@ func normalizeLibvirtConfig(config LibvirtConfig) (LibvirtConfig, error) {
 		)
 	}
 	return config, nil
+}
+
+func libvirtURIUsesExternalSSH(uri string) bool {
+	scheme, _, found := strings.Cut(strings.TrimSpace(uri), ":")
+	return found && strings.HasSuffix(strings.ToLower(scheme), "+ssh")
 }
 
 func defaultString(value, fallback string) string {

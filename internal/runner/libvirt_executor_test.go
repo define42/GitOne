@@ -209,7 +209,6 @@ func testVM(name string) vmInstance {
 func validLibvirtTestConfig() LibvirtConfig {
 	return LibvirtConfig{
 		BaseVolumeName: "flatcar.qcow2",
-		SSHKeyPath:     "/tmp/gitone-libvirt-test-key",
 		IdleCount:      1,
 		MaxInstances:   2,
 		ReadyTimeout:   time.Second,
@@ -235,7 +234,6 @@ func TestLibvirtConfigNormalizationAndValidation(t *testing.T) {
 	provider := &fakeVMProvider{}
 	executor, err := newLibvirtExecutorWithProvider(LibvirtConfig{
 		BaseVolumeName:     " flatcar.qcow2 ",
-		SSHKeyPath:         " /tmp/keys/../key ",
 		RegistryMirrors:    []string{" https://mirror.example.test "},
 		InsecureRegistries: []string{" registry.example.test:5000 "},
 	}, provider)
@@ -253,7 +251,6 @@ func TestLibvirtConfigNormalizationAndValidation(t *testing.T) {
 		config.NetworkCIDR != defaultLibvirtNetworkCIDR(defaultLibvirtNetworkName) ||
 		config.SSHUser != defaultLibvirtSSHUser ||
 		config.VirshCommand != defaultLibvirtVirshCommand ||
-		config.SSHCommand != defaultLibvirtSSHCommand ||
 		config.DockerCommand != defaultLibvirtDockerCommand ||
 		config.SSHPort != defaultLibvirtSSHPort ||
 		config.VCPUs != defaultLibvirtVCPUs ||
@@ -266,7 +263,6 @@ func TestLibvirtConfigNormalizationAndValidation(t *testing.T) {
 		t.Fatalf("normalized config = %#v", config)
 	}
 	if config.BaseVolumeName != "flatcar.qcow2" ||
-		config.SSHKeyPath != "/tmp/key" ||
 		config.RegistryMirrors[0] != "https://mirror.example.test" ||
 		config.InsecureRegistries[0] != "registry.example.test:5000" {
 		t.Fatalf("trimmed config = %#v", config)
@@ -278,6 +274,9 @@ func TestLibvirtConfigNormalizationAndValidation(t *testing.T) {
 		want   string
 	}{
 		{"runner ID", func(c *LibvirtConfig) { c.RunnerID = "bad runner" }, "runner ID"},
+		{"external SSH URI", func(c *LibvirtConfig) {
+			c.URI = "qemu+ssh://hypervisor/system"
+		}, "+ssh transport"},
 		{"base volume", func(c *LibvirtConfig) { c.BaseVolumeName = " " }, "base volume"},
 		{"base image URL", func(c *LibvirtConfig) {
 			c.BaseImageURL = "http://downloads.example.test/flatcar.img"
@@ -293,7 +292,6 @@ func TestLibvirtConfigNormalizationAndValidation(t *testing.T) {
 		{"public network CIDR", func(c *LibvirtConfig) { c.NetworkCIDR = "203.0.112.0/20" }, "private"},
 		{"loopback network CIDR", func(c *LibvirtConfig) { c.NetworkCIDR = "127.0.0.0/20" }, "private"},
 		{"unspecified network CIDR", func(c *LibvirtConfig) { c.NetworkCIDR = "0.0.0.0/20" }, "private"},
-		{"SSH key", func(c *LibvirtConfig) { c.SSHKeyPath = " " }, "SSH key"},
 		{"SSH port", func(c *LibvirtConfig) { c.SSHPort = -1 }, "SSH port"},
 		{"VCPUs", func(c *LibvirtConfig) { c.VCPUs = -1 }, "VCPUs"},
 		{"memory", func(c *LibvirtConfig) { c.MemoryMiB = 255 }, "memory"},
@@ -334,29 +332,6 @@ func TestLibvirtConfigNormalizationAndValidation(t *testing.T) {
 	}
 	if _, err = newLibvirtExecutorWithProvider(validLibvirtTestConfig(), nil); err == nil {
 		t.Fatal("nil provider was accepted")
-	}
-}
-
-func TestNewLibvirtExecutorNormalizesSSHKeyPathBeforeProvider(t *testing.T) {
-	executor, err := NewLibvirtExecutor(LibvirtConfig{
-		BaseVolumeName: "flatcar.qcow2",
-		SSHKeyPath:     "/safe/symlink/../keys/id_ed25519",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, ok := executor.provider.(*virshVMProvider)
-	if !ok {
-		t.Fatalf("provider type = %T", executor.provider)
-	}
-	want := "/safe/keys/id_ed25519"
-	if executor.config.SSHKeyPath != want || provider.config.SSHKeyPath != want {
-		t.Fatalf(
-			"normalized SSH key paths: executor=%q provider=%q, want %q",
-			executor.config.SSHKeyPath,
-			provider.config.SSHKeyPath,
-			want,
-		)
 	}
 }
 

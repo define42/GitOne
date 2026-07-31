@@ -42,8 +42,9 @@ docker compose up --build
 ```
 
 The KVM runner is an opt-in Compose profile because it needs a prepared
-libvirt host. Its SSH key and pinned Flatcar base image are provisioned
-automatically. See Repository builds below; `make docker` enables the profile.
+libvirt host. Its ephemeral in-memory SSH identity and pinned Flatcar base
+image are provisioned automatically. See Repository builds below; `make docker`
+enables the profile.
 
 GitOne currently supports exactly one web-server process for each storage root.
 Mutation coordination is in memory and is scoped to the affected group,
@@ -159,19 +160,14 @@ private relabeling can disrupt libvirtd. Disabling the label weakens container
 isolation and is appropriate only for this privileged controller on a dedicated
 runner host; deployments that prohibit it need a site-specific SELinux policy.
 
-Run the controller as a user allowed to connect to `qemu:///system` and write
-the trusted configured pool path and SSH-key directory. An existing key directory must
-be a real directory owned by that user and must not be group- or world-writable
-(`0700` is recommended); its path must not traverse symlinks or untrusted
-writable parent directories. The runner generates a passwordless Ed25519 key
-pair with Go when `-libvirt-ssh-key` does not exist;
-the private key is created with mode `0600` and the matching `.pub` file with
-mode `0644`. Existing valid keys are preserved. After upgrading from the old
-file-level Docker bind, recreate the container with the provided parent-
-directory mount; the runner then safely replaces the empty source directory
-Docker left at the exact key path. It rejects a non-empty directory and cannot
-replace a key path that is still itself an active bind mount. The GitOne server
-and runner use the same API token:
+Run the controller as a user allowed to connect to the local `qemu:///system`
+socket and write the trusted configured pool path. Each runner process creates
+a fresh Ed25519 identity with Go. The private key never leaves process memory;
+only its public key is placed in each disposable VM through Ignition. Guest
+host keys are pinned per VM in memory and forgotten only after teardown
+completes. Libvirt `+ssh` URIs are rejected because they would require an
+external SSH transport; expose a local libvirt socket to the controller instead.
+The GitOne server and runner use the same API token:
 
 ```bash
 go build -o gitone-runner ./cmd/gitone-runner
@@ -184,7 +180,6 @@ sudo env GITONE_RUNNER_TOKEN="$GITONE_RUNNER_TOKEN" ./gitone-runner \
   -libvirt-pool-name default \
   -libvirt-pool-path /var/lib/libvirt/images \
   -libvirt-base-volume flatcar_production_qemu_image.img \
-  -libvirt-ssh-key /etc/gitone-runner/id_ed25519 \
   -libvirt-network-cidr 10.240.0.0/20 \
   -libvirt-idle-count 4 \
   -libvirt-max-instances 8
@@ -239,24 +234,21 @@ Generated domains, overlays, and Ignition files are scoped to the libvirt URI,
 storage pool, and runner ID; ownership metadata and the overlay path are
 verified before teardown. Stale resources from a previous controller
 generation are reconciled at startup. VM readiness requires both SSH
-authentication and `docker info`, not only a DHCP address. The SSH private key
-remains on the controller; only its public key is provisioned into the guest.
-Host keys use per-VM known-hosts files, and normal teardown asks libvirt to
-remove the one-use QEMU log. The image's configured non-root user can use the
-transferred workspace. Build containers receive neither the libvirt socket nor
-the host filesystem.
+authentication and `docker info`, not only a DHCP address. SSH authentication,
+command execution, streaming, liveness probes, and host-key pinning use the Go
+SSH library; no private identity or `known_hosts` file is written. Normal
+teardown asks libvirt to remove the one-use QEMU log. The image's configured
+non-root user can use the transferred workspace. Build containers receive
+neither the libvirt socket nor the host filesystem.
 
 To run the packaged controller container, mount the libvirt socket and pool
-path at the same absolute path seen by the host daemon, plus a writable SSH-key
-directory. The provided Compose service persists the generated key pair in
-`/etc/gitone-runner` on the host. `make docker` enables and starts this runner
-profile. On its first successful start, expect one roughly 500 MB Flatcar
-download before the runner creates its four pre-heated VMs. It can also be
-started explicitly with:
+path at the same absolute path seen by the host daemon. No SSH-key volume is
+needed. `make docker` enables and starts this runner profile. On its first
+successful start, expect one roughly 500 MB Flatcar download before the runner
+creates its four pre-heated VMs. It can also be started explicitly with:
 
 ```bash
 GITONE_LIBVIRT_POOL_PATH=/var/lib/libvirt/images \
-GITONE_LIBVIRT_SSH_DIR=/etc/gitone-runner \
 GITONE_LIBVIRT_NETWORK_CIDR=10.240.0.0/20 \
 docker compose --profile libvirt-runner up --build
 ```
@@ -278,11 +270,9 @@ sudo make test-libvirt
 
 Run that target only on a dedicated runner host; normal CI deliberately does
 not assume nested KVM, a privileged network, or permission to populate a
-libvirt pool. The
-target disables Go's test-result cache and should run as the service account
-that can write the key directory and pool and use `qemu:///system` (`sudo` in
-the example above). Set `GITONE_RUNNER_LIBVIRT_SSH_KEY` only to test with an
-existing private key; otherwise the test creates a temporary key pair.
+libvirt pool. The target disables Go's test-result cache and should run as the
+service account that can write the pool and use `qemu:///system` (`sudo` in the
+example above). Its SSH identity is generated in memory for that test process.
 
 The runner makes outbound HTTP(S) requests to GitOne and SSH connections to its
 private guests; it never mounts GitOne's `/data`. `-runner-workers` controls
@@ -290,7 +280,8 @@ concurrent builds and defaults to one. `-runner-command` selects the
 Docker-compatible command inside each guest. The old host-Docker executor is
 available only as the explicit migration option `-runner-executor docker`.
 The web image is built from `Dockerfile`; the controller image is built from
-`Dockerfile.runner` and contains `virsh` plus the OpenSSH client.
+`Dockerfile.runner` and contains `virsh`. Guest SSH is implemented by the
+compiled Go runner, so the image does not contain an OpenSSH client.
 
 The GitOne server retains repositories, durable queue state, and logs beside
 each bare repository under `<root>/<group>/<repository>.build`; stored logs are

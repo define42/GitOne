@@ -127,11 +127,6 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 		"dedicated IPv4 /20 (deterministic default; set to avoid host route conflicts)",
 	)
 	libvirtSSHUser := flags.String("libvirt-ssh-user", "core", "VM SSH user")
-	libvirtSSHKey := flags.String(
-		"libvirt-ssh-key",
-		"/etc/gitone-runner/id_ed25519",
-		"VM SSH private key path (generated as Ed25519 when missing)",
-	)
 	libvirtSSHPort := flags.Int("libvirt-ssh-port", 22, "VM SSH port")
 	libvirtVCPUs := flags.Int("libvirt-vcpus", 2, "vCPUs per VM")
 	libvirtMemoryMiB := flags.Int("libvirt-memory-mib", 4096, "memory per VM in MiB")
@@ -167,7 +162,6 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 		"comma-separated insecure Docker registry hosts installed in each VM",
 	)
 	virshCommand := flags.String("libvirt-virsh-command", "virsh", "virsh command")
-	sshCommand := flags.String("libvirt-ssh-command", "ssh", "SSH command")
 	if err := flags.Parse(args); err != nil {
 		return nil, "", "", err
 	}
@@ -203,7 +197,6 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 			NetworkName:        *libvirtNetwork,
 			NetworkCIDR:        *libvirtNetworkCIDR,
 			SSHUser:            *libvirtSSHUser,
-			SSHKeyPath:         *libvirtSSHKey,
 			SSHPort:            *libvirtSSHPort,
 			VCPUs:              *libvirtVCPUs,
 			MemoryMiB:          *libvirtMemoryMiB,
@@ -215,7 +208,6 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 			RegistryMirrors:    commaSeparatedValues(*libvirtRegistryMirrors),
 			InsecureRegistries: commaSeparatedValues(*libvirtInsecureRegistries),
 			VirshCommand:       *virshCommand,
-			SSHCommand:         *sshCommand,
 			DockerCommand:      *command,
 		})
 		if err != nil {

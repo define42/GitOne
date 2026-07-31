@@ -1,14 +1,9 @@
 package runner
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha512"
-	"crypto/x509"
 	"encoding/hex"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -18,8 +13,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/crypto/ssh"
 )
 
 type prepareVirshRunner struct {
@@ -148,10 +141,31 @@ type lifecycleVirshRunner struct {
 }
 
 type readinessCommandRunner struct {
-	state  string
-	sshErr error
-	sshN   int
+	state string
 }
+
+type readinessGuestSSH struct {
+	err   error
+	calls int
+}
+
+func (*readinessGuestSSH) AuthorizedKey() string {
+	return "ssh-ed25519 AAAATEST readiness@test"
+}
+
+func (s *readinessGuestSSH) Run(
+	_ context.Context,
+	_ vmInstance,
+	_ io.Reader,
+	_ io.Writer,
+	_ io.Writer,
+	_ string,
+) error {
+	s.calls++
+	return s.err
+}
+
+func (*readinessGuestSSH) ForgetHost(string) {}
 
 func (r *readinessCommandRunner) LookPath(command string) (string, error) {
 	return command, nil
@@ -171,10 +185,6 @@ func (r *readinessCommandRunner) Run(
 		}
 		_, _ = fmt.Fprintln(output, r.state)
 		return nil
-	}
-	if command == "ssh" {
-		r.sshN++
-		return r.sshErr
 	}
 	return fmt.Errorf("unexpected readiness command %q", command)
 }
@@ -303,21 +313,11 @@ func virshOptionValue(arguments []string, option string) string {
 
 func newPrepareTestProvider(t *testing.T) (*virshVMProvider, *prepareVirshRunner) {
 	t.Helper()
-	poolPath := newTestLibvirtSSHSecureDirectory(t)
-	keyPath := filepath.Join(poolPath, "id_ed25519")
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
+	poolPath := t.TempDir()
+	if err := os.Chmod(poolPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	encodedKey, err := x509.MarshalPKCS8PrivateKey(privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey})
-	if err = os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(filepath.Join(poolPath, "flatcar-base.qcow2"), []byte("base"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(poolPath, "flatcar-base.qcow2"), []byte("base"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	config := LibvirtConfig{
@@ -329,9 +329,7 @@ func newPrepareTestProvider(t *testing.T) (*virshVMProvider, *prepareVirshRunner
 		BaseImageSHA512: flatcarTestSHA512([]byte("base")),
 		NetworkName:     "gitone-prepare-test",
 		SSHUser:         "core",
-		SSHKeyPath:      keyPath,
 		VirshCommand:    "virsh",
-		SSHCommand:      "ssh",
 		DockerCommand:   "docker",
 		SSHPort:         22,
 		VCPUs:           1,
@@ -522,9 +520,7 @@ func newLifecycleTestProvider(poolPath string, runner libvirtCommandRunner) *vir
 			BaseVolumeName: "flatcar-base.qcow2",
 			NetworkName:    "gitone-test",
 			SSHUser:        "core",
-			SSHKeyPath:     "/run/gitone/test-key",
 			VirshCommand:   "virsh",
-			SSHCommand:     "ssh",
 			DockerCommand:  "docker",
 			SSHPort:        22,
 			VCPUs:          1,
@@ -536,6 +532,7 @@ func newLifecycleTestProvider(poolPath string, runner libvirtCommandRunner) *vir
 		runner:      runner,
 		ownerPrefix: libvirtOwnerPrefix("test:///system", "test-pool", runnerID),
 		publicKey:   "ssh-ed25519 AAAATEST rollback@test",
+		guestSSH:    &recordingLibvirtGuestSSH{},
 		prepared:    true,
 	}
 }
@@ -604,38 +601,38 @@ func TestCreateReturnsPartialInstanceWhenRollbackMustBeRetried(t *testing.T) {
 func TestProviderCheckReadyRequiresRunningDomainSSHAndDocker(t *testing.T) {
 	poolPath := t.TempDir()
 	runner := &readinessCommandRunner{state: "running"}
+	guestSSH := &readinessGuestSSH{}
 	provider := &virshVMProvider{
 		config: LibvirtConfig{
 			URI:           "test:///system",
 			PoolPath:      poolPath,
 			VirshCommand:  "virsh",
-			SSHCommand:    "ssh",
 			SSHUser:       "core",
 			SSHPort:       22,
-			SSHKeyPath:    filepath.Join(poolPath, "id_ed25519"),
 			DockerCommand: "docker",
 		},
 		runner:      runner,
 		ownerPrefix: libvirtOwnerPrefix("test:///system", "test-pool", "readiness-test"),
+		guestSSH:    guestSSH,
 	}
 	name := provider.ownerPrefix + "-20260731120000-abcdef"
 	instance := vmInstance{Name: name, Address: "192.0.2.10"}
 	if err := provider.CheckReady(context.Background(), instance); err != nil {
 		t.Fatal(err)
 	}
-	if runner.sshN != 1 {
-		t.Fatalf("readiness SSH probes = %d, want 1", runner.sshN)
+	if guestSSH.calls != 1 {
+		t.Fatalf("readiness SSH probes = %d, want 1", guestSSH.calls)
 	}
 	runner.state = "shut off"
 	if err := provider.CheckReady(context.Background(), instance); err == nil ||
 		!strings.Contains(err.Error(), "not running") {
 		t.Fatalf("stopped domain readiness error = %v", err)
 	}
-	if runner.sshN != 1 {
+	if guestSSH.calls != 1 {
 		t.Fatal("readiness check attempted SSH for a stopped domain")
 	}
 	runner.state = "running"
-	runner.sshErr = errors.New("Docker unavailable")
+	guestSSH.err = errors.New("Docker unavailable")
 	if err := provider.CheckReady(context.Background(), instance); err == nil ||
 		!strings.Contains(err.Error(), "SSH and Docker") {
 		t.Fatalf("guest health error = %v", err)
@@ -673,10 +670,6 @@ func TestDestroyIsStrictlyOwnedAndIdempotent(t *testing.T) {
 	if err := os.WriteFile(instance.IgnitionPath, []byte("ignition"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	knownHostsPath := provider.instanceKnownHostsPath(instance)
-	if err := os.WriteFile(knownHostsPath, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := provider.Destroy(context.Background(), instance); err != nil {
 		t.Fatal(err)
 	}
@@ -691,8 +684,9 @@ func TestDestroyIsStrictlyOwnedAndIdempotent(t *testing.T) {
 	if _, err := os.Stat(instance.IgnitionPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Destroy left Ignition: %v", err)
 	}
-	if _, err := os.Stat(knownHostsPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Destroy left per-instance known-hosts state: %v", err)
+	guestSSH, ok := provider.guestSSH.(*recordingLibvirtGuestSSH)
+	if !ok || !containsString(guestSSH.forgotten, instance.Name) {
+		t.Fatalf("Destroy did not forget the in-memory SSH host key: %#v", provider.guestSSH)
 	}
 	if !provider.reserveInstanceIdentity(instance) {
 		t.Fatal("successful Destroy did not release the VM identity")
@@ -969,11 +963,11 @@ func TestCleanupNeverSweepsArtifactsForDomainThatFailedTeardown(t *testing.T) {
 	runner.domainName = name
 	volumePath := filepath.Join(poolPath, name+".qcow2")
 	ignitionPath := filepath.Join(poolPath, name+".ign")
-	knownHostsPath := filepath.Join(poolPath, "."+name+".known_hosts")
+	legacyKnownHostsPath := filepath.Join(poolPath, "."+name+".known_hosts")
 	for path, contents := range map[string][]byte{
-		volumePath:     []byte("qcow2"),
-		ignitionPath:   []byte("ignition"),
-		knownHostsPath: nil,
+		volumePath:           []byte("qcow2"),
+		ignitionPath:         []byte("ignition"),
+		legacyKnownHostsPath: []byte("legacy public host key"),
 	} {
 		if err := os.WriteFile(path, contents, 0o600); err != nil {
 			t.Fatal(err)
@@ -986,10 +980,31 @@ func TestCleanupNeverSweepsArtifactsForDomainThatFailedTeardown(t *testing.T) {
 	if !runner.domainExists || !runner.volumeExists {
 		t.Fatalf("Cleanup removed resources still used by the domain: %#v", runner)
 	}
-	for _, path := range []string{volumePath, ignitionPath, knownHostsPath} {
+	guestSSH := provider.guestSSH.(*recordingLibvirtGuestSSH)
+	if containsString(guestSSH.forgotten, name) {
+		t.Fatal("failed domain teardown forgot its pinned SSH host key")
+	}
+	for _, path := range []string{volumePath, ignitionPath, legacyKnownHostsPath} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("Cleanup removed protected artifact %q: %v", path, err)
 		}
+	}
+}
+
+func TestCleanupRemovesLegacyKnownHostsForAbsentVM(t *testing.T) {
+	poolPath := t.TempDir()
+	runner := &lifecycleVirshRunner{poolPath: poolPath}
+	provider := newLifecycleTestProvider(poolPath, runner)
+	name := provider.ownerPrefix + "-20260731120000-abcdef"
+	legacyKnownHostsPath := filepath.Join(poolPath, "."+name+".known_hosts")
+	if err := os.WriteFile(legacyKnownHostsPath, []byte("legacy public host key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.cleanupOwnedResources(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(legacyKnownHostsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy known-hosts file was not removed: %v", err)
 	}
 }
 
@@ -1074,337 +1089,5 @@ func TestWriteLibvirtFileAtomicNeverOverwrites(t *testing.T) {
 	}
 	if string(contents) != "first" {
 		t.Fatalf("atomic file contents = %q", contents)
-	}
-}
-
-func TestLoadLibvirtSSHPublicKeyGeneratesMissingEd25519Key(t *testing.T) {
-	keyDirectory := filepath.Join(
-		newTestLibvirtSSHSecureDirectory(t),
-		"generated",
-		"runner-keys",
-	)
-	keyPath := filepath.Join(keyDirectory, "id_ed25519")
-	if _, err := os.Stat(keyDirectory); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("key directory unexpectedly exists before creation: %v", err)
-	}
-
-	publicKey, err := loadLibvirtSSHPublicKey(keyPath)
-	if err != nil {
-		t.Fatalf("generate missing SSH key: %v", err)
-	}
-	directoryInfo, err := os.Stat(keyDirectory)
-	if err != nil {
-		t.Fatalf("stat generated SSH key directory: %v", err)
-	}
-	if !directoryInfo.IsDir() || directoryInfo.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("generated SSH key directory mode = %v, want a private directory", directoryInfo.Mode())
-	}
-	assertLibvirtSSHKeyPair(t, keyPath, publicKey)
-}
-
-func TestLoadLibvirtSSHPublicKeyRejectsUnsafeKeyDirectory(t *testing.T) {
-	t.Run("writable ancestor", func(t *testing.T) {
-		sharedDirectory := filepath.Join(newTestLibvirtSSHSecureDirectory(t), "shared")
-		if err := os.Mkdir(sharedDirectory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(sharedDirectory, 0o770); err != nil {
-			t.Fatal(err)
-		}
-		keyDirectory := filepath.Join(sharedDirectory, "keys")
-		if err := os.Mkdir(keyDirectory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		keyPath := filepath.Join(keyDirectory, "id_ed25519")
-		if _, err := loadLibvirtSSHPublicKey(keyPath); err == nil ||
-			!strings.Contains(err.Error(), "ancestor") {
-			t.Fatalf("unsafe key-directory ancestor error = %v", err)
-		}
-		if _, err := os.Lstat(keyPath); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("key created below unsafe ancestor: %v", err)
-		}
-	})
-
-	t.Run("writable by other users", func(t *testing.T) {
-		keyDirectory := filepath.Join(newTestLibvirtSSHSecureDirectory(t), "keys")
-		if err := os.Mkdir(keyDirectory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(keyDirectory, 0o777); err != nil {
-			t.Fatal(err)
-		}
-		keyPath := filepath.Join(keyDirectory, "id_ed25519")
-		if _, err := loadLibvirtSSHPublicKey(keyPath); err == nil ||
-			!strings.Contains(err.Error(), "must not be writable by group or others") {
-			t.Fatalf("unsafe key-directory error = %v", err)
-		}
-		if _, err := os.Lstat(keyPath); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("key created in unsafe directory: %v", err)
-		}
-	})
-
-	t.Run("symlink", func(t *testing.T) {
-		targetDirectory := filepath.Join(newTestLibvirtSSHSecureDirectory(t), "target")
-		if err := os.Mkdir(targetDirectory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		keyDirectory := filepath.Join(newTestLibvirtSSHSecureDirectory(t), "keys")
-		if err := os.Symlink(targetDirectory, keyDirectory); err != nil {
-			t.Fatal(err)
-		}
-		keyPath := filepath.Join(keyDirectory, "id_ed25519")
-		if _, err := loadLibvirtSSHPublicKey(keyPath); err == nil {
-			t.Fatal("symlinked key directory was accepted")
-		}
-		if _, err := os.Lstat(filepath.Join(targetDirectory, "id_ed25519")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("key created through symlinked directory: %v", err)
-		}
-	})
-}
-
-func TestLoadLibvirtSSHPublicKeyRejectsPrivateKeySymlink(t *testing.T) {
-	realKeyPath := filepath.Join(t.TempDir(), "real-id_ed25519")
-	_, originalPrivateKey := writeTestLibvirtSSHKeyPair(t, realKeyPath, 0o600)
-	keyPath := newTestLibvirtSSHKeyPath(t)
-	if err := os.Symlink(realKeyPath, keyPath); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := loadLibvirtSSHPublicKey(keyPath); err == nil {
-		t.Fatal("symlinked SSH private key was accepted")
-	}
-	privateKey, err := os.ReadFile(realKeyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(privateKey, originalPrivateKey) {
-		t.Fatal("rejecting a symlinked private key modified its target")
-	}
-}
-
-func TestLoadLibvirtSSHPublicKeyRecoversEmptyDirectory(t *testing.T) {
-	keyPath := newTestLibvirtSSHKeyPath(t)
-	if err := os.Mkdir(keyPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	publicKey, err := loadLibvirtSSHPublicKey(keyPath)
-	if err != nil {
-		t.Fatalf("replace empty SSH key directory: %v", err)
-	}
-	assertLibvirtSSHKeyPair(t, keyPath, publicKey)
-
-	nonEmptyPath := filepath.Join(filepath.Dir(keyPath), "non-empty-key")
-	if err = os.Mkdir(nonEmptyPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	markerPath := filepath.Join(nonEmptyPath, "keep")
-	if err = os.WriteFile(markerPath, []byte("do not remove"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = loadLibvirtSSHPublicKey(nonEmptyPath); err == nil {
-		t.Fatal("non-empty SSH key directory was replaced")
-	}
-	if contents, readErr := os.ReadFile(markerPath); readErr != nil || string(contents) != "do not remove" {
-		t.Fatalf("non-empty SSH key directory was modified: contents %q, error %v", contents, readErr)
-	}
-}
-
-func TestLoadLibvirtSSHPublicKeyPreservesExistingValidKey(t *testing.T) {
-	keyPath := newTestLibvirtSSHKeyPath(t)
-	wantPublicKey, originalPrivateKey := writeTestLibvirtSSHKeyPair(t, keyPath, 0o600)
-	originalPublicKey, err := os.ReadFile(keyPath + ".pub")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	publicKey, err := loadLibvirtSSHPublicKey(keyPath)
-	if err != nil {
-		t.Fatalf("load existing SSH key: %v", err)
-	}
-	if publicKey != wantPublicKey {
-		t.Fatalf("loaded public key = %q, want %q", publicKey, wantPublicKey)
-	}
-	privateKey, err := os.ReadFile(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(privateKey) != string(originalPrivateKey) {
-		t.Fatal("loading an existing SSH key rewrote the private key")
-	}
-	publicKeyFile, err := os.ReadFile(keyPath + ".pub")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(publicKeyFile) != string(originalPublicKey) {
-		t.Fatal("loading an existing SSH key rewrote the public key")
-	}
-	info, err := os.Stat(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("existing private-key permissions = %#o, want 0600", info.Mode().Perm())
-	}
-}
-
-func TestLoadLibvirtSSHPublicKeyRejectsInsecureExistingKey(t *testing.T) {
-	keyPath := newTestLibvirtSSHKeyPath(t)
-	_, originalPrivateKey := writeTestLibvirtSSHKeyPair(t, keyPath, 0o644)
-
-	_, err := loadLibvirtSSHPublicKey(keyPath)
-	if err == nil || !strings.Contains(err.Error(), "group or others") {
-		t.Fatalf("insecure private-key error = %v", err)
-	}
-	privateKey, readErr := os.ReadFile(keyPath)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if string(privateKey) != string(originalPrivateKey) {
-		t.Fatal("rejecting an insecure SSH key rewrote it")
-	}
-	info, statErr := os.Stat(keyPath)
-	if statErr != nil {
-		t.Fatal(statErr)
-	}
-	if info.Mode().Perm() != 0o644 {
-		t.Fatalf("insecure private-key permissions were changed to %#o", info.Mode().Perm())
-	}
-}
-
-func TestLoadLibvirtSSHPublicKeyConcurrentCreationIsStable(t *testing.T) {
-	keyPath := newTestLibvirtSSHKeyPath(t)
-	assertConcurrentLibvirtSSHKeyCreation(t, keyPath)
-}
-
-func TestLoadLibvirtSSHPublicKeyConcurrentEmptyDirectoryMigrationIsStable(t *testing.T) {
-	keyPath := newTestLibvirtSSHKeyPath(t)
-	if err := os.Mkdir(keyPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	assertConcurrentLibvirtSSHKeyCreation(t, keyPath)
-}
-
-func assertConcurrentLibvirtSSHKeyCreation(t *testing.T, keyPath string) {
-	t.Helper()
-	const callers = 24
-	type result struct {
-		publicKey string
-		err       error
-	}
-	results := make(chan result, callers)
-	start := make(chan struct{})
-	var group sync.WaitGroup
-	group.Add(callers)
-	for range callers {
-		go func() {
-			defer group.Done()
-			<-start
-			publicKey, err := loadLibvirtSSHPublicKey(keyPath)
-			results <- result{publicKey: publicKey, err: err}
-		}()
-	}
-	close(start)
-	group.Wait()
-	close(results)
-
-	var wantPublicKey string
-	for result := range results {
-		if result.err != nil {
-			t.Fatalf("concurrent key creation: %v", result.err)
-		}
-		if wantPublicKey == "" {
-			wantPublicKey = result.publicKey
-		}
-		if result.publicKey != wantPublicKey {
-			t.Fatalf("concurrent caller observed public key %q, want %q", result.publicKey, wantPublicKey)
-		}
-	}
-	assertLibvirtSSHKeyPair(t, keyPath, wantPublicKey)
-}
-
-func newTestLibvirtSSHKeyPath(t *testing.T) string {
-	t.Helper()
-	directory := filepath.Join(newTestLibvirtSSHSecureDirectory(t), "keys")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return filepath.Join(directory, "id_ed25519")
-}
-
-func newTestLibvirtSSHSecureDirectory(t *testing.T) string {
-	t.Helper()
-	directory := t.TempDir()
-	if err := os.Chmod(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return directory
-}
-
-func writeTestLibvirtSSHKeyPair(t *testing.T, keyPath string, permissions os.FileMode) (string, []byte) {
-	t.Helper()
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	block, err := ssh.MarshalPrivateKey(privateKey, "GitOne runner test key")
-	if err != nil {
-		t.Fatal(err)
-	}
-	privateKeyPEM := pem.EncodeToMemory(block)
-	if err = os.WriteFile(keyPath, privateKeyPEM, permissions); err != nil {
-		t.Fatal(err)
-	}
-	publicKey, err := ssh.NewPublicKey(privateKey.Public())
-	if err != nil {
-		t.Fatal(err)
-	}
-	authorizedKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(publicKey)))
-	if err = os.WriteFile(keyPath+".pub", []byte(authorizedKey+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return authorizedKey, privateKeyPEM
-}
-
-func assertLibvirtSSHKeyPair(t *testing.T, keyPath, wantPublicKey string) {
-	t.Helper()
-	info, err := os.Stat(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !info.Mode().IsRegular() {
-		t.Fatalf("private key mode = %v, want a regular file", info.Mode())
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("private-key permissions = %#o, want 0600", info.Mode().Perm())
-	}
-	privateKey, err := os.ReadFile(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := ssh.ParsePrivateKey(privateKey)
-	if err != nil {
-		t.Fatalf("parse generated private key: %v", err)
-	}
-	if signer.PublicKey().Type() != ssh.KeyAlgoED25519 {
-		t.Fatalf("generated SSH key type = %q, want %q", signer.PublicKey().Type(), ssh.KeyAlgoED25519)
-	}
-	derivedPublicKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	if derivedPublicKey != wantPublicKey {
-		t.Fatalf("private key derives public key %q, want %q", derivedPublicKey, wantPublicKey)
-	}
-	publicKey, err := os.ReadFile(keyPath + ".pub")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(publicKey)) != wantPublicKey {
-		t.Fatalf("public key file = %q, want %q", strings.TrimSpace(string(publicKey)), wantPublicKey)
-	}
-	publicInfo, err := os.Stat(keyPath + ".pub")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !publicInfo.Mode().IsRegular() || publicInfo.Mode().Perm() != 0o644 {
-		t.Fatalf("public-key mode = %v, want regular 0644", publicInfo.Mode())
 	}
 }

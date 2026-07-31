@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +17,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 type libvirtCommandRunner interface {
@@ -127,23 +133,265 @@ func commandSummary(command string, arguments []string) string {
 	return strings.Join(parts, " ")
 }
 
-func (p *virshVMProvider) sshArguments(instance vmInstance, remoteCommand string) []string {
-	return []string{
-		"-p", strconv.Itoa(p.config.SSHPort),
-		"-i", p.config.SSHKeyPath,
-		"-o", "BatchMode=yes",
-		"-o", "IdentitiesOnly=yes",
-		"-o", "PasswordAuthentication=no",
-		"-o", "KbdInteractiveAuthentication=no",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile=" + p.instanceKnownHostsPath(instance),
-		"-o", "HostKeyAlias=" + instance.Name,
-		"-o", "ConnectTimeout=5",
-		"-o", "ServerAliveInterval=15",
-		"-o", "ServerAliveCountMax=3",
-		p.config.SSHUser + "@" + instance.Address,
-		remoteCommand,
+type libvirtGuestSSH interface {
+	AuthorizedKey() string
+	Run(context.Context, vmInstance, io.Reader, io.Writer, io.Writer, string) error
+	ForgetHost(string)
+}
+
+var errLibvirtSSHHostKeyChanged = errors.New("libvirt SSH host key changed")
+
+type libvirtSSHTransportError struct {
+	message string
+}
+
+func (e *libvirtSSHTransportError) Error() string {
+	return e.message
+}
+
+type nativeLibvirtSSH struct {
+	user              string
+	port              int
+	signer            ssh.Signer
+	connectTimeout    time.Duration
+	keepAliveInterval time.Duration
+	keepAliveCountMax int
+
+	hostKeysMu sync.Mutex
+	hostKeys   map[string][]byte
+}
+
+func newNativeLibvirtSSH(user string, port int) (*nativeLibvirtSSH, error) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate in-memory libvirt SSH identity: %w", err)
 	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("create in-memory libvirt SSH signer: %w", err)
+	}
+	return &nativeLibvirtSSH{
+		user:              user,
+		port:              port,
+		signer:            signer,
+		connectTimeout:    5 * time.Second,
+		keepAliveInterval: 15 * time.Second,
+		keepAliveCountMax: 3,
+		hostKeys:          make(map[string][]byte),
+	}, nil
+}
+
+func (s *nativeLibvirtSSH) AuthorizedKey() string {
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.signer.PublicKey())))
+}
+
+func (s *nativeLibvirtSSH) Run(
+	ctx context.Context,
+	instance vmInstance,
+	input io.Reader,
+	output io.Writer,
+	errorOutput io.Writer,
+	remoteCommand string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	client, err := s.dial(ctx, instance)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	keepAliveContext, stopKeepAlive := context.WithCancel(ctx)
+	defer stopKeepAlive()
+	go s.keepAlive(keepAliveContext, client)
+
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = client.Close() })
+	defer stopOnCancel()
+	session, err := client.NewSession()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return &libvirtSSHTransportError{message: "open VM SSH session failed"}
+	}
+	defer func() { _ = session.Close() }()
+	if output == nil {
+		output = io.Discard
+	}
+	if errorOutput == nil {
+		errorOutput = io.Discard
+	}
+	streamMutex := &sync.Mutex{}
+	session.Stdin = input
+	session.Stdout = synchronizedWriter{mutex: streamMutex, writer: output}
+	session.Stderr = synchronizedWriter{mutex: streamMutex, writer: errorOutput}
+	if err = session.Run(remoteCommand); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return nil
+}
+
+type synchronizedWriter struct {
+	mutex  *sync.Mutex
+	writer io.Writer
+}
+
+func (w synchronizedWriter) Write(contents []byte) (int, error) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.writer.Write(contents)
+}
+
+func (s *nativeLibvirtSSH) keepAlive(ctx context.Context, client *ssh.Client) {
+	interval := s.keepAliveInterval
+	if interval <= 0 || s.keepAliveCountMax <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		response := make(chan error, 1)
+		go func() {
+			_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+			response <- err
+		}()
+		responseDeadline := time.NewTimer(interval * time.Duration(s.keepAliveCountMax))
+		select {
+		case <-ctx.Done():
+			if !responseDeadline.Stop() {
+				<-responseDeadline.C
+			}
+			return
+		case err := <-response:
+			if !responseDeadline.Stop() {
+				<-responseDeadline.C
+			}
+			if err != nil {
+				_ = client.Close()
+				return
+			}
+		case <-responseDeadline.C:
+			_ = client.Close()
+			return
+		}
+	}
+}
+
+func (s *nativeLibvirtSSH) dial(ctx context.Context, instance vmInstance) (*ssh.Client, error) {
+	address := net.JoinHostPort(instance.Address, strconv.Itoa(s.port))
+	connectDeadline := time.Now().Add(s.connectTimeout)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(connectDeadline) {
+		connectDeadline = deadline
+	}
+	dialer := net.Dialer{
+		Deadline:  connectDeadline,
+		KeepAlive: 15 * time.Second,
+	}
+	connection, err := dialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, &libvirtSSHTransportError{message: safeLibvirtSSHDialError(err)}
+	}
+	closeOnCancel := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer closeOnCancel()
+	defer func() {
+		if connection != nil {
+			_ = connection.Close()
+		}
+	}()
+
+	if err = connection.SetDeadline(connectDeadline); err != nil {
+		return nil, &libvirtSSHTransportError{message: "configure VM SSH connection deadline failed"}
+	}
+	clientConnection, channels, requests, err := ssh.NewClientConn(
+		connection,
+		address,
+		&ssh.ClientConfig{
+			User:            s.user,
+			Auth:            []ssh.AuthMethod{ssh.PublicKeys(s.signer)},
+			HostKeyCallback: s.hostKeyCallback(instance.Name),
+		},
+	)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		message := "VM SSH handshake or authentication failed"
+		if errors.Is(err, errLibvirtSSHHostKeyChanged) {
+			message = "VM SSH host key changed"
+		} else if isTimeoutError(err) {
+			message = "VM SSH handshake timed out"
+		}
+		return nil, &libvirtSSHTransportError{message: message}
+	}
+	if err = connection.SetDeadline(time.Time{}); err != nil {
+		_ = clientConnection.Close()
+		return nil, &libvirtSSHTransportError{message: "clear VM SSH connection deadline failed"}
+	}
+	if !closeOnCancel() {
+		_ = clientConnection.Close()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, errors.New("SSH connection canceled during handshake")
+	}
+	connection = nil
+	return ssh.NewClient(clientConnection, channels, requests), nil
+}
+
+func safeLibvirtSSHDialError(err error) string {
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "VM SSH connection refused"
+	case errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTUNREACH):
+		return "VM SSH endpoint is unreachable"
+	case isTimeoutError(err):
+		return "VM SSH connection timed out"
+	default:
+		return "VM SSH connection failed"
+	}
+}
+
+func isTimeoutError(err error) bool {
+	var timeoutError interface{ Timeout() bool }
+	return errors.As(err, &timeoutError) && timeoutError.Timeout()
+}
+
+func (s *nativeLibvirtSSH) hostKeyCallback(instanceName string) ssh.HostKeyCallback {
+	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		presented := key.Marshal()
+		s.hostKeysMu.Lock()
+		defer s.hostKeysMu.Unlock()
+		known, exists := s.hostKeys[instanceName]
+		if !exists {
+			s.hostKeys[instanceName] = bytes.Clone(presented)
+			return nil
+		}
+		if !bytes.Equal(known, presented) {
+			return fmt.Errorf("%w for VM %q", errLibvirtSSHHostKeyChanged, instanceName)
+		}
+		return nil
+	}
+}
+
+func (s *nativeLibvirtSSH) ForgetHost(instanceName string) {
+	s.hostKeysMu.Lock()
+	delete(s.hostKeys, instanceName)
+	s.hostKeysMu.Unlock()
 }
 
 func (p *virshVMProvider) runSSH(
@@ -157,33 +405,26 @@ func (p *virshVMProvider) runSSH(
 	if net.ParseIP(instance.Address) == nil {
 		return fmt.Errorf("invalid VM address %q", instance.Address)
 	}
-	err := runLibvirtCommand(
-		ctx,
-		p.runner,
-		p.config.SSHCommand,
-		p.sshArguments(instance, remoteCommand),
-		"ssh "+instance.Name,
-		input,
-		output,
-		errorOutput,
-	)
+	if p.guestSSH == nil {
+		return errors.New("libvirt guest SSH transport is not prepared")
+	}
+	err := p.guestSSH.Run(ctx, instance, input, output, errorOutput, remoteCommand)
 	if err == nil {
 		return nil
 	}
-	var commandErr *libvirtCommandError
-	if errors.As(err, &commandErr) {
-		var processErr error
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			processErr = ctxErr
-		} else {
-			processErr = errors.New("remote command failed")
-		}
-		return &libvirtCommandError{
-			Command: "ssh " + instance.Name,
-			Err:     processErr,
+	processErr := errors.New("remote command failed")
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		processErr = ctxErr
+	} else {
+		var transportErr *libvirtSSHTransportError
+		if errors.As(err, &transportErr) {
+			processErr = errors.New(transportErr.message)
 		}
 	}
-	return fmt.Errorf("ssh %s: %w", instance.Name, err)
+	return &libvirtCommandError{
+		Command: "ssh " + instance.Name,
+		Err:     processErr,
+	}
 }
 
 func (p *virshVMProvider) verifyGuestReady(ctx context.Context, instance vmInstance) error {
