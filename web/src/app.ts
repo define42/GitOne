@@ -253,7 +253,7 @@ interface RepositoryMergeRequests {
   mergeRequests: RepositoryMergeRequest[];
 }
 
-type RepositoryBuildStatus = "queued" | "running" | "succeeded" | "failed";
+type RepositoryBuildStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 interface RepositoryBuild {
   id: string;
@@ -266,16 +266,22 @@ interface RepositoryBuild {
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  rerunOf?: string;
 }
 
 interface RepositoryBuilds {
   repository: string;
   builds: RepositoryBuild[];
+  canManage: boolean;
 }
 
 interface RepositoryBuildDetail {
   build: RepositoryBuild;
   log: string;
+}
+
+interface RepositoryBuildMutation {
+  build: RepositoryBuild;
 }
 
 interface RepositoryBrowserRoute {
@@ -803,6 +809,14 @@ function repositoryBuildsAPIURL(repository: string): string {
 
 function repositoryBuildAPIURL(repository: string, id: string): string {
   return `${repositoryBuildsAPIURL(repository)}/${encodeURIComponent(id)}`;
+}
+
+function repositoryBuildActionAPIURL(
+  repository: string,
+  id: string,
+  action: "rerun" | "cancel",
+): string {
+  return `${repositoryBuildAPIURL(repository, id)}/${action}`;
 }
 
 function repositoryFileAPIURL(
@@ -2271,7 +2285,7 @@ function stopRepositoryBuildPolling(): void {
 
 function buildDuration(build: RepositoryBuild): string {
   if (!build.startedAt) {
-    return "Waiting to start";
+    return build.status === "canceled" ? "Canceled before start" : "Waiting to start";
   }
   const end = build.finishedAt ? new Date(build.finishedAt).getTime() : Date.now();
   const seconds = Math.max(
@@ -2293,7 +2307,7 @@ function buildStatusBadge(status: RepositoryBuildStatus): HTMLElement {
   badge.className = `build-status build-status-${status}`;
   const statusIcon = status === "succeeded"
     ? "check"
-    : status === "failed" ? "close" : "clock";
+    : status === "failed" || status === "canceled" ? "close" : "clock";
   const label = status[0].toUpperCase() + status.slice(1);
   badge.append(icon(statusIcon), document.createTextNode(label));
   badge.setAttribute("aria-label", `Build status: ${label}`);
@@ -2425,6 +2439,7 @@ function repositoryBuildsView(
   const expanded = new Set<string>();
   const logs = new Map<string, string>();
   const loadingLogs = new Set<string>();
+  const mutatingBuilds = new Set<string>();
 
   const renderBuilds = (): void => {
     const scrollPositions = new Map<string, {top: number; pinned: boolean}>();
@@ -2471,6 +2486,11 @@ function repositoryBuildsView(
       const duration = element("span", buildDuration(build));
       const image = element("span", build.image ? `Image ${build.image}` : "No image");
       metadata.append(created, duration, image);
+      if (build.rerunOf) {
+        const rerun = element("span", `Re-run of ${build.rerunOf}`);
+        rerun.title = build.rerunOf;
+        metadata.append(rerun);
+      }
       identity.append(title, metadata);
 
       const controls = element("div");
@@ -2491,7 +2511,21 @@ function repositoryBuildsView(
         renderBuilds();
         void loadLog(build.id);
       });
-      controls.append(buildStatusBadge(build.status), logButton);
+      controls.append(buildStatusBadge(build.status));
+      if (data.canManage) {
+        const active = build.status === "queued" || build.status === "running";
+        const mutationButton = actionButton(
+          active ? "Cancel" : "Run again",
+          active ? "close" : "refresh",
+          active ? "danger-secondary build-cancel" : "secondary build-rerun",
+        );
+        mutationButton.disabled = mutatingBuilds.has(build.id);
+        mutationButton.addEventListener("click", () => {
+          void mutateBuild(build, active ? "cancel" : "rerun");
+        });
+        controls.append(mutationButton);
+      }
+      controls.append(logButton);
       summary.append(identity, controls);
       item.append(summary);
 
@@ -2542,6 +2576,47 @@ function repositoryBuildsView(
       data.builds[index] = updated;
     }
   };
+
+  async function mutateBuild(
+    build: RepositoryBuild,
+    action: "rerun" | "cancel",
+  ): Promise<void> {
+    if (mutatingBuilds.has(build.id) || canceled) {
+      return;
+    }
+    mutatingBuilds.add(build.id);
+    renderBuilds();
+    try {
+      const result = await request<RepositoryBuildMutation>(
+        repositoryBuildActionAPIURL(route.repository, build.id, action),
+        {method: "POST"},
+      );
+      if (canceled) {
+        return;
+      }
+      if (action === "rerun") {
+        data.builds.unshift(result.build);
+        showStatus(`Build ${shortCommitHash(result.build.commit)} queued again.`);
+      } else {
+        updateBuild(result.build);
+        showStatus(`Build ${shortCommitHash(result.build.commit)} canceled.`);
+      }
+    } catch (reason) {
+      if (!canceled) {
+        showStatus(
+          reason instanceof Error
+            ? `Could not ${action === "rerun" ? "rerun" : "cancel"} build: ${reason.message}`
+            : `Could not ${action === "rerun" ? "rerun" : "cancel"} build.`,
+          true,
+        );
+      }
+    } finally {
+      mutatingBuilds.delete(build.id);
+      if (!canceled) {
+        renderBuilds();
+      }
+    }
+  }
 
   async function loadLog(id: string): Promise<void> {
     if (loadingLogs.has(id) || canceled) {

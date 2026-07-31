@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"os"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -28,6 +29,7 @@ type repositoryBuildsOutput struct {
 	Body struct {
 		Repository string       `json:"repository"`
 		Builds     []runner.Job `json:"builds"`
+		CanManage  bool         `json:"canManage"`
 	}
 }
 
@@ -35,6 +37,12 @@ type repositoryBuildOutput struct {
 	Body struct {
 		Build runner.Job `json:"build"`
 		Log   string     `json:"log"`
+	}
+}
+
+type repositoryBuildMutationOutput struct {
+	Body struct {
+		Build runner.Job `json:"build"`
 	}
 }
 
@@ -54,6 +62,23 @@ func registerBuildAPI(api huma.API, service API) {
 		Summary:     "Get a repository build and its log",
 		Tags:        []string{"Builds"},
 	}), service.getRepositoryBuild)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "rerun-repository-build",
+		Method:        http.MethodPost,
+		Path:          "/api/repositories/{repository}/builds/{id}/rerun",
+		Summary:       "Rerun a completed repository build",
+		Tags:          []string{"Builds"},
+		DefaultStatus: http.StatusCreated,
+	}), service.rerunRepositoryBuild)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID: "cancel-repository-build",
+		Method:      http.MethodPost,
+		Path:        "/api/repositories/{repository}/builds/{id}/cancel",
+		Summary:     "Cancel a queued or running repository build",
+		Tags:        []string{"Builds"},
+	}), service.cancelRepositoryBuild)
 }
 
 func (a API) listRepositoryBuilds(
@@ -64,7 +89,13 @@ func (a API) listRepositoryBuilds(
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	if _, err = a.authorizeRepository(ctx, input.AuthInput, repository, control.RoleRead); err != nil {
+	principal, err := a.authorizeRepository(
+		ctx,
+		input.AuthInput,
+		repository,
+		control.RoleRead,
+	)
+	if err != nil {
 		return nil, err
 	}
 	if a.Builds == nil {
@@ -77,6 +108,7 @@ func (a API) listRepositoryBuilds(
 	output := &repositoryBuildsOutput{}
 	output.Body.Repository = repository.Full()
 	output.Body.Builds = builds
+	output.Body.CanManage = a.Coordinator != nil && principal.Role.Allows(control.RoleDeveloper)
 	return output, nil
 }
 
@@ -109,6 +141,76 @@ func (a API) getRepositoryBuild(
 	output.Body.Build = build
 	output.Body.Log = log
 	return output, nil
+}
+
+func (a API) rerunRepositoryBuild(
+	ctx context.Context,
+	input *repositoryBuildInput,
+) (*repositoryBuildMutationOutput, error) {
+	repository, err := a.mutableBuildRepository(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	build, err := a.Coordinator.Rerun(repository, input.ID)
+	if errors.Is(err, runner.ErrBuildNotFound) {
+		return nil, huma.Error404NotFound("build not found")
+	}
+	if errors.Is(err, runner.ErrBuildNotRerunnable) {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	if err != nil {
+		return nil, huma.Error409Conflict("could not rerun build", err)
+	}
+	output := &repositoryBuildMutationOutput{}
+	output.Body.Build = build
+	return output, nil
+}
+
+func (a API) cancelRepositoryBuild(
+	ctx context.Context,
+	input *repositoryBuildInput,
+) (*repositoryBuildMutationOutput, error) {
+	repository, err := a.mutableBuildRepository(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	build, err := a.Coordinator.Cancel(repository, input.ID)
+	if errors.Is(err, runner.ErrBuildNotFound) {
+		return nil, huma.Error404NotFound("build not found")
+	}
+	if errors.Is(err, runner.ErrBuildNotCancelable) {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	if err != nil {
+		return nil, huma.Error409Conflict("could not cancel build", err)
+	}
+	output := &repositoryBuildMutationOutput{}
+	output.Body.Build = build
+	return output, nil
+}
+
+func (a API) mutableBuildRepository(
+	ctx context.Context,
+	input *repositoryBuildInput,
+) (repopath.Repository, error) {
+	repository, err := parseRepositoryPath(input.Repository)
+	if err != nil {
+		return repopath.Repository{}, huma.Error400BadRequest(err.Error())
+	}
+	if _, err = a.authorizeRepository(
+		ctx,
+		input.AuthInput,
+		repository,
+		control.RoleDeveloper,
+	); err != nil {
+		return repopath.Repository{}, err
+	}
+	if a.Coordinator == nil {
+		return repopath.Repository{}, huma.Error503ServiceUnavailable(
+			"remote build runner is not enabled",
+		)
+	}
+	return repository, nil
 }
 
 func (a API) scheduleBuild(

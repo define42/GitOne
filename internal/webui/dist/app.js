@@ -349,6 +349,9 @@ function repositoryBuildsAPIURL(repository) {
 function repositoryBuildAPIURL(repository, id) {
     return `${repositoryBuildsAPIURL(repository)}/${encodeURIComponent(id)}`;
 }
+function repositoryBuildActionAPIURL(repository, id, action) {
+    return `${repositoryBuildAPIURL(repository, id)}/${action}`;
+}
 function repositoryFileAPIURL(repository, ref, path) {
     return `/api/repositories/${encodeURIComponent(repository)}/files/${encodeURIComponent(ref)}/${encodeURIComponent(path)}`;
 }
@@ -1616,7 +1619,7 @@ function stopRepositoryBuildPolling() {
 }
 function buildDuration(build) {
     if (!build.startedAt) {
-        return "Waiting to start";
+        return build.status === "canceled" ? "Canceled before start" : "Waiting to start";
     }
     const end = build.finishedAt ? new Date(build.finishedAt).getTime() : Date.now();
     const seconds = Math.max(0, Math.floor((end - new Date(build.startedAt).getTime()) / 1000));
@@ -1634,7 +1637,7 @@ function buildStatusBadge(status) {
     badge.className = `build-status build-status-${status}`;
     const statusIcon = status === "succeeded"
         ? "check"
-        : status === "failed" ? "close" : "clock";
+        : status === "failed" || status === "canceled" ? "close" : "clock";
     const label = status[0].toUpperCase() + status.slice(1);
     badge.append(icon(statusIcon), document.createTextNode(label));
     badge.setAttribute("aria-label", `Build status: ${label}`);
@@ -1744,6 +1747,7 @@ function repositoryBuildsView(route, initial) {
     const expanded = new Set();
     const logs = new Map();
     const loadingLogs = new Set();
+    const mutatingBuilds = new Set();
     const renderBuilds = () => {
         const scrollPositions = new Map();
         for (const log of listRoot.querySelectorAll(".build-log")) {
@@ -1782,6 +1786,11 @@ function repositoryBuildsView(route, initial) {
             const duration = element("span", buildDuration(build));
             const image = element("span", build.image ? `Image ${build.image}` : "No image");
             metadata.append(created, duration, image);
+            if (build.rerunOf) {
+                const rerun = element("span", `Re-run of ${build.rerunOf}`);
+                rerun.title = build.rerunOf;
+                metadata.append(rerun);
+            }
             identity.append(title, metadata);
             const controls = element("div");
             controls.className = "build-controls";
@@ -1797,7 +1806,17 @@ function repositoryBuildsView(route, initial) {
                 renderBuilds();
                 void loadLog(build.id);
             });
-            controls.append(buildStatusBadge(build.status), logButton);
+            controls.append(buildStatusBadge(build.status));
+            if (data.canManage) {
+                const active = build.status === "queued" || build.status === "running";
+                const mutationButton = actionButton(active ? "Cancel" : "Run again", active ? "close" : "refresh", active ? "danger-secondary build-cancel" : "secondary build-rerun");
+                mutationButton.disabled = mutatingBuilds.has(build.id);
+                mutationButton.addEventListener("click", () => {
+                    void mutateBuild(build, active ? "cancel" : "rerun");
+                });
+                controls.append(mutationButton);
+            }
+            controls.append(logButton);
             summary.append(identity, controls);
             item.append(summary);
             if (build.error) {
@@ -1843,6 +1862,40 @@ function repositoryBuildsView(route, initial) {
             data.builds[index] = updated;
         }
     };
+    async function mutateBuild(build, action) {
+        if (mutatingBuilds.has(build.id) || canceled) {
+            return;
+        }
+        mutatingBuilds.add(build.id);
+        renderBuilds();
+        try {
+            const result = await request(repositoryBuildActionAPIURL(route.repository, build.id, action), { method: "POST" });
+            if (canceled) {
+                return;
+            }
+            if (action === "rerun") {
+                data.builds.unshift(result.build);
+                showStatus(`Build ${shortCommitHash(result.build.commit)} queued again.`);
+            }
+            else {
+                updateBuild(result.build);
+                showStatus(`Build ${shortCommitHash(result.build.commit)} canceled.`);
+            }
+        }
+        catch (reason) {
+            if (!canceled) {
+                showStatus(reason instanceof Error
+                    ? `Could not ${action === "rerun" ? "rerun" : "cancel"} build: ${reason.message}`
+                    : `Could not ${action === "rerun" ? "rerun" : "cancel"} build.`, true);
+            }
+        }
+        finally {
+            mutatingBuilds.delete(build.id);
+            if (!canceled) {
+                renderBuilds();
+            }
+        }
+    }
     async function loadLog(id) {
         if (loadingLogs.has(id) || canceled) {
             return;

@@ -21,6 +21,7 @@ const (
 	StatusRunning   Status = "running"
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
+	StatusCanceled  Status = "canceled"
 )
 
 type Job struct {
@@ -37,6 +38,7 @@ type Job struct {
 	RunnerID       string     `json:"runnerId,omitempty"`
 	Attempt        int        `json:"attempt,omitempty"`
 	LeaseExpiresAt *time.Time `json:"leaseExpiresAt,omitempty"`
+	RerunOf        string     `json:"rerunOf,omitempty"`
 }
 
 type Store struct {

@@ -21,6 +21,12 @@ const (
 	maximumRunnerIDLength = 100
 )
 
+var (
+	ErrBuildNotFound      = errors.New("build not found")
+	ErrBuildNotRerunnable = errors.New("only a completed build can be rerun")
+	ErrBuildNotCancelable = errors.New("completed build cannot be canceled")
+)
+
 type Scheduler interface {
 	Schedule(repopath.Repository, string, plumbing.Hash) (*Job, error)
 }
@@ -49,6 +55,11 @@ type Lease struct {
 	Config       repoconfig.BuildConfig `json:"config"`
 	LogOffset    int64                  `json:"logOffset"`
 	LeaseSeconds int                    `json:"leaseSeconds"`
+}
+
+type HeartbeatResult struct {
+	LeaseExpiresAt time.Time `json:"leaseExpiresAt"`
+	Canceled       bool      `json:"canceled,omitempty"`
 }
 
 func NewCoordinator(config CoordinatorConfig) (*Coordinator, error) {
@@ -131,6 +142,94 @@ func (c *Coordinator) ScheduleLocked(
 	return &job, nil
 }
 
+// Rerun creates a new queued build for the exact commit and branch recorded by
+// a completed build. The original build and its log remain unchanged.
+func (c *Coordinator) Rerun(
+	repositoryPath repopath.Repository,
+	id string,
+) (Job, error) {
+	releaseOperation, _, err := acquireRepositoryBuildLock(
+		c.storage,
+		repositoryPath,
+		id,
+	)
+	if err != nil {
+		return Job{}, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	original, err := c.state.Get(repositoryPath, id)
+	if errors.Is(err, os.ErrNotExist) {
+		return Job{}, ErrBuildNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+	if !terminalStatus(original.Status) {
+		return Job{}, ErrBuildNotRerunnable
+	}
+	build, err := c.buildConfig(repositoryPath, original)
+	if err != nil {
+		return Job{}, fmt.Errorf("prepare build rerun: %w", err)
+	}
+	job := Job{
+		ID:         newJobID(),
+		Repository: repositoryPath.Full(),
+		Branch:     original.Branch,
+		Commit:     original.Commit,
+		Image:      build.Image,
+		Status:     StatusQueued,
+		CreatedAt:  time.Now().UTC(),
+		RerunOf:    original.ID,
+	}
+	if err = c.state.save(repositoryPath, job); err != nil {
+		return Job{}, err
+	}
+	return job, nil
+}
+
+// Cancel moves a queued or running build to a terminal canceled state. A
+// running remote executor observes the cancellation on its next heartbeat.
+func (c *Coordinator) Cancel(
+	repositoryPath repopath.Repository,
+	id string,
+) (Job, error) {
+	releaseOperation, _, err := acquireRepositoryBuildLock(
+		c.storage,
+		repositoryPath,
+		id,
+	)
+	if err != nil {
+		return Job{}, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	job, err := c.state.Get(repositoryPath, id)
+	if errors.Is(err, os.ErrNotExist) {
+		return Job{}, ErrBuildNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+	if job.Status == StatusCanceled {
+		return job, nil
+	}
+	if job.Status != StatusQueued && job.Status != StatusRunning {
+		return Job{}, ErrBuildNotCancelable
+	}
+	finished := time.Now().UTC()
+	job.Status = StatusCanceled
+	job.FinishedAt = &finished
+	job.LeaseExpiresAt = nil
+	job.Error = ""
+	if err = c.state.save(repositoryPath, job); err != nil {
+		return Job{}, err
+	}
+	return job, nil
+}
+
 func (c *Coordinator) Claim(runnerID string) (*Lease, error) {
 	if !validRunnerID(runnerID) {
 		return nil, errors.New("invalid runner ID")
@@ -195,32 +294,46 @@ func (c *Coordinator) Heartbeat(
 	id string,
 	runnerID string,
 ) (time.Time, error) {
+	result, err := c.HeartbeatState(repository, id, runnerID)
+	return result.LeaseExpiresAt, err
+}
+
+// HeartbeatState extends a running lease and tells a remote runner when the
+// build was canceled while it was executing.
+func (c *Coordinator) HeartbeatState(
+	repository repopath.Repository,
+	id string,
+	runnerID string,
+) (HeartbeatResult, error) {
 	releaseOperation, _, err := acquireRepositoryBuildLock(c.storage, repository, id)
 	if err != nil {
-		return time.Time{}, err
+		return HeartbeatResult{}, err
 	}
 	defer func() {
 		_ = releaseOperation()
 	}()
 	job, err := c.ownedJob(repository, id, runnerID)
 	if err != nil {
-		return time.Time{}, err
+		return HeartbeatResult{}, err
 	}
-	if job.Status == StatusSucceeded || job.Status == StatusFailed {
+	if terminalStatus(job.Status) {
 		if job.FinishedAt == nil {
-			return time.Time{}, errors.New("completed build has no finish time")
+			return HeartbeatResult{}, errors.New("completed build has no finish time")
 		}
-		return *job.FinishedAt, nil
+		return HeartbeatResult{
+			LeaseExpiresAt: *job.FinishedAt,
+			Canceled:       job.Status == StatusCanceled,
+		}, nil
 	}
 	if job.Status != StatusRunning {
-		return time.Time{}, errors.New("build is not running")
+		return HeartbeatResult{}, errors.New("build is not running")
 	}
 	expires := time.Now().UTC().Add(c.leaseDuration)
 	job.LeaseExpiresAt = &expires
 	if err = c.state.save(repository, job); err != nil {
-		return time.Time{}, err
+		return HeartbeatResult{}, err
 	}
-	return expires, nil
+	return HeartbeatResult{LeaseExpiresAt: expires}, nil
 }
 
 func (c *Coordinator) AppendLog(
@@ -274,6 +387,9 @@ func (c *Coordinator) Complete(
 	if buildError != "" {
 		expectedStatus = StatusFailed
 	}
+	if job.Status == StatusCanceled {
+		return job, nil
+	}
 	if job.Status == StatusSucceeded || job.Status == StatusFailed {
 		if job.Status == expectedStatus && job.Error == buildError {
 			return job, nil
@@ -297,6 +413,10 @@ func (c *Coordinator) Complete(
 		return Job{}, err
 	}
 	return job, nil
+}
+
+func terminalStatus(status Status) bool {
+	return status == StatusSucceeded || status == StatusFailed || status == StatusCanceled
 }
 
 func (c *Coordinator) SourceJob(
@@ -404,7 +524,7 @@ func (c *Coordinator) ownedJob(
 	}
 	job, err := c.state.Get(repository, id)
 	if errors.Is(err, os.ErrNotExist) {
-		return Job{}, errors.New("build not found")
+		return Job{}, ErrBuildNotFound
 	}
 	if err != nil {
 		return Job{}, err

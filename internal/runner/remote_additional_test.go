@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/define42/GitOne/internal/repoconfig"
 )
 
 type executorFunc func(context.Context, ExecuteRequest, io.Writer) error
@@ -450,6 +452,96 @@ func TestRemoteHeartbeatReportsAPIError(t *testing.T) {
 		}
 	default:
 		t.Fatal("heartbeat error was not reported")
+	}
+}
+
+func TestRemoteStopsCanceledBuildWithoutCompletingIt(t *testing.T) {
+	archive := sourceArchive(t)
+	var heartbeatCalls atomic.Int32
+	var completionCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/api/runner/source":
+			response.Header().Set("Content-Type", "application/gzip")
+			_, _ = response.Write(archive)
+		case "/api/runner/jobs/log":
+			var input runnerLogRequest
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				http.Error(response, err.Error(), http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(response).Encode(map[string]int64{
+				"offset": input.Offset + int64(len(input.Content)),
+			})
+		case "/api/runner/jobs/heartbeat":
+			heartbeatCalls.Add(1)
+			_ = json.NewEncoder(response).Encode(runnerHeartbeatResponse{
+				LeaseExpiresAt: time.Now().UTC(),
+				Canceled:       true,
+			})
+		case "/api/runner/jobs/complete":
+			completionCalls.Add(1)
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	executorStopped := make(chan struct{})
+	remote, err := NewRemote(RemoteConfig{
+		URL: server.URL, Token: "token", ID: "runner-one", WorkRoot: t.TempDir(),
+		Workers: 1, PollInterval: 250 * time.Millisecond, HTTPClient: server.Client(),
+		Executor: executorFunc(func(
+			ctx context.Context,
+			_ ExecuteRequest,
+			_ io.Writer,
+		) error {
+			<-ctx.Done()
+			close(executorStopped)
+			return ctx.Err()
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := Lease{
+		Job: Job{
+			ID: "canceled-build", Repository: "engineering/api", Branch: "main",
+			Commit: strings.Repeat("1", 40), Image: "alpine:3", RunnerID: "runner-one",
+		},
+		Config: repoconfig.BuildConfig{
+			Image: "alpine:3", Script: []string{"sleep 30"}, TimeoutSeconds: 30,
+		},
+		LeaseSeconds: 1,
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- remote.runLease(context.Background(), "runner-one", lease, remote.executor)
+	}()
+	select {
+	case err = <-result:
+		if err != nil {
+			t.Fatalf("canceled build result = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("remote build did not stop after cancellation")
+	}
+	select {
+	case <-executorStopped:
+	default:
+		t.Fatal("executor did not observe cancellation")
+	}
+	if heartbeatCalls.Load() == 0 || completionCalls.Load() != 0 {
+		t.Fatalf(
+			"heartbeat calls=%d, completion calls=%d",
+			heartbeatCalls.Load(),
+			completionCalls.Load(),
+		)
 	}
 }
 

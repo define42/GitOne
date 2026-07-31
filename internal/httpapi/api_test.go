@@ -56,7 +56,8 @@ func TestRepositoryBuildEndpoints(t *testing.T) {
 	}
 	if list.Body.Repository != repository.Full() ||
 		len(list.Body.Builds) != 1 ||
-		list.Body.Builds[0].ID != build.ID {
+		list.Body.Builds[0].ID != build.ID ||
+		list.Body.CanManage {
 		t.Fatalf("unexpected build list: %#v", list.Body)
 	}
 	detail, err := service.getRepositoryBuild(context.Background(), &repositoryBuildInput{
@@ -99,6 +100,104 @@ func TestRepositoryBuildEndpoints(t *testing.T) {
 	if responseBody.Build.ID != build.ID || responseBody.Log != "tests passed\n" {
 		t.Fatalf("unexpected HTTP build detail: %#v", responseBody)
 	}
+}
+
+func TestRepositoryBuildRerunAndCancelEndpoints(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	commit := commitRunnerBuildConfig(t, service, repository)
+	coordinator, err := runner.NewCoordinator(runner.CoordinatorConfig{
+		Storage: service.Storage,
+		State:   runner.NewStore(service.Storage.Root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Coordinator = coordinator
+	buildStore := coordinator.Store()
+	service.Builds = &buildStore
+
+	original, err := coordinator.Schedule(repository, "main", commit)
+	if err != nil || original == nil {
+		t.Fatalf("scheduled build = %#v, %v", original, err)
+	}
+	lease, err := coordinator.Claim("runner-one")
+	if err != nil || lease == nil {
+		t.Fatalf("claimed build = %#v, %v", lease, err)
+	}
+	if _, err = coordinator.Complete(repository, original.ID, "runner-one", "tests failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := service.listRepositoryBuilds(context.Background(), &repositoryBuildsInput{
+		AuthInput: credentials, Repository: repository.Full(),
+	})
+	if err != nil || !list.Body.CanManage {
+		t.Fatalf("build management capability = %v, %v", list.Body.CanManage, err)
+	}
+	rerun, err := service.rerunRepositoryBuild(context.Background(), &repositoryBuildInput{
+		AuthInput: credentials, Repository: repository.Full(), ID: original.ID,
+	})
+	if err != nil || rerun.Body.Build.Status != runner.StatusQueued ||
+		rerun.Body.Build.RerunOf != original.ID {
+		t.Fatalf("rerun response = %#v, %v", rerun, err)
+	}
+	canceled, err := service.cancelRepositoryBuild(context.Background(), &repositoryBuildInput{
+		AuthInput: credentials, Repository: repository.Full(), ID: rerun.Body.Build.ID,
+	})
+	if err != nil || canceled.Body.Build.Status != runner.StatusCanceled {
+		t.Fatalf("cancel response = %#v, %v", canceled, err)
+	}
+
+	mux := http.NewServeMux()
+	Register(mux, service)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/builds/"+original.ID+"/rerun",
+		nil,
+	)
+	request.Header.Set("Authorization", credentials.Authorization)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("rerun HTTP status = %d: %s", response.Code, response.Body.String())
+	}
+
+	_, err = service.rerunRepositoryBuild(context.Background(), &repositoryBuildInput{
+		AuthInput: credentials, Repository: repository.Full(), ID: "missing",
+	})
+	requireStatusError(t, err, http.StatusNotFound)
+	_, err = service.cancelRepositoryBuild(context.Background(), &repositoryBuildInput{
+		AuthInput: credentials, Repository: repository.Full(), ID: original.ID,
+	})
+	requireStatusError(t, err, http.StatusConflict)
+
+	document, err := service.Resolver.Controls.Load(context.Background(), "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Members["bob"] = control.RoleRead
+	if err = service.Storage.UpdateGroupControl("engineering", document, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	service.Resolver.Controls.Invalidate("engineering")
+	service.Resolver.Directory = testIdentityProvider{
+		"alice": "secret",
+		"bob":   "bob-secret",
+	}
+	readRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	readRequest.SetBasicAuth("bob", "bob-secret")
+	readCredentials := AuthInput{Authorization: readRequest.Header.Get("Authorization")}
+	readList, err := service.listRepositoryBuilds(context.Background(), &repositoryBuildsInput{
+		AuthInput: readCredentials, Repository: repository.Full(),
+	})
+	if err != nil || readList.Body.CanManage {
+		t.Fatalf("read-only build capability = %v, %v", readList.Body.CanManage, err)
+	}
+	_, err = service.rerunRepositoryBuild(context.Background(), &repositoryBuildInput{
+		AuthInput: readCredentials, Repository: repository.Full(), ID: original.ID,
+	})
+	requireStatusError(t, err, http.StatusForbidden)
 }
 
 func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {

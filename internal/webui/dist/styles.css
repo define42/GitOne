@@ -2838,6 +2838,10 @@ table {
   border-left-color: var(--build-failed);
 }
 
+.build-item-canceled {
+  border-left-color: var(--muted);
+}
+
 .build-summary {
   align-items: center;
   display: flex;
@@ -2930,6 +2934,11 @@ table {
 .build-status-failed {
   background: var(--build-failed-soft);
   color: var(--build-failed);
+}
+
+.build-status-canceled {
+  background: var(--surface-subtle);
+  color: var(--muted);
 }
 
 .build-status-running .icon {

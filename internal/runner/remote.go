@@ -25,6 +25,8 @@ const (
 	maximumCompletionErrorBytes   = 4096
 )
 
+var errRemoteBuildCanceled = errors.New("build canceled by server")
+
 type RemoteConfig struct {
 	URL          string
 	Token        string
@@ -254,6 +256,9 @@ func (r *Remote) runLease(
 		<-heartbeatDone
 		select {
 		case heartbeatErr := <-heartbeatErrors:
+			if errors.Is(heartbeatErr, errRemoteBuildCanceled) {
+				return nil
+			}
 			return errors.Join(buildErr, completionErr, heartbeatErr)
 		default:
 			return errors.Join(buildErr, completionErr)
@@ -398,7 +403,17 @@ func (r *Remote) heartbeat(
 				return
 			}
 			requestContext, cancelRequest := context.WithTimeout(ctx, requestTimeout)
-			err := r.post(requestContext, "/api/runner/jobs/heartbeat", body, nil)
+			var response runnerHeartbeatResponse
+			err := r.post(
+				requestContext,
+				"/api/runner/jobs/heartbeat",
+				body,
+				&response,
+			)
+			if errors.Is(err, io.EOF) {
+				// Older compatible coordinators returned an empty success response.
+				err = nil
+			}
 			cancelRequest()
 			requests.Unlock()
 			if err != nil {
@@ -407,6 +422,14 @@ func (r *Remote) heartbeat(
 				}
 				select {
 				case errorsChannel <- fmt.Errorf("heartbeat build: %w", err):
+				default:
+				}
+				cancel()
+				return
+			}
+			if response.Canceled {
+				select {
+				case errorsChannel <- errRemoteBuildCanceled:
 				default:
 				}
 				cancel()
@@ -622,6 +645,11 @@ type runnerJobRequest struct {
 	RunnerID   string `json:"runnerId"`
 	Repository string `json:"repository"`
 	ID         string `json:"id"`
+}
+
+type runnerHeartbeatResponse struct {
+	LeaseExpiresAt time.Time `json:"leaseExpiresAt"`
+	Canceled       bool      `json:"canceled,omitempty"`
 }
 
 type runnerLogRequest struct {

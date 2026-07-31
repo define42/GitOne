@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -381,6 +382,86 @@ func TestCoordinatorOwnershipHeartbeatSourceAndFailureCompletion(t *testing.T) {
 		"runner-one",
 	); err == nil || !strings.Contains(err.Error(), "another runner") {
 		t.Fatalf("wrong owner error = %v", err)
+	}
+}
+
+func TestCoordinatorRerunAndCancellationLifecycle(t *testing.T) {
+	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{
+			Image: "alpine:3", Script: []string{"true"}, Branches: []string{"main"},
+		},
+	})
+
+	queued, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil || queued == nil {
+		t.Fatalf("scheduled build = %#v, %v", queued, err)
+	}
+	canceled, err := coordinator.Cancel(repositoryPath, queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canceled.Status != StatusCanceled || canceled.FinishedAt == nil ||
+		canceled.LeaseExpiresAt != nil {
+		t.Fatalf("canceled queued build = %#v", canceled)
+	}
+	if repeated, cancelErr := coordinator.Cancel(repositoryPath, queued.ID); cancelErr != nil ||
+		repeated.Status != StatusCanceled || !repeated.FinishedAt.Equal(*canceled.FinishedAt) {
+		t.Fatalf("repeated cancellation = %#v, %v", repeated, cancelErr)
+	}
+	if lease, claimErr := coordinator.Claim("runner-one"); claimErr != nil || lease != nil {
+		t.Fatalf("canceled build was claimable: %#v, %v", lease, claimErr)
+	}
+
+	rerun, err := coordinator.Rerun(repositoryPath, queued.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rerun.ID == queued.ID || rerun.RerunOf != queued.ID ||
+		rerun.Status != StatusQueued || rerun.Repository != queued.Repository ||
+		rerun.Branch != queued.Branch || rerun.Commit != queued.Commit ||
+		rerun.Image != "alpine:3" {
+		t.Fatalf("rerun build = %#v", rerun)
+	}
+	storedOriginal, err := coordinator.Store().Get(repositoryPath, queued.ID)
+	if err != nil || storedOriginal.Status != StatusCanceled {
+		t.Fatalf("original build changed = %#v, %v", storedOriginal, err)
+	}
+	lease, err := coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.ID != rerun.ID {
+		t.Fatalf("rerun claim = %#v, %v", lease, err)
+	}
+	if _, err = coordinator.Rerun(repositoryPath, rerun.ID); !errors.Is(
+		err,
+		ErrBuildNotRerunnable,
+	) {
+		t.Fatalf("running rerun error = %v", err)
+	}
+
+	canceled, err = coordinator.Cancel(repositoryPath, rerun.ID)
+	if err != nil || canceled.Status != StatusCanceled || canceled.RunnerID != "runner-one" {
+		t.Fatalf("canceled running build = %#v, %v", canceled, err)
+	}
+	heartbeat, err := coordinator.HeartbeatState(repositoryPath, rerun.ID, "runner-one")
+	if err != nil || !heartbeat.Canceled ||
+		!heartbeat.LeaseExpiresAt.Equal(*canceled.FinishedAt) {
+		t.Fatalf("canceled heartbeat = %#v, %v", heartbeat, err)
+	}
+	completed, err := coordinator.Complete(repositoryPath, rerun.ID, "runner-one", "context canceled")
+	if err != nil || completed.Status != StatusCanceled || completed.Error != "" {
+		t.Fatalf("completion overwrote cancellation = %#v, %v", completed, err)
+	}
+	if _, err = coordinator.AppendLog(
+		repositoryPath,
+		rerun.ID,
+		"runner-one",
+		0,
+		[]byte("late output"),
+	); err == nil {
+		t.Fatal("canceled build accepted log output")
+	}
+	if _, err = coordinator.Rerun(repositoryPath, "missing"); !errors.Is(err, ErrBuildNotFound) {
+		t.Fatalf("missing rerun error = %v", err)
 	}
 }
 

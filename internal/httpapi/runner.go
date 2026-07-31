@@ -44,6 +44,7 @@ type runnerJobInput struct {
 type runnerHeartbeatOutput struct {
 	Body struct {
 		LeaseExpiresAt time.Time `json:"leaseExpiresAt"`
+		Canceled       bool      `json:"canceled,omitempty"`
 	}
 }
 
@@ -153,12 +154,17 @@ func (a API) heartbeatRunnerJob(
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	expires, err := a.Coordinator.Heartbeat(repository, input.Body.ID, input.Body.RunnerID)
+	result, err := a.Coordinator.HeartbeatState(
+		repository,
+		input.Body.ID,
+		input.Body.RunnerID,
+	)
 	if err != nil {
 		return nil, huma.Error409Conflict("could not extend build lease", err)
 	}
 	output := &runnerHeartbeatOutput{}
-	output.Body.LeaseExpiresAt = expires
+	output.Body.LeaseExpiresAt = result.LeaseExpiresAt
+	output.Body.Canceled = result.Canceled
 	return output, nil
 }
 
