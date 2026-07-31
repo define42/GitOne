@@ -1622,7 +1622,10 @@ function buildDuration(build) {
         if (build.status === "canceled") {
             return "Canceled before start";
         }
-        return build.status === "manual" ? "Waiting for manual start" : "Waiting to start";
+        if (build.status === "manual") {
+            return "Waiting for manual start";
+        }
+        return build.status === "waiting" ? "Waiting for dependencies" : "Waiting to start";
     }
     const end = build.finishedAt ? new Date(build.finishedAt).getTime() : Date.now();
     const seconds = Math.max(0, Math.floor((end - new Date(build.startedAt).getTime()) / 1000));
@@ -1659,12 +1662,36 @@ function latestBranchBuildIndicator(route, initial) {
     let canceled = false;
     let refreshing = false;
     let timer;
-    const latestBuild = () => data.builds.find((build) => build.branch === route.ref);
+    const latestJobs = () => {
+        const latest = data.builds.find((build) => build.branch === route.ref);
+        if (!latest) {
+            return [];
+        }
+        return data.builds.filter((build) => build.branch === latest.branch &&
+            build.commit === latest.commit &&
+            build.createdAt === latest.createdAt);
+    };
+    const latestStatus = (jobs) => {
+        for (const status of [
+            "failed",
+            "running",
+            "queued",
+            "waiting",
+            "canceled",
+            "manual",
+            "succeeded",
+        ]) {
+            if (jobs.some((job) => job.status === status)) {
+                return status;
+            }
+        }
+        return "succeeded";
+    };
     const render = () => {
-        const label = element("span", "Latest build");
+        const label = element("span", "Latest jobs");
         label.className = "latest-build-label";
-        const build = latestBuild();
-        if (!build) {
+        const jobs = latestJobs();
+        if (jobs.length === 0) {
             const badge = element("span");
             badge.className = "build-status build-status-none";
             badge.append(icon("clock"), document.createTextNode("None"));
@@ -1673,21 +1700,24 @@ function latestBranchBuildIndicator(route, initial) {
             link.setAttribute("aria-label", `Latest build on ${route.ref}: none`);
             return;
         }
-        const badge = buildStatusBadge(build.status);
+        const build = jobs[0];
+        const status = latestStatus(jobs);
+        const badge = buildStatusBadge(status);
         link.replaceChildren(label, badge);
         link.title = [
-            `Latest build on ${route.ref}: ${build.status}`,
+            `Latest jobs on ${route.ref}: ${status}`,
+            `${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}`,
             shortCommitHash(build.commit),
             relativeTime(build.createdAt),
         ].join(" · ");
-        link.setAttribute("aria-label", `Latest build on ${route.ref}: ${build.status} at ${shortCommitHash(build.commit)}`);
+        link.setAttribute("aria-label", `Latest jobs on ${route.ref}: ${status} at ${shortCommitHash(build.commit)}`);
     };
     const scheduleRefresh = () => {
         if (canceled) {
             return;
         }
-        const build = latestBuild();
-        const active = build?.status === "queued" || build?.status === "running";
+        const jobs = latestJobs();
+        const active = jobs.some((job) => job.status === "waiting" || job.status === "queued" || job.status === "running");
         timer = window.setTimeout(() => void refresh(), document.hidden ? 15_000 : active ? 3_000 : 10_000);
     };
     async function refresh() {
@@ -1783,14 +1813,18 @@ function repositoryBuildsView(route, initial) {
             identity.className = "build-identity";
             const title = element("div");
             title.className = "build-title";
-            title.append(element("strong", build.branch), element("code", shortCommitHash(build.commit)));
+            title.append(element("strong", build.name), element("code", shortCommitHash(build.commit)));
             const metadata = element("div");
             metadata.className = "build-metadata";
-            const created = element("span", `Queued ${relativeTime(build.createdAt)}`);
+            const branch = element("span", `Branch ${build.branch}`);
+            const created = element("span", `${build.status === "manual" || build.status === "waiting" ? "Created" : "Queued"} ${relativeTime(build.createdAt)}`);
             created.title = new Date(build.createdAt).toLocaleString();
             const duration = element("span", buildDuration(build));
             const image = element("span", build.image ? `Image ${build.image}` : "No image");
-            metadata.append(created, duration, image);
+            metadata.append(branch, created, duration, image);
+            if (build.needs && build.needs.length > 0) {
+                metadata.append(element("span", `Needs ${build.needs.map((need) => need.name).join(", ")}`));
+            }
             if (build.rerunOf) {
                 const rerun = element("span", `Re-run of ${build.rerunOf}`);
                 rerun.title = build.rerunOf;
@@ -1813,12 +1847,18 @@ function repositoryBuildsView(route, initial) {
             });
             controls.append(buildStatusBadge(build.status));
             if (data.canManage) {
-                const active = build.status === "queued" || build.status === "running";
+                const active = build.status === "waiting" || build.status === "queued" ||
+                    build.status === "running";
                 const manual = build.status === "manual";
                 const mutationButton = actionButton(manual ? "Run" : active ? "Cancel" : "Run again", manual ? "play" : active ? "close" : "refresh", active
                     ? "danger-secondary build-cancel"
                     : manual ? "primary build-start" : "secondary build-rerun");
-                mutationButton.disabled = mutatingBuilds.has(build.id);
+                const dependenciesReady = (build.needs ?? []).every((need) => data.builds.find((candidate) => candidate.id === need.id)?.status === "succeeded");
+                mutationButton.disabled = mutatingBuilds.has(build.id) ||
+                    (manual && !dependenciesReady);
+                if (manual && !dependenciesReady) {
+                    mutationButton.title = "This job can start after all dependencies succeed.";
+                }
                 mutationButton.addEventListener("click", () => {
                     void mutateBuild(build, manual ? "start" : active ? "cancel" : "rerun");
                 });
@@ -1838,7 +1878,7 @@ function repositoryBuildsView(route, initial) {
                 panel.className = "build-log-panel";
                 const logHeader = element("div");
                 logHeader.className = "build-log-header";
-                const label = element("strong", "Build log");
+                const label = element("strong", `Build log · ${build.name}`);
                 const refreshLog = actionButton("Refresh log", "refresh", "secondary");
                 refreshLog.disabled = loadingLogs.has(build.id);
                 refreshLog.addEventListener("click", () => void loadLog(build.id));
@@ -1883,13 +1923,13 @@ function repositoryBuildsView(route, initial) {
             }
             if (action === "rerun") {
                 data.builds.unshift(result.build);
-                showStatus(`Build ${shortCommitHash(result.build.commit)} queued again.`);
+                showStatus(`Job ${result.build.name} queued again.`);
             }
             else {
                 updateBuild(result.build);
                 showStatus(action === "start"
-                    ? `Build ${shortCommitHash(result.build.commit)} queued.`
-                    : `Build ${shortCommitHash(result.build.commit)} canceled.`);
+                    ? `Job ${result.build.name} queued.`
+                    : `Job ${result.build.name} canceled.`);
             }
         }
         catch (reason) {
@@ -1936,7 +1976,8 @@ function repositoryBuildsView(route, initial) {
         if (canceled) {
             return;
         }
-        const active = data.builds.some((build) => build.status === "queued" || build.status === "running");
+        const active = data.builds.some((build) => build.status === "waiting" || build.status === "queued" ||
+            build.status === "running");
         const delay = document.hidden ? 15_000 : active ? 3_000 : 10_000;
         timer = window.setTimeout(() => void refreshBuilds(), delay);
     };
@@ -1953,10 +1994,12 @@ function repositoryBuildsView(route, initial) {
         refreshState.textContent = "Refreshing…";
         try {
             const previouslyActive = new Set(data.builds.filter((build) => expanded.has(build.id) &&
-                (build.status === "queued" || build.status === "running")).map((build) => build.id));
+                (build.status === "waiting" || build.status === "queued" ||
+                    build.status === "running")).map((build) => build.id));
             const refreshed = await request(repositoryBuildsAPIURL(route.repository));
             const liveLogs = refreshed.builds.filter((build) => expanded.has(build.id) &&
-                (build.status === "queued" ||
+                (build.status === "waiting" ||
+                    build.status === "queued" ||
                     build.status === "running" ||
                     previouslyActive.has(build.id) ||
                     !logs.has(build.id)));

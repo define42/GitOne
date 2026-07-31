@@ -62,8 +62,15 @@ func TestNewRemoteRunnerRejectsInvalidConfiguration(t *testing.T) {
 	}{
 		{name: "missing token", message: "token"},
 		{
-			name: "invalid workers", token: "test-token",
-			args: []string{"-runner-workers", "-1"}, message: "workers",
+			name: "invalid Docker workers", token: "test-token",
+			args: []string{
+				"-runner-executor", "docker", "-docker-workers", "-1",
+			},
+			message: "workers",
+		},
+		{
+			name: "removed runner workers flag", token: "test-token",
+			args: []string{"-runner-workers", "2"}, message: "flag provided but not defined",
 		},
 		{
 			name: "unexpected argument", token: "test-token",

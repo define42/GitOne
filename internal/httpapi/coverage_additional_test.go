@@ -252,13 +252,14 @@ func TestRunnerAPIJobLifecycle(t *testing.T) {
 	service.RunnerToken = "runner-secret"
 	const authorization = "Bearer runner-secret"
 
-	job, err := coordinator.Schedule(repository, "main", commit)
+	jobs, err := coordinator.Schedule(repository, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job == nil {
+	if len(jobs) != 1 {
 		t.Fatal("build was not scheduled")
 	}
+	job := jobs[0]
 	claim, err := service.claimRunnerJob(context.Background(), &runnerClaimInput{
 		Authorization: authorization,
 		Body:          runnerClaimBody{RunnerID: "runner-one"},
@@ -505,7 +506,7 @@ func (s *recordingScheduler) Schedule(
 	repopath.Repository,
 	string,
 	plumbing.Hash,
-) (*runner.Job, error) {
+) ([]runner.Job, error) {
 	s.calls++
 	return nil, s.err
 }
@@ -519,7 +520,7 @@ func (s *recordingLockedScheduler) ScheduleLocked(
 	repopath.Repository,
 	string,
 	plumbing.Hash,
-) (*runner.Job, error) {
+) ([]runner.Job, error) {
 	s.lockedCalls++
 	return nil, s.err
 }
@@ -580,9 +581,9 @@ func commitRunnerBuildConfig(
 	}
 	isManual := len(manual) > 0 && manual[0]
 	contents, err := yaml.Marshal(repoconfig.Config{
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"test": {
 			Image: "alpine:3", Script: []string{"true"}, Manual: isManual,
-		},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -81,29 +81,44 @@ back to GitOne. The disposable qcow2 overlay, domain, and Ignition file are
 deleted after one assigned job, while a replacement VM is started immediately.
 The libvirt host's Docker daemon and filesystem are never mounted into a build.
 Branches created, edited, or merged through the API trigger builds too.
-Rerunning a terminal build creates a new queued job for the same branch, commit,
-and commit-pinned build configuration while preserving the original job and log.
+Rerunning a terminal build creates a new queued copy of the same named job for
+the same branch, commit, and commit-pinned configuration while preserving the
+original job and log. A dependent job rerun binds each `needs` entry to the
+newest successful run of that job for the same branch and commit; the rerun is
+rejected until every dependency has such a successful run.
 Canceling a running job marks it terminal immediately; its remote executor stops
 when the next lease heartbeat observes the cancellation and cannot overwrite the
 canceled result.
 
 ```yaml
 description: Backend API
-build:
-  image: golang:1.25
-  script:
-    - go test ./...
-    - go build ./...
-  manual: true
-  branches:
-    - main
-    - release/*
-  environment:
-    CGO_ENABLED: "0"
-  timeoutSeconds: 1200
+jobs:
+  test:
+    image: golang:1.25
+    script:
+      - go test ./...
+    branches:
+      - main
+      - release/*
+    environment:
+      CGO_ENABLED: "0"
+    timeoutSeconds: 1200
+  release:
+    image: golang:1.25
+    script:
+      - go build ./...
+    needs:
+      - test
+    branches:
+      - release/*
+    manual: true
 ```
 
-`image` and at least one non-empty `script` command are required. Commands run in order through `/bin/sh -ec` with the repository at `/workspace`. Before each command runs, GitOne writes it to the build log with a `$ ` command marker; successful commands such as `go build` may otherwise produce no output. Set `manual: true` to record each matching build in the `manual` state without making it claimable by a runner; a developer must start it from the Builds tab or API. `manual` defaults to `false`. `branches` contains path-style glob patterns and defaults to every branch. `timeoutSeconds` defaults to 900 and is capped at 3600. Repository variables cannot replace reserved `CI_*` or `GITONE_*` variables; GitOne provides `CI_COMMIT_SHA`, `CI_COMMIT_BRANCH`, `CI_PROJECT_PATH`, `GITONE_BUILD_ID`, and equivalent GitOne commit variables.
+`jobs` is a map of up to 128 named jobs. Names contain 1–100 letters, numbers, dots, underscores, or hyphens and must begin with a letter or number. The former singular `build` key is not supported. Every job requires `image` and at least one non-empty `script` command. Commands run in order through `/bin/sh -ec` with the repository at `/workspace`. Before each command runs, GitOne writes it to the job log with a `$ ` command marker; successful commands such as `go build` may otherwise produce no output.
+
+Each job has its own `needs`, `manual`, `branches`, `environment`, and `timeoutSeconds` settings. `needs` lists jobs from the same configuration that must all succeed first. Dependent automatic jobs remain `waiting`; a failed or canceled dependency fails every downstream job. Missing dependencies, duplicate dependencies, self-dependencies, and dependency cycles reject the configuration. If a needed job's branch filter does not match while its dependent does, the dependent fails with a branch-specific dependency error.
+
+Set `manual: true` to record a matching job in the `manual` state without making it claimable by a runner; a developer can start it from the Builds tab or API only after all dependencies succeed. `manual` defaults to `false`. `branches` contains path-style glob patterns and defaults to every branch. `timeoutSeconds` defaults to 900 and is capped at 3600. Repository variables cannot replace reserved `CI_*` or `GITONE_*` variables; GitOne provides `CI_JOB_NAME`, `CI_COMMIT_SHA`, `CI_COMMIT_BRANCH`, `CI_PROJECT_PATH`, `GITONE_JOB_NAME`, `GITONE_BUILD_ID`, and equivalent GitOne commit variables.
 
 The remote runner API is disabled until `GITONE_RUNNER_TOKEN` is configured on the GitOne server:
 
@@ -180,7 +195,6 @@ go build -o gitone-runner ./cmd/gitone-runner
 sudo env GITONE_RUNNER_TOKEN="$GITONE_RUNNER_TOKEN" ./gitone-runner \
   -runner-url https://gitone.example \
   -runner-id build-server-1 \
-  -runner-workers 4 \
   -runner-work-root /var/lib/gitone-runner \
   -libvirt-uri qemu:///system \
   -libvirt-pool-name default \
@@ -198,7 +212,7 @@ The important libvirt options are:
 | `-libvirt-base-image-url` | pinned Flatcar 4593.2.4 image | HTTPS source used only when the base volume is absent. |
 | `-libvirt-base-image-sha512` | pinned release digest | Required digest for downloaded and existing base images. |
 | `-libvirt-idle-count` | `4` | Number of pre-heated, ready, unassigned VMs. |
-| `-libvirt-max-instances` | `8` | Hard cap across creating, idle, and assigned VMs. |
+| `-libvirt-max-instances` | `8` | Hard cap across creating, idle, and assigned VMs; also the maximum number of concurrent jobs. |
 | `-libvirt-vcpus` | `2` | vCPUs per KVM guest. |
 | `-libvirt-memory-mib` | `4096` | Guest memory in MiB. |
 | `-libvirt-disk-size-gib` | `20` | Disposable overlay virtual size. |
@@ -281,10 +295,12 @@ service account that can write the pool and use `qemu:///system` (`sudo` in the
 example above). Its SSH identity is generated in memory for that test process.
 
 The runner makes outbound HTTP(S) requests to GitOne and SSH connections to its
-private guests; it never mounts GitOne's `/data`. `-runner-workers` controls
-concurrent builds and defaults to one. `-runner-command` selects the
-Docker-compatible command inside each guest. The old host-Docker executor is
-available only as the explicit migration option `-runner-executor docker`.
+private guests; it never mounts GitOne's `/data`. Libvirt job concurrency is
+derived from `-libvirt-max-instances`; there is no separate worker setting.
+`-runner-command` selects the Docker-compatible command inside each guest. The
+old host-Docker executor is available only as the explicit migration option
+`-runner-executor docker`, where `-docker-workers` controls concurrency and
+defaults to one.
 The web image is built from `Dockerfile`; the controller image is built from
 `Dockerfile.runner` and contains `virsh`. Guest SSH is implemented by the
 compiled Go runner, so the image does not contain an OpenSSH client.
@@ -362,11 +378,11 @@ Build reads require repository read access. Rerun and cancellation require devel
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/repositories/{repository}/builds` | List builds newest-first with manual, queued, running, succeeded, failed, or canceled status and the viewer's `canManage` capability. |
+| `GET` | `/api/repositories/{repository}/builds` | List named jobs newest-first with manual, waiting, queued, running, succeeded, failed, or canceled status and the viewer's `canManage` capability. |
 | `GET` | `/api/repositories/{repository}/builds/{id}` | Get one build and its captured log. |
 | `POST` | `/api/repositories/{repository}/builds/{id}/start` | Move a manual build into the runner queue. |
-| `POST` | `/api/repositories/{repository}/builds/{id}/rerun` | Create a new queued build for the same branch, commit, and build definition as a terminal build. |
-| `POST` | `/api/repositories/{repository}/builds/{id}/cancel` | Cancel a queued or running build. Repeated cancellation is idempotent. |
+| `POST` | `/api/repositories/{repository}/builds/{id}/rerun` | Create a new queued copy of the same named job at its original branch and commit. |
+| `POST` | `/api/repositories/{repository}/builds/{id}/cancel` | Cancel a waiting, queued, or running build. Repeated cancellation is idempotent. |
 
 ### Repository browser API
 

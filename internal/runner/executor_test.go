@@ -29,15 +29,17 @@ func TestContainerExecutorWithDocker(t *testing.T) {
 	request := ExecuteRequest{
 		Job: Job{
 			ID:         "build-test",
+			Name:       "test",
 			Repository: "engineering/api",
 			Branch:     "main",
 			Commit:     strings.Repeat("1", 40),
 		},
 		Directory: workspace,
-		Config: repoconfig.BuildConfig{
+		Config: repoconfig.JobConfig{
 			Image: "alpine:3.22",
 			Script: []string{
 				`test "$CI_PROJECT_PATH" = "engineering/api"`,
+				`test "$CI_JOB_NAME" = "test"`,
 				"cat source.txt",
 			},
 		},
@@ -100,7 +102,7 @@ func TestContainerExecutorRemovesTimedOutContainer(t *testing.T) {
 			Commit:     strings.Repeat("2", 40),
 		},
 		Directory: t.TempDir(),
-		Config: repoconfig.BuildConfig{
+		Config: repoconfig.JobConfig{
 			Image:  "alpine:3.22",
 			Script: []string{"sleep 30"},
 		},

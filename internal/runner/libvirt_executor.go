@@ -123,6 +123,10 @@ type LibvirtExecutor struct {
 	retryDelay  time.Duration
 }
 
+func (e *LibvirtExecutor) maxConcurrency() int {
+	return e.config.MaxInstances
+}
+
 // NewLibvirtExecutor validates config and constructs the production libvirt
 // provider. Hypervisor access is deferred until Start.
 func NewLibvirtExecutor(config LibvirtConfig) (*LibvirtExecutor, error) {

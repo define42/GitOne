@@ -16,7 +16,7 @@ import (
 type ExecuteRequest struct {
 	Job       Job
 	Directory string
-	Config    repoconfig.BuildConfig
+	Config    repoconfig.JobConfig
 }
 
 type Executor interface {
@@ -83,10 +83,12 @@ func (e ContainerExecutor) Run(
 	containerName := "gitone-" + request.Job.ID
 	environment := map[string]string{
 		"CI":                   "true",
+		"CI_JOB_NAME":          request.Job.Name,
 		"CI_COMMIT_BRANCH":     request.Job.Branch,
 		"CI_COMMIT_SHA":        request.Job.Commit,
 		"CI_PROJECT_PATH":      request.Job.Repository,
 		"GITONE_BUILD_ID":      request.Job.ID,
+		"GITONE_JOB_NAME":      request.Job.Name,
 		"GITONE_REPOSITORY":    request.Job.Repository,
 		"GITONE_COMMIT_SHA":    request.Job.Commit,
 		"GITONE_COMMIT_BRANCH": request.Job.Branch,

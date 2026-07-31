@@ -2826,6 +2826,10 @@ table {
   border-left-color: var(--warning-border);
 }
 
+.build-item-waiting {
+  border-left-color: var(--warning-border);
+}
+
 .build-item-queued {
   border-left-color: var(--warning-border);
 }
@@ -2916,6 +2920,11 @@ table {
 }
 
 .build-status-manual {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.build-status-waiting {
   background: var(--warning-bg);
   color: var(--warning-text);
 }

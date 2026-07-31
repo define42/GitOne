@@ -26,6 +26,7 @@ func TestRepositoryBuildEndpoints(t *testing.T) {
 	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
 	build := runner.Job{
 		ID:         "build-1",
+		Name:       "test",
 		Repository: repository.Full(),
 		Branch:     "main",
 		Commit:     commit,
@@ -57,6 +58,7 @@ func TestRepositoryBuildEndpoints(t *testing.T) {
 	if list.Body.Repository != repository.Full() ||
 		len(list.Body.Builds) != 1 ||
 		list.Body.Builds[0].ID != build.ID ||
+		list.Body.Builds[0].Name != "test" ||
 		list.Body.CanManage {
 		t.Fatalf("unexpected build list: %#v", list.Body)
 	}
@@ -117,10 +119,11 @@ func TestRepositoryBuildRerunAndCancelEndpoints(t *testing.T) {
 	buildStore := coordinator.Store()
 	service.Builds = &buildStore
 
-	original, err := coordinator.Schedule(repository, "main", commit)
-	if err != nil || original == nil {
-		t.Fatalf("scheduled build = %#v, %v", original, err)
+	originalJobs, err := coordinator.Schedule(repository, "main", commit)
+	if err != nil || len(originalJobs) != 1 {
+		t.Fatalf("scheduled builds = %#v, %v", originalJobs, err)
 	}
+	original := originalJobs[0]
 	lease, err := coordinator.Claim("runner-one")
 	if err != nil || lease == nil {
 		t.Fatalf("claimed build = %#v, %v", lease, err)
@@ -139,7 +142,7 @@ func TestRepositoryBuildRerunAndCancelEndpoints(t *testing.T) {
 		AuthInput: credentials, Repository: repository.Full(), ID: original.ID,
 	})
 	if err != nil || rerun.Body.Build.Status != runner.StatusQueued ||
-		rerun.Body.Build.RerunOf != original.ID {
+		rerun.Body.Build.RerunOf != original.ID || rerun.Body.Build.Name != original.Name {
 		t.Fatalf("rerun response = %#v, %v", rerun, err)
 	}
 	canceled, err := service.cancelRepositoryBuild(context.Background(), &repositoryBuildInput{
@@ -215,10 +218,11 @@ func TestRepositoryManualBuildStartEndpoint(t *testing.T) {
 	buildStore := coordinator.Store()
 	service.Builds = &buildStore
 
-	manual, err := coordinator.Schedule(repository, "main", commit)
-	if err != nil || manual == nil || manual.Status != runner.StatusManual {
-		t.Fatalf("manual build = %#v, %v", manual, err)
+	manualJobs, err := coordinator.Schedule(repository, "main", commit)
+	if err != nil || len(manualJobs) != 1 || manualJobs[0].Status != runner.StatusManual {
+		t.Fatalf("manual builds = %#v, %v", manualJobs, err)
 	}
+	manual := manualJobs[0]
 	if lease, claimErr := coordinator.Claim("runner-one"); claimErr != nil || lease != nil {
 		t.Fatalf("manual build was claimable: %#v, %v", lease, claimErr)
 	}
@@ -233,10 +237,11 @@ func TestRepositoryManualBuildStartEndpoint(t *testing.T) {
 	})
 	requireStatusError(t, err, http.StatusConflict)
 
-	second, err := coordinator.Schedule(repository, "main", commit)
-	if err != nil || second == nil || second.Status != runner.StatusManual {
-		t.Fatalf("second manual build = %#v, %v", second, err)
+	secondJobs, err := coordinator.Schedule(repository, "main", commit)
+	if err != nil || len(secondJobs) != 1 || secondJobs[0].Status != runner.StatusManual {
+		t.Fatalf("second manual builds = %#v, %v", secondJobs, err)
 	}
+	second := secondJobs[0]
 	mux := http.NewServeMux()
 	Register(mux, service)
 	request := httptest.NewRequest(

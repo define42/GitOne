@@ -48,7 +48,7 @@ func TestRemoteRunnerClaimsDownloadsLogsAndCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
 	var source bytes.Buffer
 	if err := WriteSourceArchive(repositoryStore, repositoryPath, commit, &source); err != nil {
@@ -68,7 +68,7 @@ func TestRemoteRunnerClaimsDownloadsLogsAndCompletes(t *testing.T) {
 	}
 	lease := Lease{
 		Job: job,
-		Config: repoconfig.BuildConfig{
+		Config: repoconfig.JobConfig{
 			Image: "alpine:3", Script: []string{"true"}, TimeoutSeconds: 30,
 		},
 		LeaseSeconds: 30,

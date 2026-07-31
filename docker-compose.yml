@@ -29,8 +29,6 @@ services:
       - http://gitone:8080
       - -runner-id
       - kvm-runner
-      - -runner-workers
-      - "1"
       - -runner-work-root
       - /var/lib/gitone-runner
       - -libvirt-idle-count

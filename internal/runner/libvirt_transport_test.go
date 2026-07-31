@@ -548,11 +548,12 @@ func TestDockerRunArgumentsMatchContainerIsolationContract(t *testing.T) {
 	request := ExecuteRequest{
 		Job: Job{
 			ID:         "build-1",
+			Name:       "test",
 			Repository: "group/project",
 			Branch:     "main",
 			Commit:     "0123456789abcdef",
 		},
-		Config: repoconfig.BuildConfig{
+		Config: repoconfig.JobConfig{
 			Image:  "alpine:3.22",
 			Script: []string{"printf '%s\\n' ready", "make test"},
 			Environment: map[string]string{
@@ -579,7 +580,9 @@ func TestDockerRunArgumentsMatchContainerIsolationContract(t *testing.T) {
 	}
 	if !sortStringsAreOrdered(environment) ||
 		!containsString(environment, "A_VALUE=first") || !containsString(environment, "Z_VALUE=last") ||
-		!containsString(environment, "CI_PROJECT_PATH=group/project") {
+		!containsString(environment, "CI_PROJECT_PATH=group/project") ||
+		!containsString(environment, "CI_JOB_NAME=test") ||
+		!containsString(environment, "GITONE_JOB_NAME=test") {
 		t.Fatalf("Docker environment = %#v", environment)
 	}
 	wantSuffix := []string{

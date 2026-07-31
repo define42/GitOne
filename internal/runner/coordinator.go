@@ -22,21 +22,22 @@ const (
 )
 
 var (
-	ErrBuildNotFound      = errors.New("build not found")
-	ErrBuildNotStartable  = errors.New("build is not waiting for manual start")
-	ErrBuildNotRerunnable = errors.New("only a completed build can be rerun")
-	ErrBuildNotCancelable = errors.New("completed build cannot be canceled")
+	ErrBuildNotFound          = errors.New("build not found")
+	ErrBuildNotStartable      = errors.New("build is not waiting for manual start")
+	ErrBuildNotRerunnable     = errors.New("only a completed build can be rerun")
+	ErrBuildNotCancelable     = errors.New("completed build cannot be canceled")
+	ErrBuildDependenciesUnmet = errors.New("build dependencies have not succeeded")
 )
 
 type Scheduler interface {
-	Schedule(repopath.Repository, string, plumbing.Hash) (*Job, error)
+	Schedule(repopath.Repository, string, plumbing.Hash) ([]Job, error)
 }
 
 // LockedScheduler lets callers that already hold the repository operations
 // lock schedule a build without recursively acquiring that resource lock.
 type LockedScheduler interface {
 	Scheduler
-	ScheduleLocked(repopath.Repository, string, plumbing.Hash) (*Job, error)
+	ScheduleLocked(repopath.Repository, string, plumbing.Hash) ([]Job, error)
 }
 
 type CoordinatorConfig struct {
@@ -52,10 +53,10 @@ type Coordinator struct {
 }
 
 type Lease struct {
-	Job          Job                    `json:"job"`
-	Config       repoconfig.BuildConfig `json:"config"`
-	LogOffset    int64                  `json:"logOffset"`
-	LeaseSeconds int                    `json:"leaseSeconds"`
+	Job          Job                  `json:"job"`
+	Config       repoconfig.JobConfig `json:"config"`
+	LogOffset    int64                `json:"logOffset"`
+	LeaseSeconds int                  `json:"leaseSeconds"`
 }
 
 type HeartbeatResult struct {
@@ -87,12 +88,12 @@ func (c *Coordinator) Store() Store {
 	return c.state
 }
 
-// Schedule persists a queued build for a remote runner to claim.
+// Schedule persists every matching named job for remote runners to claim.
 func (c *Coordinator) Schedule(
 	repositoryPath repopath.Repository,
 	branch string,
 	commit plumbing.Hash,
-) (*Job, error) {
+) ([]Job, error) {
 	releaseOperation, err := acquireBuildOperationLock(c.storage.Root, repositoryPath)
 	if err != nil {
 		return nil, err
@@ -103,48 +104,49 @@ func (c *Coordinator) Schedule(
 	return c.ScheduleLocked(repositoryPath, branch, commit)
 }
 
-// ScheduleLocked persists a queued build while its caller holds the repository
-// operations lock.
+// ScheduleLocked persists matching named jobs while its caller holds the
+// repository operations lock.
 func (c *Coordinator) ScheduleLocked(
 	repositoryPath repopath.Repository,
 	branch string,
 	commit plumbing.Hash,
-) (*Job, error) {
+) ([]Job, error) {
 	repository, err := openRepositoryForBuild(c.storage, repositoryPath)
 	if err != nil {
 		return nil, err
 	}
 	repositoryConfig, found, err := repoconfig.Read(repository, commit)
 	if err != nil {
-		return failedConfigurationJob(c.state, repositoryPath, branch, commit, err)
+		return failedConfigurationJobs(c.state, repositoryPath, branch, commit, err)
 	}
-	if !found || repositoryConfig.Build == nil {
-		return nil, nil
+	if !found || len(repositoryConfig.Jobs) == 0 {
+		return []Job{}, nil
 	}
-	build := *repositoryConfig.Build
-	if err = build.Validate(); err != nil {
-		return failedConfigurationJob(c.state, repositoryPath, branch, commit, err)
+	if err = repositoryConfig.Validate(); err != nil {
+		return failedConfigurationJobs(c.state, repositoryPath, branch, commit, err)
 	}
-	if !build.MatchesBranch(branch) {
-		return nil, nil
+	jobs := configuredJobs(
+		repositoryPath,
+		branch,
+		commit.String(),
+		repositoryConfig,
+		time.Now().UTC(),
+	)
+	for _, job := range jobs {
+		if err = c.state.save(repositoryPath, job); err != nil {
+			return nil, err
+		}
 	}
-	status := StatusQueued
-	if build.Manual {
-		status = StatusManual
-	}
-	job := Job{
-		ID:         newJobID(),
-		Repository: repositoryPath.Full(),
-		Branch:     branch,
-		Commit:     commit.String(),
-		Image:      build.Image,
-		Status:     status,
-		CreatedAt:  time.Now().UTC(),
-	}
-	if err = c.state.save(repositoryPath, job); err != nil {
+	if err = c.reconcileDependencies(repositoryPath); err != nil {
 		return nil, err
 	}
-	return &job, nil
+	for index := range jobs {
+		stored, getErr := c.state.Get(repositoryPath, jobs[index].ID)
+		if getErr == nil {
+			jobs[index] = stored
+		}
+	}
+	return jobs, nil
 }
 
 // Start moves a manually gated build into the runner queue.
@@ -173,15 +175,29 @@ func (c *Coordinator) Start(
 	if job.Status != StatusManual {
 		return Job{}, ErrBuildNotStartable
 	}
-	build, err := c.buildConfig(repositoryPath, job)
+	build, err := c.jobConfig(repositoryPath, job)
 	if err != nil {
 		return Job{}, fmt.Errorf("prepare manual build: %w", err)
 	}
 	if !build.Manual {
 		return Job{}, errors.New("build configuration is not manual")
 	}
+	jobs, err := c.state.List(repositoryPath)
+	if err != nil {
+		return Job{}, err
+	}
+	ready, dependencyErr := jobDependenciesReady(job, jobs)
+	if dependencyErr != nil {
+		return Job{}, fmt.Errorf("%w: %w", ErrBuildDependenciesUnmet, dependencyErr)
+	}
+	if !ready {
+		return Job{}, ErrBuildDependenciesUnmet
+	}
 	job.Status = StatusQueued
 	if err = c.state.save(repositoryPath, job); err != nil {
+		return Job{}, err
+	}
+	if err = c.reconcileDependencies(repositoryPath); err != nil {
 		return Job{}, err
 	}
 	return job, nil
@@ -214,16 +230,26 @@ func (c *Coordinator) Rerun(
 	if !terminalStatus(original.Status) {
 		return Job{}, ErrBuildNotRerunnable
 	}
-	build, err := c.buildConfig(repositoryPath, original)
+	build, err := c.jobConfig(repositoryPath, original)
 	if err != nil {
 		return Job{}, fmt.Errorf("prepare build rerun: %w", err)
 	}
+	jobs, err := c.state.List(repositoryPath)
+	if err != nil {
+		return Job{}, err
+	}
+	dependencies, dependencyErr := successfulDependencies(build.Needs, original, jobs)
+	if dependencyErr != nil {
+		return Job{}, fmt.Errorf("%w: %w", ErrBuildDependenciesUnmet, dependencyErr)
+	}
 	job := Job{
 		ID:         newJobID(),
+		Name:       original.Name,
 		Repository: repositoryPath.Full(),
 		Branch:     original.Branch,
 		Commit:     original.Commit,
 		Image:      build.Image,
+		Needs:      dependencies,
 		Status:     StatusQueued,
 		CreatedAt:  time.Now().UTC(),
 		RerunOf:    original.ID,
@@ -234,8 +260,8 @@ func (c *Coordinator) Rerun(
 	return job, nil
 }
 
-// Cancel moves a queued or running build to a terminal canceled state. A
-// running remote executor observes the cancellation on its next heartbeat.
+// Cancel moves a waiting, queued, or running build to a terminal canceled
+// state. A running remote executor observes cancellation on its next heartbeat.
 func (c *Coordinator) Cancel(
 	repositoryPath repopath.Repository,
 	id string,
@@ -261,7 +287,8 @@ func (c *Coordinator) Cancel(
 	if job.Status == StatusCanceled {
 		return job, nil
 	}
-	if job.Status != StatusQueued && job.Status != StatusRunning {
+	if job.Status != StatusWaiting && job.Status != StatusQueued &&
+		job.Status != StatusRunning {
 		return Job{}, ErrBuildNotCancelable
 	}
 	finished := time.Now().UTC()
@@ -270,6 +297,9 @@ func (c *Coordinator) Cancel(
 	job.LeaseExpiresAt = nil
 	job.Error = ""
 	if err = c.state.save(repositoryPath, job); err != nil {
+		return Job{}, err
+	}
+	if err = c.reconcileDependencies(repositoryPath); err != nil {
 		return Job{}, err
 	}
 	return job, nil
@@ -294,7 +324,7 @@ func (c *Coordinator) Claim(runnerID string) (*Lease, error) {
 		return nil, err
 	}
 	for _, candidate := range candidates {
-		config, configErr := c.buildConfig(candidate.repository, candidate.job)
+		config, configErr := c.jobConfig(candidate.repository, candidate.job)
 		if configErr != nil {
 			finished := time.Now().UTC()
 			candidate.job.Status = StatusFailed
@@ -303,6 +333,9 @@ func (c *Coordinator) Claim(runnerID string) (*Lease, error) {
 			candidate.job.LeaseExpiresAt = nil
 			if saveErr := c.state.save(candidate.repository, candidate.job); saveErr != nil {
 				return nil, errors.Join(configErr, saveErr)
+			}
+			if reconcileErr := c.reconcileDependencies(candidate.repository); reconcileErr != nil {
+				return nil, reconcileErr
 			}
 			continue
 		}
@@ -457,6 +490,9 @@ func (c *Coordinator) Complete(
 	if err = c.state.save(repository, job); err != nil {
 		return Job{}, err
 	}
+	if err = c.reconcileDependencies(repository); err != nil {
+		return Job{}, err
+	}
 	return job, nil
 }
 
@@ -501,6 +537,12 @@ func (c *Coordinator) candidates(now time.Time) ([]jobCandidate, error) {
 			if listErr != nil {
 				return nil, listErr
 			}
+			updates, _ := reconcileJobDependencies(jobs, now)
+			for _, update := range updates {
+				if saveErr := c.state.save(repository, update); saveErr != nil {
+					return nil, saveErr
+				}
+			}
 			for _, job := range jobs {
 				if job.Status == StatusQueued ||
 					(job.Status == StatusRunning &&
@@ -514,34 +556,60 @@ func (c *Coordinator) candidates(now time.Time) ([]jobCandidate, error) {
 		}
 	}
 	sort.Slice(candidates, func(left, right int) bool {
+		if candidates[left].job.CreatedAt.Equal(candidates[right].job.CreatedAt) {
+			leftRepository := candidates[left].repository.Full()
+			rightRepository := candidates[right].repository.Full()
+			if leftRepository == rightRepository {
+				return candidates[left].job.Name < candidates[right].job.Name
+			}
+			return leftRepository < rightRepository
+		}
 		return candidates[left].job.CreatedAt.Before(candidates[right].job.CreatedAt)
 	})
 	return candidates, nil
 }
 
-func (c *Coordinator) buildConfig(
+func (c *Coordinator) reconcileDependencies(repository repopath.Repository) error {
+	jobs, err := c.state.List(repository)
+	if err != nil {
+		return err
+	}
+	updates, _ := reconcileJobDependencies(jobs, time.Now().UTC())
+	for _, update := range updates {
+		if err = c.state.save(repository, update); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Coordinator) jobConfig(
 	repositoryPath repopath.Repository,
 	job Job,
-) (repoconfig.BuildConfig, error) {
+) (repoconfig.JobConfig, error) {
 	gitPath, err := c.storage.GitPath(repositoryPath)
 	if err != nil {
-		return repoconfig.BuildConfig{}, err
+		return repoconfig.JobConfig{}, err
 	}
 	repository, err := git.PlainOpen(gitPath)
 	if err != nil {
-		return repoconfig.BuildConfig{}, err
+		return repoconfig.JobConfig{}, err
 	}
 	config, found, err := repoconfig.Read(repository, plumbing.NewHash(job.Commit))
 	if err != nil {
-		return repoconfig.BuildConfig{}, err
+		return repoconfig.JobConfig{}, err
 	}
-	if !found || config.Build == nil {
-		return repoconfig.BuildConfig{}, errors.New("build configuration is missing")
+	if !found {
+		return repoconfig.JobConfig{}, errors.New("job configuration is missing")
 	}
-	if err = config.Build.Validate(); err != nil {
-		return repoconfig.BuildConfig{}, err
+	if err = config.Validate(); err != nil {
+		return repoconfig.JobConfig{}, err
 	}
-	return *config.Build, nil
+	build, found := config.Jobs[job.Name]
+	if !found {
+		return repoconfig.JobConfig{}, fmt.Errorf("job %q is missing", job.Name)
+	}
+	return build, nil
 }
 
 func (c *Coordinator) ownedRunningJob(
@@ -606,13 +674,14 @@ func failedConfigurationJob(
 	finished := time.Now().UTC()
 	job := Job{
 		ID:         newJobID(),
+		Name:       "configuration",
 		Repository: repository.Full(),
 		Branch:     branch,
 		Commit:     commit.String(),
 		Status:     StatusFailed,
 		CreatedAt:  finished,
 		FinishedAt: &finished,
-		Error:      "invalid " + repoconfig.FileName + " build: " + configurationErr.Error(),
+		Error:      "invalid " + repoconfig.FileName + " jobs: " + configurationErr.Error(),
 	}
 	if err := state.save(repository, job); err != nil {
 		return nil, errors.Join(configurationErr, err)
@@ -623,4 +692,18 @@ func failedConfigurationJob(
 		_ = logFile.Close()
 	}
 	return &job, nil
+}
+
+func failedConfigurationJobs(
+	state Store,
+	repository repopath.Repository,
+	branch string,
+	commit plumbing.Hash,
+	configurationErr error,
+) ([]Job, error) {
+	job, err := failedConfigurationJob(state, repository, branch, commit, configurationErr)
+	if job == nil {
+		return nil, err
+	}
+	return []Job{*job}, err
 }

@@ -56,12 +56,12 @@ func TestRunnerSchedulesExactCommitAndPersistsResult(t *testing.T) {
 	}
 	commit := commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
 		Description: "API",
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"test": {
 			Image:          "golang:1.25",
 			Script:         []string{"go test ./..."},
 			Branches:       []string{"main"},
 			TimeoutSeconds: 10,
-		},
+		}},
 	})
 
 	executor := &recordingExecutor{}
@@ -75,20 +75,22 @@ func TestRunnerSchedulesExactCommitAndPersistsResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer buildRunner.Close()
-	job, err := buildRunner.Schedule(repositoryPath, "main", commit)
+	jobs, err := buildRunner.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job == nil || job.Status != StatusQueued {
-		t.Fatalf("unexpected scheduled job: %#v", job)
+	if len(jobs) != 1 || jobs[0].Status != StatusQueued || jobs[0].Name != "test" {
+		t.Fatalf("unexpected scheduled jobs: %#v", jobs)
 	}
+	job := jobs[0]
 
 	waitForJob(t, buildRunner.Store(), repositoryPath, job.ID, StatusSucceeded)
 	log, err := buildRunner.Store().Log(repositoryPath, job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(log, "source at scheduled commit") {
+	if !strings.Contains(log, "job: test") ||
+		!strings.Contains(log, "source at scheduled commit") {
 		t.Fatalf("unexpected build log: %q", log)
 	}
 	executor.mu.Lock()
@@ -97,6 +99,96 @@ func TestRunnerSchedulesExactCommitAndPersistsResult(t *testing.T) {
 		executor.requests[0].Job.Commit != commit.String() ||
 		executor.requests[0].Config.Image != "golang:1.25" {
 		t.Fatalf("unexpected executor requests: %#v", executor.requests)
+	}
+}
+
+func TestRunnerSchedulesMultipleNamedJobsIndependently(t *testing.T) {
+	root := t.TempDir()
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true, Author: "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commit := commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
+		Jobs: map[string]repoconfig.JobConfig{
+			"deploy": {Image: "alpine:3", Script: []string{"true"}, Manual: true},
+			"lint":   {Image: "alpine:3", Script: []string{"true"}},
+			"test":   {Image: "alpine:3", Script: []string{"true"}},
+		},
+	})
+	executor := &recordingExecutor{}
+	buildRunner, err := New(Config{
+		Storage: store, State: NewStore(root), Executor: executor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buildRunner.Close()
+	jobs, err := buildRunner.Schedule(repositoryPath, "main", commit)
+	if err != nil || len(jobs) != 3 || jobs[0].Name != "deploy" ||
+		jobs[1].Name != "lint" || jobs[2].Name != "test" {
+		t.Fatalf("scheduled jobs = %#v, %v", jobs, err)
+	}
+	if jobs[0].Status != StatusManual {
+		t.Fatalf("manual job = %#v", jobs[0])
+	}
+	waitForJob(t, buildRunner.Store(), repositoryPath, jobs[1].ID, StatusSucceeded)
+	waitForJob(t, buildRunner.Store(), repositoryPath, jobs[2].ID, StatusSucceeded)
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.requests) != 2 || executor.requests[0].Job.Name != "lint" ||
+		executor.requests[1].Job.Name != "test" {
+		t.Fatalf("executor requests = %#v", executor.requests)
+	}
+}
+
+func TestRunnerExecutesJobDependenciesInOrder(t *testing.T) {
+	root := t.TempDir()
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true, Author: "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commit := commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
+		Jobs: map[string]repoconfig.JobConfig{
+			"test":  {Image: "alpine:3", Script: []string{"true"}},
+			"build": {Image: "alpine:3", Script: []string{"true"}, Needs: []string{"test"}},
+		},
+	})
+	executor := &recordingExecutor{}
+	buildRunner, err := New(Config{
+		Storage: store, State: NewStore(root), Executor: executor, Workers: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buildRunner.Close()
+	jobs, err := buildRunner.Schedule(repositoryPath, "main", commit)
+	if err != nil || len(jobs) != 2 || jobs[0].Name != "build" ||
+		jobs[0].Status != StatusWaiting || jobs[1].Name != "test" ||
+		jobs[1].Status != StatusQueued {
+		t.Fatalf("scheduled dependency jobs = %#v, %v", jobs, err)
+	}
+	waitForJob(t, buildRunner.Store(), repositoryPath, jobs[0].ID, StatusSucceeded)
+	log, err := buildRunner.Store().Log(repositoryPath, jobs[0].ID)
+	if err != nil || !strings.Contains(log, "needs: test") {
+		t.Fatalf("dependent build log = %q, %v", log, err)
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.requests) != 2 || executor.requests[0].Job.Name != "test" ||
+		executor.requests[1].Job.Name != "build" {
+		t.Fatalf("dependency execution order = %#v", executor.requests)
 	}
 }
 
@@ -114,9 +206,9 @@ func TestRunnerDoesNotAutomaticallyExecuteManualBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	commit := commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"test": {
 			Image: "alpine:3", Script: []string{"true"}, Manual: true,
-		},
+		}},
 	})
 	executor := &recordingExecutor{}
 	buildRunner, err := New(Config{
@@ -126,10 +218,11 @@ func TestRunnerDoesNotAutomaticallyExecuteManualBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer buildRunner.Close()
-	job, err := buildRunner.Schedule(repositoryPath, "main", commit)
-	if err != nil || job == nil || job.Status != StatusManual {
-		t.Fatalf("manual build = %#v, %v", job, err)
+	jobs, err := buildRunner.Schedule(repositoryPath, "main", commit)
+	if err != nil || len(jobs) != 1 || jobs[0].Status != StatusManual {
+		t.Fatalf("manual builds = %#v, %v", jobs, err)
 	}
+	job := jobs[0]
 	time.Sleep(50 * time.Millisecond)
 	executor.mu.Lock()
 	requestCount := len(executor.requests)
@@ -177,17 +270,17 @@ func TestRunnerSkipsUnconfiguredAndFilteredBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer buildRunner.Close()
-	if job, scheduleErr := buildRunner.Schedule(repositoryPath, "main", head.Hash()); scheduleErr != nil || job != nil {
-		t.Fatalf("unconfigured job = %#v, %v", job, scheduleErr)
+	if jobs, scheduleErr := buildRunner.Schedule(repositoryPath, "main", head.Hash()); scheduleErr != nil || len(jobs) != 0 {
+		t.Fatalf("unconfigured jobs = %#v, %v", jobs, scheduleErr)
 	}
 
 	commit := commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"test": {
 			Image: "alpine:3", Script: []string{"true"}, Branches: []string{"release/*"},
-		},
+		}},
 	})
-	if job, scheduleErr := buildRunner.Schedule(repositoryPath, "feature/docs", commit); scheduleErr != nil || job != nil {
-		t.Fatalf("filtered job = %#v, %v", job, scheduleErr)
+	if jobs, scheduleErr := buildRunner.Schedule(repositoryPath, "feature/docs", commit); scheduleErr != nil || len(jobs) != 0 {
+		t.Fatalf("filtered jobs = %#v, %v", jobs, scheduleErr)
 	}
 }
 
@@ -205,7 +298,7 @@ func TestRunnerRecordsInvalidBuildConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	commit := commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3"},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3"}},
 	})
 	buildRunner, err := New(Config{
 		Storage:  store,
@@ -216,12 +309,13 @@ func TestRunnerRecordsInvalidBuildConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer buildRunner.Close()
-	job, err := buildRunner.Schedule(repositoryPath, "main", commit)
+	jobs, err := buildRunner.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job == nil || job.Status != StatusFailed || !strings.Contains(job.Error, "script") {
-		t.Fatalf("unexpected invalid-configuration job: %#v", job)
+	if len(jobs) != 1 || jobs[0].Status != StatusFailed ||
+		!strings.Contains(jobs[0].Error, "script") {
+		t.Fatalf("unexpected invalid-configuration jobs: %#v", jobs)
 	}
 }
 
@@ -284,9 +378,9 @@ func TestCoordinatorLeasesAndCompletesDurableBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"test": {
 			Image: "golang:1.25", Script: []string{"go test ./..."}, Branches: []string{"main"},
-		},
+		}},
 	})
 	state := NewStore(root)
 	coordinator, err := NewCoordinator(CoordinatorConfig{
@@ -295,13 +389,14 @@ func TestCoordinatorLeasesAndCompletesDurableBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job == nil || job.Status != StatusQueued {
-		t.Fatalf("scheduled job = %#v", job)
+	if len(jobs) != 1 || jobs[0].Status != StatusQueued {
+		t.Fatalf("scheduled jobs = %#v", jobs)
 	}
+	job := jobs[0]
 
 	lease, err := coordinator.Claim("runner-one")
 	if err != nil {
@@ -375,7 +470,7 @@ func TestCoordinatorReclaimsExpiredLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
 	state := NewStore(root)
 	coordinator, err := NewCoordinator(CoordinatorConfig{
@@ -384,10 +479,11 @@ func TestCoordinatorReclaimsExpiredLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
+	job := jobs[0]
 	first, err := coordinator.Claim("runner-one")
 	if err != nil {
 		t.Fatal(err)
@@ -421,7 +517,7 @@ func TestSourceArchiveRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
 	var archive bytes.Buffer
 	if err := WriteSourceArchive(repositoryStore, repositoryPath, commit, &archive); err != nil {

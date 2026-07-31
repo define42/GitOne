@@ -23,9 +23,16 @@ const (
 	defaultExecutorCleanupTimeout = 30 * time.Second
 	maximumExecutorCleanupTimeout = time.Hour
 	maximumCompletionErrorBytes   = 4096
+	maximumRemoteWorkers          = 32
 )
 
 var errRemoteBuildCanceled = errors.New("build canceled by server")
+
+// executorConcurrency lets an executor with its own capacity limit replace
+// the generic worker setting.
+type executorConcurrency interface {
+	maxConcurrency() int
+}
 
 type RemoteConfig struct {
 	URL          string
@@ -60,11 +67,19 @@ func NewRemote(config RemoteConfig) (*Remote, error) {
 	if config.WorkRoot == "" {
 		return nil, errors.New("runner work root is required")
 	}
+	if config.Executor == nil {
+		return nil, errors.New("remote build executor is required")
+	}
+	workerLimit := maximumRemoteWorkers
+	if capacity, ok := config.Executor.(executorConcurrency); ok {
+		config.Workers = capacity.maxConcurrency()
+		workerLimit = maximumLibvirtInstances
+	}
 	if config.Workers == 0 {
 		config.Workers = 1
 	}
-	if config.Workers < 1 || config.Workers > 32 {
-		return nil, errors.New("runner workers must be between 1 and 32")
+	if config.Workers < 1 || config.Workers > workerLimit {
+		return nil, fmt.Errorf("runner workers must be between 1 and %d", workerLimit)
 	}
 	config.ID = strings.TrimSpace(config.ID)
 	if !validRunnerID(config.ID) {
@@ -88,9 +103,6 @@ func NewRemote(config RemoteConfig) (*Remote, error) {
 	}
 	if config.HTTPClient == nil {
 		config.HTTPClient = &http.Client{Timeout: 2 * time.Minute}
-	}
-	if config.Executor == nil {
-		return nil, errors.New("remote build executor is required")
 	}
 	if err = os.MkdirAll(config.WorkRoot, 0o750); err != nil {
 		return nil, err
@@ -297,8 +309,10 @@ func (r *Remote) runLease(
 	}
 	_, err = fmt.Fprintf(
 		logWriter,
-		"GitOne remote build %s\nrunner: %s\nrepository: %s\nbranch: %s\ncommit: %s\nimage: %s\n\n",
+		"GitOne remote build %s\njob: %s\nneeds: %s\nrunner: %s\nrepository: %s\nbranch: %s\ncommit: %s\nimage: %s\n\n",
 		lease.Job.ID,
+		lease.Job.Name,
+		dependencyNames(lease.Job),
 		runnerID,
 		lease.Job.Repository,
 		lease.Job.Branch,

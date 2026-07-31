@@ -73,40 +73,40 @@ func TestCoordinatorScheduleOutcomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job, scheduleErr := coordinator.Schedule(
+	if jobs, scheduleErr := coordinator.Schedule(
 		repositoryPath,
 		"main",
 		head.Hash(),
-	); scheduleErr != nil || job != nil {
-		t.Fatalf("unconfigured schedule = %#v, %v", job, scheduleErr)
+	); scheduleErr != nil || len(jobs) != 0 {
+		t.Fatalf("unconfigured schedule = %#v, %v", jobs, scheduleErr)
 	}
 
 	filteredCommit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"test": {
 			Image: "alpine:3", Script: []string{"true"}, Branches: []string{"release/*"},
-		},
+		}},
 	})
-	if job, scheduleErr := coordinator.Schedule(
+	if jobs, scheduleErr := coordinator.Schedule(
 		repositoryPath,
 		"feature/docs",
 		filteredCommit,
-	); scheduleErr != nil || job != nil {
-		t.Fatalf("filtered schedule = %#v, %v", job, scheduleErr)
+	); scheduleErr != nil || len(jobs) != 0 {
+		t.Fatalf("filtered schedule = %#v, %v", jobs, scheduleErr)
 	}
 
 	invalidCommit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3"},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3"}},
 	})
 	failed, err := coordinator.Schedule(repositoryPath, "main", invalidCommit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failed == nil || failed.Status != StatusFailed ||
-		!strings.Contains(failed.Error, "script") {
+	if len(failed) != 1 || failed[0].Status != StatusFailed ||
+		!strings.Contains(failed[0].Error, "script") {
 		t.Fatalf("invalid configuration build = %#v", failed)
 	}
-	configurationLog, err := coordinator.Store().Log(repositoryPath, failed.ID)
-	if err != nil || !strings.Contains(configurationLog, failed.Error) {
+	configurationLog, err := coordinator.Store().Log(repositoryPath, failed[0].ID)
+	if err != nil || !strings.Contains(configurationLog, failed[0].Error) {
 		t.Fatalf("configuration log = %q, %v", configurationLog, err)
 	}
 
@@ -114,7 +114,7 @@ func TestCoordinatorScheduleOutcomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if badCommit == nil || badCommit.Status != StatusFailed {
+	if len(badCommit) != 1 || badCommit[0].Status != StatusFailed {
 		t.Fatalf("unknown commit build = %#v", badCommit)
 	}
 
@@ -145,7 +145,7 @@ func TestCoordinatorScheduleOutcomes(t *testing.T) {
 		t.Fatal(err)
 	}
 	validCommit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
 	if _, err = brokenState.Schedule(repositoryPath, "main", validCommit); err == nil {
 		t.Fatal("build state write failure was ignored")
@@ -156,10 +156,190 @@ func TestCoordinatorScheduleOutcomes(t *testing.T) {
 	}
 }
 
+func TestCoordinatorSchedulesAndClaimsMultipleNamedJobs(t *testing.T) {
+	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Jobs: map[string]repoconfig.JobConfig{
+			"deploy": {
+				Image: "alpine:3", Script: []string{"deploy"}, Manual: true,
+			},
+			"lint": {
+				Image: "golang:1.25", Script: []string{"go vet ./..."},
+			},
+			"release": {
+				Image: "alpine:3", Script: []string{"release"}, Branches: []string{"release/*"},
+			},
+		},
+	})
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 || jobs[0].Name != "deploy" || jobs[0].Status != StatusManual ||
+		jobs[1].Name != "lint" || jobs[1].Status != StatusQueued {
+		t.Fatalf("scheduled jobs = %#v", jobs)
+	}
+	lease, err := coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.Name != "lint" ||
+		lease.Config.Script[0] != "go vet ./..." {
+		t.Fatalf("automatic job lease = %#v, %v", lease, err)
+	}
+	if _, err = coordinator.Complete(repositoryPath, lease.Job.ID, "runner-one", ""); err != nil {
+		t.Fatal(err)
+	}
+	if lease, err = coordinator.Claim("runner-one"); err != nil || lease != nil {
+		t.Fatalf("manual job was claimed automatically: %#v, %v", lease, err)
+	}
+	if _, err = coordinator.Start(repositoryPath, jobs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	lease, err = coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.Name != "deploy" ||
+		lease.Config.Script[0] != "deploy" {
+		t.Fatalf("manual job lease = %#v, %v", lease, err)
+	}
+}
+
+func TestCoordinatorRunsJobDependenciesInOrder(t *testing.T) {
+	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Jobs: map[string]repoconfig.JobConfig{
+			"test": {
+				Image: "alpine:3", Script: []string{"test"},
+			},
+			"build": {
+				Image: "alpine:3", Script: []string{"build"}, Needs: []string{"test"},
+			},
+			"deploy": {
+				Image: "alpine:3", Script: []string{"deploy"}, Needs: []string{"build"}, Manual: true,
+			},
+		},
+	})
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil || len(jobs) != 3 {
+		t.Fatalf("scheduled dependency jobs = %#v, %v", jobs, err)
+	}
+	byName := make(map[string]Job, len(jobs))
+	for _, job := range jobs {
+		byName[job.Name] = job
+	}
+	if byName["test"].Status != StatusQueued ||
+		byName["build"].Status != StatusWaiting ||
+		byName["deploy"].Status != StatusManual ||
+		len(byName["build"].Needs) != 1 ||
+		byName["build"].Needs[0].ID != byName["test"].ID ||
+		len(byName["deploy"].Needs) != 1 ||
+		byName["deploy"].Needs[0].ID != byName["build"].ID {
+		t.Fatalf("dependency jobs = %#v", byName)
+	}
+	if _, err = coordinator.Start(repositoryPath, byName["deploy"].ID); !errors.Is(
+		err,
+		ErrBuildDependenciesUnmet,
+	) {
+		t.Fatalf("early manual start error = %v", err)
+	}
+	lease, err := coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.Name != "test" {
+		t.Fatalf("first dependency lease = %#v, %v", lease, err)
+	}
+	if _, err = coordinator.Complete(repositoryPath, lease.Job.ID, "runner-one", ""); err != nil {
+		t.Fatal(err)
+	}
+	lease, err = coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.Name != "build" {
+		t.Fatalf("second dependency lease = %#v, %v", lease, err)
+	}
+	if _, err = coordinator.Complete(repositoryPath, lease.Job.ID, "runner-one", ""); err != nil {
+		t.Fatal(err)
+	}
+	started, err := coordinator.Start(repositoryPath, byName["deploy"].ID)
+	if err != nil || started.Status != StatusQueued {
+		t.Fatalf("manual dependent start = %#v, %v", started, err)
+	}
+	lease, err = coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.Name != "deploy" {
+		t.Fatalf("manual dependency lease = %#v, %v", lease, err)
+	}
+}
+
+func TestCoordinatorFailsJobsWhoseDependenciesDoNotSucceed(t *testing.T) {
+	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Jobs: map[string]repoconfig.JobConfig{
+			"test":  {Image: "alpine:3", Script: []string{"test"}},
+			"build": {Image: "alpine:3", Script: []string{"build"}, Needs: []string{"test"}},
+			"deploy": {
+				Image: "alpine:3", Script: []string{"deploy"}, Needs: []string{"build"},
+			},
+		},
+	})
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil || len(jobs) != 3 {
+		t.Fatalf("scheduled dependency jobs = %#v, %v", jobs, err)
+	}
+	byName := make(map[string]Job, len(jobs))
+	for _, job := range jobs {
+		byName[job.Name] = job
+	}
+	if _, err = coordinator.Cancel(repositoryPath, byName["test"].ID); err != nil {
+		t.Fatal(err)
+	}
+	if lease, claimErr := coordinator.Claim("runner-one"); claimErr != nil || lease != nil {
+		t.Fatalf("failed dependencies became claimable: %#v, %v", lease, claimErr)
+	}
+	for _, name := range []string{"build", "deploy"} {
+		stored, getErr := coordinator.Store().Get(repositoryPath, byName[name].ID)
+		if getErr != nil || stored.Status != StatusFailed || stored.FinishedAt == nil ||
+			!strings.Contains(stored.Error, "dependency") {
+			t.Fatalf("failed dependent %s = %#v, %v", name, stored, getErr)
+		}
+	}
+	rerunTest, err := coordinator.Rerun(repositoryPath, byName["test"].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.ID != rerunTest.ID {
+		t.Fatalf("rerun dependency lease = %#v, %v", lease, err)
+	}
+	if _, err = coordinator.Complete(repositoryPath, lease.Job.ID, "runner-one", ""); err != nil {
+		t.Fatal(err)
+	}
+	rerunBuild, err := coordinator.Rerun(repositoryPath, byName["build"].ID)
+	if err != nil || len(rerunBuild.Needs) != 1 || rerunBuild.Needs[0].ID != rerunTest.ID {
+		t.Fatalf("rerun dependent = %#v, %v", rerunBuild, err)
+	}
+	lease, err = coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.ID != rerunBuild.ID {
+		t.Fatalf("rerun dependent lease = %#v, %v", lease, err)
+	}
+}
+
+func TestCoordinatorFailsDependencyExcludedByBranchFilter(t *testing.T) {
+	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Jobs: map[string]repoconfig.JobConfig{
+			"test": {
+				Image: "alpine:3", Script: []string{"test"}, Branches: []string{"main"},
+			},
+			"release": {
+				Image: "alpine:3", Script: []string{"release"},
+				Branches: []string{"release/*"}, Needs: []string{"test"},
+			},
+		},
+	})
+	jobs, err := coordinator.Schedule(repositoryPath, "release/1.0", commit)
+	if err != nil || len(jobs) != 1 || jobs[0].Name != "release" ||
+		jobs[0].Status != StatusFailed ||
+		!strings.Contains(jobs[0].Error, `dependency "test" does not run`) {
+		t.Fatalf("branch-filtered dependency jobs = %#v, %v", jobs, err)
+	}
+}
+
 func TestCoordinatorScheduleOperationLockVariants(t *testing.T) {
 	root, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
 
 	release, err := review.NewStore(root).AcquireOperationLock()
@@ -215,12 +395,13 @@ func TestCoordinatorScheduleOperationLockVariants(t *testing.T) {
 func TestCoordinatorBuildMutationWaitsAndRevalidatesRepository(t *testing.T) {
 	root, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
-	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
+	job := jobs[0]
 	lease, err := coordinator.Claim("runner-one")
 	if err != nil {
 		t.Fatal(err)
@@ -304,12 +485,13 @@ func TestCoordinatorBuildMutationWaitsAndRevalidatesRepository(t *testing.T) {
 func TestCoordinatorOwnershipHeartbeatSourceAndFailureCompletion(t *testing.T) {
 	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"false"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"false"}}},
 	})
-	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
+	job := jobs[0]
 	if _, err = coordinator.Claim("invalid runner"); err == nil {
 		t.Fatal("invalid runner claimed a job")
 	}
@@ -365,7 +547,7 @@ func TestCoordinatorOwnershipHeartbeatSourceAndFailureCompletion(t *testing.T) {
 		})
 	}
 
-	second, err := coordinator.Schedule(repositoryPath, "main", commit)
+	secondJobs, err := coordinator.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,6 +555,7 @@ func TestCoordinatorOwnershipHeartbeatSourceAndFailureCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	second := secondJobs[0]
 	if secondLease == nil || secondLease.Job.ID != second.ID {
 		t.Fatalf("second lease = %#v", secondLease)
 	}
@@ -388,15 +571,16 @@ func TestCoordinatorOwnershipHeartbeatSourceAndFailureCompletion(t *testing.T) {
 func TestCoordinatorRerunAndCancellationLifecycle(t *testing.T) {
 	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"test": {
 			Image: "alpine:3", Script: []string{"true"}, Branches: []string{"main"},
-		},
+		}},
 	})
 
-	queued, err := coordinator.Schedule(repositoryPath, "main", commit)
-	if err != nil || queued == nil {
-		t.Fatalf("scheduled build = %#v, %v", queued, err)
+	queuedJobs, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil || len(queuedJobs) != 1 {
+		t.Fatalf("scheduled builds = %#v, %v", queuedJobs, err)
 	}
+	queued := queuedJobs[0]
 	canceled, err := coordinator.Cancel(repositoryPath, queued.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -419,6 +603,7 @@ func TestCoordinatorRerunAndCancellationLifecycle(t *testing.T) {
 	}
 	if rerun.ID == queued.ID || rerun.RerunOf != queued.ID ||
 		rerun.Status != StatusQueued || rerun.Repository != queued.Repository ||
+		rerun.Name != queued.Name ||
 		rerun.Branch != queued.Branch || rerun.Commit != queued.Commit ||
 		rerun.Image != "alpine:3" {
 		t.Fatalf("rerun build = %#v", rerun)
@@ -468,14 +653,15 @@ func TestCoordinatorRerunAndCancellationLifecycle(t *testing.T) {
 func TestCoordinatorManualBuildRequiresExplicitStart(t *testing.T) {
 	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"deploy": {
 			Image: "alpine:3", Script: []string{"true"}, Manual: true,
-		},
+		}},
 	})
-	job, err := coordinator.Schedule(repositoryPath, "main", commit)
-	if err != nil || job == nil || job.Status != StatusManual {
-		t.Fatalf("manual build = %#v, %v", job, err)
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil || len(jobs) != 1 || jobs[0].Status != StatusManual {
+		t.Fatalf("manual builds = %#v, %v", jobs, err)
 	}
+	job := jobs[0]
 	if lease, claimErr := coordinator.Claim("runner-one"); claimErr != nil || lease != nil {
 		t.Fatalf("manual build was claimed before start: %#v, %v", lease, claimErr)
 	}
@@ -550,7 +736,7 @@ func TestCoordinatorRejectsUnbuildableCandidateAndStorageFailures(t *testing.T) 
 	}
 }
 
-func TestCoordinatorBuildConfigurationAndValidationHelpers(t *testing.T) {
+func TestCoordinatorJobConfigurationAndValidationHelpers(t *testing.T) {
 	root, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
 	gitPath, err := repositoryStore.GitPath(repositoryPath)
 	if err != nil {
@@ -564,34 +750,34 @@ func TestCoordinatorBuildConfigurationAndValidationHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = coordinator.buildConfig(repositoryPath, Job{
+	if _, err = coordinator.jobConfig(repositoryPath, Job{
 		ID: "missing-config", Commit: head.Hash().String(),
 	}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("missing build config error = %v", err)
 	}
-	if _, err = coordinator.buildConfig(
+	if _, err = coordinator.jobConfig(
 		repopath.Repository{Groups: []string{"engineering"}, Name: "missing"},
 		Job{ID: "missing-repository", Commit: head.Hash().String()},
 	); err == nil {
 		t.Fatal("missing repository build configuration was accepted")
 	}
-	if _, err = coordinator.buildConfig(
+	if _, err = coordinator.jobConfig(
 		repopath.Repository{Groups: []string{".."}, Name: "api"},
 		Job{ID: "unsafe-repository", Commit: head.Hash().String()},
 	); err == nil {
 		t.Fatal("unsafe repository build configuration was accepted")
 	}
-	if _, err = coordinator.buildConfig(repositoryPath, Job{
+	if _, err = coordinator.jobConfig(repositoryPath, Job{
 		ID: "missing-commit", Commit: strings.Repeat("f", 40),
 	}); err == nil {
 		t.Fatal("missing commit build configuration was accepted")
 	}
 
 	invalidCommit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3"},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3"}},
 	})
-	if _, err = coordinator.buildConfig(repositoryPath, Job{
-		ID: "invalid-config", Commit: invalidCommit.String(),
+	if _, err = coordinator.jobConfig(repositoryPath, Job{
+		ID: "invalid-config", Name: "test", Commit: invalidCommit.String(),
 	}); err == nil || !strings.Contains(err.Error(), "script") {
 		t.Fatalf("invalid build config error = %v", err)
 	}

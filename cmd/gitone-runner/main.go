@@ -87,7 +87,11 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 		"docker",
 		"Docker-compatible command inside the VM (or host for legacy executor)",
 	)
-	workers := flags.Int("runner-workers", 1, "number of concurrent builds")
+	dockerWorkers := flags.Int(
+		"docker-workers",
+		1,
+		"number of concurrent builds for the legacy Docker executor",
+	)
 	workRoot := flags.String(
 		"runner-work-root",
 		"/var/lib/gitone-runner",
@@ -168,13 +172,10 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 	if flags.NArg() != 0 {
 		return nil, "", "", fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
-	if *workers < 1 || *workers > 32 {
-		return nil, "", "", errors.New("runner workers must be between 1 and 32")
-	}
-
 	var (
 		executor runner.Executor
 		err      error
+		workers  int
 	)
 	switch strings.ToLower(strings.TrimSpace(*executorName)) {
 	case "libvirt":
@@ -214,7 +215,11 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 			return nil, "", "", err
 		}
 	case "docker":
+		if *dockerWorkers < 1 || *dockerWorkers > 32 {
+			return nil, "", "", errors.New("docker workers must be between 1 and 32")
+		}
 		executor = runner.ContainerExecutor{Command: *command}
+		workers = *dockerWorkers
 	default:
 		return nil, "", "", fmt.Errorf(
 			"runner executor must be libvirt or docker, got %q",
@@ -226,7 +231,7 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 		Token:        *token,
 		ID:           *runnerID,
 		WorkRoot:     *workRoot,
-		Workers:      *workers,
+		Workers:      workers,
 		PollInterval: *pollInterval,
 		Executor:     executor,
 	})

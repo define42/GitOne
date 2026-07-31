@@ -80,17 +80,17 @@ func TestEmbeddedRunnerScheduleErrorsAndFullQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
 	buildRunner := &Runner{
 		storage: repositoryStore,
 		state:   NewStore(root),
 		jobs:    make(chan buildRequest),
 	}
-	job, err := buildRunner.Schedule(repositoryPath, "main", commit)
+	jobs, err := buildRunner.Schedule(repositoryPath, "main", commit)
 	if err == nil || !strings.Contains(err.Error(), "queue is full") ||
-		job == nil || job.Status != StatusFailed || job.FinishedAt == nil {
-		t.Fatalf("full queue build = %#v, %v", job, err)
+		len(jobs) != 1 || jobs[0].Status != StatusFailed || jobs[0].FinishedAt == nil {
+		t.Fatalf("full queue builds = %#v, %v", jobs, err)
 	}
 
 	if _, err = buildRunner.Schedule(
@@ -108,7 +108,7 @@ func TestEmbeddedRunnerScheduleErrorsAndFullQueue(t *testing.T) {
 		t.Fatal("missing repository schedule was accepted")
 	}
 	failed, err := buildRunner.Schedule(repositoryPath, "main", plumbing.ZeroHash)
-	if err != nil || failed == nil || failed.Status != StatusFailed {
+	if err != nil || len(failed) != 1 || failed[0].Status != StatusFailed {
 		t.Fatalf("unknown commit schedule = %#v, %v", failed, err)
 	}
 
@@ -129,7 +129,7 @@ func TestEmbeddedRunnerScheduleErrorsAndFullQueue(t *testing.T) {
 func TestEmbeddedRunnerBuildWritesUseRepositoryOperationLock(t *testing.T) {
 	root, repositoryPath, repositoryStore, _ := coordinatorRepository(t)
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
 	buildRunner := &Runner{
 		storage: repositoryStore,
@@ -212,7 +212,7 @@ func TestEmbeddedRunnerRunReportsPreparationAndExecutorFailures(t *testing.T) {
 			ID: "build", Repository: "engineering/api", Branch: "main",
 			Commit: strings.Repeat("1", 40), Status: StatusQueued, CreatedAt: time.Now().UTC(),
 		},
-		config: repoconfig.BuildConfig{
+		config: repoconfig.JobConfig{
 			Image: "alpine:3", Script: []string{"true"}, TimeoutSeconds: 5,
 		},
 	}

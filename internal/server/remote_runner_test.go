@@ -30,6 +30,9 @@ func (remoteIntegrationExecutor) Run(
 	request runner.ExecuteRequest,
 	output io.Writer,
 ) error {
+	if request.Job.Name != "test" {
+		return errors.New("remote job name does not match")
+	}
 	contents, err := os.ReadFile(filepath.Join(request.Directory, "source.txt"))
 	if err != nil {
 		return err
@@ -64,9 +67,9 @@ func TestRemoteRunnerEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuration, err := yaml.Marshal(repoconfig.Config{
-		Build: &repoconfig.BuildConfig{
+		Jobs: map[string]repoconfig.JobConfig{"test": {
 			Image: "alpine:3", Script: []string{"test -f source.txt"}, TimeoutSeconds: 30,
-		},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,10 +117,11 @@ func TestRemoteRunnerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	jobs, err := coordinator.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
+	job := jobs[0]
 	handler := New(Config{
 		Root:        root,
 		Directory:   testLDAPDirectory(),
@@ -169,10 +173,11 @@ func TestRemoteRunnerEndToEnd(t *testing.T) {
 	if _, err = coordinator.Complete(repositoryPath, job.ID, "api-probe", "probe complete"); err != nil {
 		t.Fatal(err)
 	}
-	job, err = coordinator.Schedule(repositoryPath, "main", commit)
+	jobs, err = coordinator.Schedule(repositoryPath, "main", commit)
 	if err != nil {
 		t.Fatal(err)
 	}
+	job = jobs[0]
 
 	remote, err := runner.NewRemote(runner.RemoteConfig{
 		URL: server.URL, Token: "remote-integration-token", ID: "remote-integration",
@@ -221,6 +226,8 @@ func TestRemoteRunnerEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(logContents, "GitOne remote build") ||
+		!strings.Contains(logContents, "job: test") ||
+		!strings.Contains(logContents, "needs: none") ||
 		!strings.Contains(logContents, "integration build passed") {
 		t.Fatalf("remote integration log = %q", logContents)
 	}

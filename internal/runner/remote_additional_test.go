@@ -103,6 +103,27 @@ func TestNewRemoteValidatesConfigurationAndUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestNewRemoteDerivesLibvirtWorkersFromMaximumInstances(t *testing.T) {
+	libvirtConfig := validLibvirtTestConfig()
+	libvirtConfig.IdleCount = 2
+	libvirtConfig.MaxInstances = maximumLibvirtInstances
+	executor, err := newLibvirtExecutorWithProvider(libvirtConfig, &fakeVMProvider{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := NewRemote(RemoteConfig{
+		URL: "https://gitone.example", Token: "token", ID: "runner-one",
+		WorkRoot: t.TempDir(), Workers: 1, PollInterval: time.Second,
+		Executor: executor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.workers != libvirtConfig.MaxInstances {
+		t.Fatalf("libvirt workers = %d, want %d", remote.workers, libvirtConfig.MaxInstances)
+	}
+}
+
 func TestRemotePostResponsesAndTransportErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(
 		response http.ResponseWriter,
@@ -514,7 +535,7 @@ func TestRemoteStopsCanceledBuildWithoutCompletingIt(t *testing.T) {
 			ID: "canceled-build", Repository: "engineering/api", Branch: "main",
 			Commit: strings.Repeat("1", 40), Image: "alpine:3", RunnerID: "runner-one",
 		},
-		Config: repoconfig.BuildConfig{
+		Config: repoconfig.JobConfig{
 			Image: "alpine:3", Script: []string{"sleep 30"}, TimeoutSeconds: 30,
 		},
 		LeaseSeconds: 1,

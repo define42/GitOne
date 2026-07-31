@@ -392,7 +392,7 @@ func TestRemoteHeartbeatsWhileTimedOutVMIsReleased(t *testing.T) {
 					ID: "heartbeat-release", Repository: "engineering/api", Branch: "main",
 					Commit: strings.Repeat("2", 40), Image: "alpine:3",
 				},
-				Config: repoconfig.BuildConfig{
+				Config: repoconfig.JobConfig{
 					Image: "alpine:3", Script: []string{"sleep 30"}, TimeoutSeconds: 1,
 				},
 				LeaseSeconds: 3,
@@ -457,8 +457,8 @@ func TestRemoteHeartbeatsWhileTimedOutVMIsReleased(t *testing.T) {
 	}
 }
 
-func buildConfigForRemoteExecutorTest() repoconfig.BuildConfig {
-	return repoconfig.BuildConfig{
+func buildConfigForRemoteExecutorTest() repoconfig.JobConfig {
+	return repoconfig.JobConfig{
 		Image: "alpine:3", Script: []string{"true"}, TimeoutSeconds: 30,
 	}
 }

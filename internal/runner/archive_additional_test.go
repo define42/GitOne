@@ -194,7 +194,7 @@ func TestWriteSourceArchivePreservesExecutableAndSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
-		Build: &repoconfig.BuildConfig{Image: "alpine:3", Script: []string{"true"}},
+		Jobs: map[string]repoconfig.JobConfig{"test": {Image: "alpine:3", Script: []string{"true"}}},
 	})
 
 	gitPath, err := store.GitPath(repositoryPath)

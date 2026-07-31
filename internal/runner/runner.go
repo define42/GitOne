@@ -31,18 +31,19 @@ const MaximumStoredLogBytes int64 = 10 << 20
 const logTruncatedMarker = "\n[build log truncated by GitOne]\n"
 
 type Runner struct {
-	storage  storage.Store
-	state    Store
-	executor Executor
-	jobs     chan buildRequest
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	storage      storage.Store
+	state        Store
+	executor     Executor
+	jobs         chan buildRequest
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	dependencyMu sync.Mutex
 }
 
 type buildRequest struct {
 	repository repopath.Repository
 	job        Job
-	config     repoconfig.BuildConfig
+	config     repoconfig.JobConfig
 }
 
 func New(config Config) (*Runner, error) {
@@ -89,13 +90,13 @@ func (r *Runner) Store() Store {
 	return r.state
 }
 
-// Schedule inspects .gitone.yaml at commit and queues a matching branch build.
-// It returns nil when the commit has no build or its branch filter does not match.
+// Schedule inspects .gitone.yaml at commit and queues every matching named job.
+// It returns an empty slice when no job matches the branch.
 func (r *Runner) Schedule(
 	repositoryPath repopath.Repository,
 	branch string,
 	commit plumbing.Hash,
-) (*Job, error) {
+) ([]Job, error) {
 	releaseOperation, err := acquireBuildOperationLock(r.storage.Root, repositoryPath)
 	if err != nil {
 		return nil, err
@@ -106,64 +107,72 @@ func (r *Runner) Schedule(
 	return r.ScheduleLocked(repositoryPath, branch, commit)
 }
 
-// ScheduleLocked queues a build while its caller holds the repository
+// ScheduleLocked queues matching jobs while its caller holds the repository
 // operations lock.
 func (r *Runner) ScheduleLocked(
 	repositoryPath repopath.Repository,
 	branch string,
 	commit plumbing.Hash,
-) (*Job, error) {
+) ([]Job, error) {
 	repository, err := openRepositoryForBuild(r.storage, repositoryPath)
 	if err != nil {
 		return nil, err
 	}
 	repositoryConfig, found, err := repoconfig.Read(repository, commit)
 	if err != nil {
-		return r.failedConfigurationJob(repositoryPath, branch, commit, err)
+		return failedConfigurationJobs(r.state, repositoryPath, branch, commit, err)
 	}
-	if !found || repositoryConfig.Build == nil {
-		return nil, nil
+	if !found || len(repositoryConfig.Jobs) == 0 {
+		return []Job{}, nil
 	}
-	build := *repositoryConfig.Build
-	if err = build.Validate(); err != nil {
-		return r.failedConfigurationJob(repositoryPath, branch, commit, err)
+	if err = repositoryConfig.Validate(); err != nil {
+		return failedConfigurationJobs(r.state, repositoryPath, branch, commit, err)
 	}
-	if !build.MatchesBranch(branch) {
-		return nil, nil
-	}
-	status := StatusQueued
-	if build.Manual {
-		status = StatusManual
-	}
-	job := Job{
-		ID:         newJobID(),
-		Repository: repositoryPath.Full(),
-		Branch:     branch,
-		Commit:     commit.String(),
-		Image:      build.Image,
-		Status:     status,
-		CreatedAt:  time.Now().UTC(),
-	}
-	if err = r.state.save(repositoryPath, job); err != nil {
-		return nil, err
-	}
-	if build.Manual {
-		return &job, nil
-	}
-	request := buildRequest{repository: repositoryPath, job: job, config: build}
-	select {
-	case r.jobs <- request:
-		return &job, nil
-	default:
-		finished := time.Now().UTC()
-		job.Status = StatusFailed
-		job.FinishedAt = &finished
-		job.Error = "build queue is full"
-		if saveErr := r.state.save(repositoryPath, job); saveErr != nil {
-			return nil, errors.Join(errors.New(job.Error), saveErr)
+	r.dependencyMu.Lock()
+	defer r.dependencyMu.Unlock()
+	jobs := configuredJobs(
+		repositoryPath,
+		branch,
+		commit.String(),
+		repositoryConfig,
+		time.Now().UTC(),
+	)
+	var scheduleErr error
+	for _, job := range jobs {
+		if err = r.state.save(repositoryPath, job); err != nil {
+			return jobs, errors.Join(scheduleErr, err)
 		}
-		return &job, errors.New(job.Error)
 	}
+	for index := range jobs {
+		job := &jobs[index]
+		if job.Status != StatusQueued {
+			continue
+		}
+		build := repositoryConfig.Jobs[job.Name]
+		request := buildRequest{repository: repositoryPath, job: *job, config: build}
+		select {
+		case r.jobs <- request:
+		default:
+			finished := time.Now().UTC()
+			job.Status = StatusFailed
+			job.FinishedAt = &finished
+			job.Error = "build queue is full"
+			if saveErr := r.state.save(repositoryPath, *job); saveErr != nil {
+				return jobs, errors.Join(scheduleErr, errors.New(job.Error), saveErr)
+			}
+			scheduleErr = errors.Join(scheduleErr, errors.New(job.Error))
+		}
+	}
+	if dependencyErr := r.advanceDependenciesLocked(repositoryPath); dependencyErr != nil {
+		scheduleErr = errors.Join(scheduleErr, dependencyErr)
+	}
+	for index := range jobs {
+		stored, getErr := r.state.Get(repositoryPath, jobs[index].ID)
+		if getErr == nil {
+			jobs[index] = stored
+		}
+	}
+	return jobs, scheduleErr
 }
 
 // Start queues a manual build when using the in-process runner.
@@ -182,6 +191,8 @@ func (r *Runner) Start(
 	defer func() {
 		_ = releaseOperation()
 	}()
+	r.dependencyMu.Lock()
+	defer r.dependencyMu.Unlock()
 	job, err := r.state.Get(repositoryPath, id)
 	if errors.Is(err, os.ErrNotExist) {
 		return Job{}, ErrBuildNotFound
@@ -196,15 +207,29 @@ func (r *Runner) Start(
 	if err != nil {
 		return Job{}, fmt.Errorf("prepare manual build: %w", err)
 	}
-	if !found || config.Build == nil {
-		return Job{}, errors.New("build configuration is missing")
+	if !found {
+		return Job{}, errors.New("job configuration is missing")
 	}
-	build := *config.Build
-	if err = build.Validate(); err != nil {
+	if err = config.Validate(); err != nil {
 		return Job{}, fmt.Errorf("prepare manual build: %w", err)
 	}
+	build, found := config.Jobs[job.Name]
+	if !found {
+		return Job{}, fmt.Errorf("job %q is missing", job.Name)
+	}
 	if !build.Manual {
-		return Job{}, errors.New("build configuration is not manual")
+		return Job{}, errors.New("job configuration is not manual")
+	}
+	jobs, err := r.state.List(repositoryPath)
+	if err != nil {
+		return Job{}, err
+	}
+	ready, dependencyErr := jobDependenciesReady(job, jobs)
+	if dependencyErr != nil {
+		return Job{}, fmt.Errorf("%w: %w", ErrBuildDependenciesUnmet, dependencyErr)
+	}
+	if !ready {
+		return Job{}, ErrBuildDependenciesUnmet
 	}
 	original := job
 	job.Status = StatusQueued
@@ -273,8 +298,10 @@ func (r *Runner) run(parent context.Context, request buildRequest) {
 	}, MaximumStoredLogBytes)
 	if _, err = fmt.Fprintf(
 		buildLog,
-		"GitOne build %s\nrepository: %s\nbranch: %s\ncommit: %s\nimage: %s\n\n",
+		"GitOne build %s\njob: %s\nneeds: %s\nrepository: %s\nbranch: %s\ncommit: %s\nimage: %s\n\n",
 		job.ID,
+		job.Name,
+		dependencyNames(job),
 		job.Repository,
 		job.Branch,
 		job.Commit,
@@ -351,9 +378,6 @@ func (r *Runner) finish(repository repopath.Repository, job Job, buildErr error)
 	if err != nil {
 		return
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
 	finished := time.Now().UTC()
 	job.FinishedAt = &finished
 	if buildErr == nil {
@@ -362,7 +386,75 @@ func (r *Runner) finish(repository repopath.Repository, job Job, buildErr error)
 		job.Status = StatusFailed
 		job.Error = buildErr.Error()
 	}
-	_ = r.state.save(repository, job)
+	saveErr := r.state.save(repository, job)
+	if saveErr == nil {
+		r.dependencyMu.Lock()
+		_ = r.advanceDependenciesLocked(repository)
+		r.dependencyMu.Unlock()
+	}
+	_ = releaseOperation()
+}
+
+func (r *Runner) advanceDependenciesLocked(repository repopath.Repository) error {
+	for {
+		jobs, err := r.state.List(repository)
+		if err != nil {
+			return err
+		}
+		updates, promoted := reconcileJobDependencies(jobs, time.Now().UTC())
+		for _, update := range updates {
+			if err = r.state.save(repository, update); err != nil {
+				return err
+			}
+		}
+		queueFailure := false
+		for _, job := range promoted {
+			config, configErr := r.jobConfig(repository, job)
+			if configErr == nil {
+				select {
+				case r.jobs <- buildRequest{repository: repository, job: job, config: config}:
+					continue
+				default:
+					configErr = errors.New("build queue is full")
+				}
+			}
+			job.Status = StatusFailed
+			job.FinishedAt = timePointer(time.Now().UTC())
+			job.Error = configErr.Error()
+			if err = r.state.save(repository, job); err != nil {
+				return errors.Join(configErr, err)
+			}
+			queueFailure = true
+		}
+		if !queueFailure {
+			return nil
+		}
+	}
+}
+
+func (r *Runner) jobConfig(
+	repositoryPath repopath.Repository,
+	job Job,
+) (repoconfig.JobConfig, error) {
+	repository, err := openRepositoryForBuild(r.storage, repositoryPath)
+	if err != nil {
+		return repoconfig.JobConfig{}, err
+	}
+	config, found, err := repoconfig.Read(repository, plumbing.NewHash(job.Commit))
+	if err != nil {
+		return repoconfig.JobConfig{}, err
+	}
+	if !found {
+		return repoconfig.JobConfig{}, errors.New("job configuration is missing")
+	}
+	if err = config.Validate(); err != nil {
+		return repoconfig.JobConfig{}, err
+	}
+	jobConfig, found := config.Jobs[job.Name]
+	if !found {
+		return repoconfig.JobConfig{}, fmt.Errorf("job %q is missing", job.Name)
+	}
+	return jobConfig, nil
 }
 
 type operationBuildLogWriter struct {
@@ -397,15 +489,6 @@ func (w *operationBuildLogWriter) Write(contents []byte) (int, error) {
 		return int(written), errors.Join(io.ErrShortWrite, releaseErr)
 	}
 	return len(contents), releaseErr
-}
-
-func (r *Runner) failedConfigurationJob(
-	repository repopath.Repository,
-	branch string,
-	commit plumbing.Hash,
-	configurationErr error,
-) (*Job, error) {
-	return failedConfigurationJob(r.state, repository, branch, commit, configurationErr)
 }
 
 func newJobID() string {

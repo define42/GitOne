@@ -78,7 +78,7 @@ func TestLibvirtExecutorWithKVM(t *testing.T) {
 			Commit:     strings.Repeat("1", 40),
 		},
 		Directory: workspace,
-		Config: repoconfig.BuildConfig{
+		Config: repoconfig.JobConfig{
 			Image: "alpine:3.22",
 			Script: []string{
 				`test "$CI_PROJECT_PATH" = "engineering/api"`,

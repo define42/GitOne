@@ -18,6 +18,7 @@ type Status string
 
 const (
 	StatusManual    Status = "manual"
+	StatusWaiting   Status = "waiting"
 	StatusQueued    Status = "queued"
 	StatusRunning   Status = "running"
 	StatusSucceeded Status = "succeeded"
@@ -25,21 +26,28 @@ const (
 	StatusCanceled  Status = "canceled"
 )
 
+type JobDependency struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
 type Job struct {
-	ID             string     `json:"id"`
-	Repository     string     `json:"repository"`
-	Branch         string     `json:"branch"`
-	Commit         string     `json:"commit"`
-	Image          string     `json:"image,omitempty"`
-	Status         Status     `json:"status"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	StartedAt      *time.Time `json:"startedAt,omitempty"`
-	FinishedAt     *time.Time `json:"finishedAt,omitempty"`
-	Error          string     `json:"error,omitempty"`
-	RunnerID       string     `json:"runnerId,omitempty"`
-	Attempt        int        `json:"attempt,omitempty"`
-	LeaseExpiresAt *time.Time `json:"leaseExpiresAt,omitempty"`
-	RerunOf        string     `json:"rerunOf,omitempty"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Repository     string          `json:"repository"`
+	Branch         string          `json:"branch"`
+	Commit         string          `json:"commit"`
+	Image          string          `json:"image,omitempty"`
+	Needs          []JobDependency `json:"needs,omitempty"`
+	Status         Status          `json:"status"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	StartedAt      *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt     *time.Time      `json:"finishedAt,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	RunnerID       string          `json:"runnerId,omitempty"`
+	Attempt        int             `json:"attempt,omitempty"`
+	LeaseExpiresAt *time.Time      `json:"leaseExpiresAt,omitempty"`
+	RerunOf        string          `json:"rerunOf,omitempty"`
 }
 
 type Store struct {
@@ -76,6 +84,9 @@ func (s Store) List(repository repopath.Repository) ([]Job, error) {
 		jobs = append(jobs, job)
 	}
 	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i].CreatedAt.Equal(jobs[j].CreatedAt) {
+			return jobs[i].Name < jobs[j].Name
+		}
 		return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
 	})
 	return jobs, nil
