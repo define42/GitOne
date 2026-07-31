@@ -138,13 +138,13 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 	libvirtDiskSizeGiB := flags.Int("libvirt-disk-size-gib", 20, "overlay disk size in GiB")
 	libvirtIdleCount := flags.Int(
 		"libvirt-idle-count",
-		0,
-		"pre-heated Docker-ready VMs (defaults to runner-workers)",
+		runner.DefaultLibvirtIdleCount,
+		"number of pre-heated Docker-ready VMs",
 	)
 	libvirtMaxInstances := flags.Int(
 		"libvirt-max-instances",
-		0,
-		"maximum creating, idle, and assigned VMs (defaults to workers + idle)",
+		runner.DefaultLibvirtMaxInstances,
+		"maximum creating, idle, and assigned VMs",
 	)
 	libvirtReadyTimeout := flags.Duration(
 		"libvirt-ready-timeout",
@@ -186,11 +186,11 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 	case "libvirt":
 		idleCount := *libvirtIdleCount
 		if idleCount == 0 {
-			idleCount = *workers
+			idleCount = runner.DefaultLibvirtIdleCount
 		}
 		maxInstances := *libvirtMaxInstances
 		if maxInstances == 0 {
-			maxInstances = *workers + idleCount
+			maxInstances = runner.DefaultLibvirtMaxInstances
 		}
 		executor, err = runner.NewLibvirtExecutor(runner.LibvirtConfig{
 			RunnerID:           *runnerID,

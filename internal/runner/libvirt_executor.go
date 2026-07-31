@@ -12,6 +12,14 @@ import (
 	"time"
 )
 
+// DefaultLibvirtIdleCount is the number of pre-heated VMs maintained when no
+// idle-count override is supplied.
+const DefaultLibvirtIdleCount = 4
+
+// DefaultLibvirtMaxInstances is the hard VM limit when no maximum override is
+// supplied.
+const DefaultLibvirtMaxInstances = 8
+
 const (
 	defaultLibvirtRunnerID       = "gitone-runner"
 	defaultLibvirtURI            = "qemu:///system"
@@ -26,7 +34,6 @@ const (
 	defaultLibvirtVCPUs          = 2
 	defaultLibvirtMemoryMiB      = 4096
 	defaultLibvirtDiskSizeGiB    = 20
-	defaultLibvirtIdleCount      = 1
 	defaultLibvirtReadyTimeout   = 10 * time.Minute
 	defaultLibvirtCleanupTimeout = 30 * time.Second
 	defaultLibvirtRetryDelay     = time.Second
@@ -203,10 +210,10 @@ func normalizeLibvirtConfig(config LibvirtConfig) (LibvirtConfig, error) {
 		config.DiskSizeGiB = defaultLibvirtDiskSizeGiB
 	}
 	if config.IdleCount == 0 {
-		config.IdleCount = defaultLibvirtIdleCount
+		config.IdleCount = DefaultLibvirtIdleCount
 	}
 	if config.MaxInstances == 0 {
-		config.MaxInstances = config.IdleCount
+		config.MaxInstances = DefaultLibvirtMaxInstances
 	}
 	if config.ReadyTimeout == 0 {
 		config.ReadyTimeout = defaultLibvirtReadyTimeout

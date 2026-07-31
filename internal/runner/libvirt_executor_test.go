@@ -259,8 +259,8 @@ func TestLibvirtConfigNormalizationAndValidation(t *testing.T) {
 		config.VCPUs != defaultLibvirtVCPUs ||
 		config.MemoryMiB != defaultLibvirtMemoryMiB ||
 		config.DiskSizeGiB != defaultLibvirtDiskSizeGiB ||
-		config.IdleCount != defaultLibvirtIdleCount ||
-		config.MaxInstances != defaultLibvirtIdleCount ||
+		config.IdleCount != DefaultLibvirtIdleCount ||
+		config.MaxInstances != DefaultLibvirtMaxInstances ||
 		config.ReadyTimeout != defaultLibvirtReadyTimeout ||
 		config.CleanupTimeout != defaultLibvirtCleanupTimeout {
 		t.Fatalf("normalized config = %#v", config)

@@ -196,8 +196,8 @@ The important libvirt options are:
 | --- | --- | --- |
 | `-libvirt-base-image-url` | pinned Flatcar 4593.2.4 image | HTTPS source used only when the base volume is absent. |
 | `-libvirt-base-image-sha512` | pinned release digest | Required digest for downloaded and existing base images. |
-| `-libvirt-idle-count` | `runner-workers` | Number of pre-heated, ready, unassigned VMs. |
-| `-libvirt-max-instances` | `workers + idle` | Hard cap across creating, idle, and assigned VMs. |
+| `-libvirt-idle-count` | `4` | Number of pre-heated, ready, unassigned VMs. |
+| `-libvirt-max-instances` | `8` | Hard cap across creating, idle, and assigned VMs. |
 | `-libvirt-vcpus` | `2` | vCPUs per KVM guest. |
 | `-libvirt-memory-mib` | `4096` | Guest memory in MiB. |
 | `-libvirt-disk-size-gib` | `20` | Disposable overlay virtual size. |
@@ -251,8 +251,8 @@ path at the same absolute path seen by the host daemon, plus a writable SSH-key
 directory. The provided Compose service persists the generated key pair in
 `/etc/gitone-runner` on the host. `make docker` enables and starts this runner
 profile. On its first successful start, expect one roughly 500 MB Flatcar
-download before the runner creates its pre-heated VM. It can also be started
-explicitly with:
+download before the runner creates its four pre-heated VMs. It can also be
+started explicitly with:
 
 ```bash
 GITONE_LIBVIRT_POOL_PATH=/var/lib/libvirt/images \
@@ -261,8 +261,9 @@ GITONE_LIBVIRT_NETWORK_CIDR=10.240.0.0/20 \
 docker compose --profile libvirt-runner up --build
 ```
 
-`GITONE_LIBVIRT_BASE_IMAGE_URL` and
-`GITONE_LIBVIRT_BASE_IMAGE_SHA512` expose the matching Compose overrides.
+`GITONE_LIBVIRT_IDLE_COUNT`, `GITONE_LIBVIRT_MAX_INSTANCES`,
+`GITONE_LIBVIRT_BASE_IMAGE_URL`, and `GITONE_LIBVIRT_BASE_IMAGE_SHA512` expose
+the matching Compose overrides.
 
 The Compose service allows three minutes for an orderly stop with the default
 30-second per-VM cleanup timeout. Increase `stop_grace_period` when configuring
