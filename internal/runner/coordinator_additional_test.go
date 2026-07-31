@@ -465,6 +465,37 @@ func TestCoordinatorRerunAndCancellationLifecycle(t *testing.T) {
 	}
 }
 
+func TestCoordinatorManualBuildRequiresExplicitStart(t *testing.T) {
+	_, repositoryPath, repositoryStore, coordinator := coordinatorRepository(t)
+	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{
+			Image: "alpine:3", Script: []string{"true"}, Manual: true,
+		},
+	})
+	job, err := coordinator.Schedule(repositoryPath, "main", commit)
+	if err != nil || job == nil || job.Status != StatusManual {
+		t.Fatalf("manual build = %#v, %v", job, err)
+	}
+	if lease, claimErr := coordinator.Claim("runner-one"); claimErr != nil || lease != nil {
+		t.Fatalf("manual build was claimed before start: %#v, %v", lease, claimErr)
+	}
+	started, err := coordinator.Start(repositoryPath, job.ID)
+	if err != nil || started.Status != StatusQueued || started.StartedAt != nil {
+		t.Fatalf("started manual build = %#v, %v", started, err)
+	}
+	if _, err = coordinator.Start(repositoryPath, job.ID); !errors.Is(err, ErrBuildNotStartable) {
+		t.Fatalf("repeated start error = %v", err)
+	}
+	lease, err := coordinator.Claim("runner-one")
+	if err != nil || lease == nil || lease.Job.ID != job.ID ||
+		lease.Job.Status != StatusRunning {
+		t.Fatalf("started manual lease = %#v, %v", lease, err)
+	}
+	if _, err = coordinator.Start(repositoryPath, "missing"); !errors.Is(err, ErrBuildNotFound) {
+		t.Fatalf("missing manual build error = %v", err)
+	}
+}
+
 func TestCoordinatorRejectsUnbuildableCandidateAndStorageFailures(t *testing.T) {
 	root, repositoryPath, _, coordinator := coordinatorRepository(t)
 	unbuildable := Job{

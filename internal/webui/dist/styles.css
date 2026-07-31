@@ -2822,6 +2822,10 @@ table {
   overflow: hidden;
 }
 
+.build-item-manual {
+  border-left-color: var(--warning-border);
+}
+
 .build-item-queued {
   border-left-color: var(--warning-border);
 }
@@ -2909,6 +2913,11 @@ table {
   gap: 0.35rem;
   min-height: 1.75rem;
   padding: 0.15rem 0.55rem;
+}
+
+.build-status-manual {
+  background: var(--warning-bg);
+  color: var(--warning-text);
 }
 
 .build-status .icon {

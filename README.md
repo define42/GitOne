@@ -59,7 +59,7 @@ Open [http://localhost:8080](http://localhost:8080) and sign in with a full-doma
 
 The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group maintainers can create repositories, mirror every Git ref and tag plus every reachable Git LFS object from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository. Archive uploads contain Git data only. Group maintainers can open Settings to change the group name and description, inheritance, and non-owner group tokens. Only group owners can change members and roles, repository visibility, the LFS policy, or owner tokens. Every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages let maintainers rename the repository, provide a copyable `git clone` command containing the authenticated identity, such as `git clone http://alice%40example.com@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
 
-The repository viewer follows each repository's symbolic `HEAD`, can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Maintainers can select an existing branch as the repository default. Its Builds tab shows queued, running, successful, failed, and canceled jobs, polls active jobs automatically, and exposes expandable live logs. Developers can cancel queued or running jobs and rerun terminal jobs at the original commit. Users with developer access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
+The repository viewer follows each repository's symbolic `HEAD`, can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Maintainers can select an existing branch as the repository default. Its Builds tab shows manual, queued, running, successful, failed, and canceled jobs, polls active jobs automatically, and exposes expandable live logs. Developers can start manual jobs, cancel queued or running jobs, and rerun terminal jobs at the original commit. Users with developer access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
 Comparisons can be saved as merge requests with durable Markdown descriptions and threaded, resolvable discussions. Approvals are bound to the exact source commit, so a new push requires a new approval. Authors cannot approve their own changes unless they are a group maintainer or owner. An approval merges automatically when the request is conflict-free and all discussions are resolved; an explicit retry action is available after clearing a previous blocker.
 
@@ -94,6 +94,7 @@ build:
   script:
     - go test ./...
     - go build ./...
+  manual: true
   branches:
     - main
     - release/*
@@ -102,7 +103,7 @@ build:
   timeoutSeconds: 1200
 ```
 
-`image` and at least one non-empty `script` command are required. Commands run in order through `/bin/sh -ec` with the repository at `/workspace`. Before each command runs, GitOne writes it to the build log with a `$ ` command marker; successful commands such as `go build` may otherwise produce no output. `branches` contains path-style glob patterns and defaults to every branch. `timeoutSeconds` defaults to 900 and is capped at 3600. Repository variables cannot replace reserved `CI_*` or `GITONE_*` variables; GitOne provides `CI_COMMIT_SHA`, `CI_COMMIT_BRANCH`, `CI_PROJECT_PATH`, `GITONE_BUILD_ID`, and equivalent GitOne commit variables.
+`image` and at least one non-empty `script` command are required. Commands run in order through `/bin/sh -ec` with the repository at `/workspace`. Before each command runs, GitOne writes it to the build log with a `$ ` command marker; successful commands such as `go build` may otherwise produce no output. Set `manual: true` to record each matching build in the `manual` state without making it claimable by a runner; a developer must start it from the Builds tab or API. `manual` defaults to `false`. `branches` contains path-style glob patterns and defaults to every branch. `timeoutSeconds` defaults to 900 and is capped at 3600. Repository variables cannot replace reserved `CI_*` or `GITONE_*` variables; GitOne provides `CI_COMMIT_SHA`, `CI_COMMIT_BRANCH`, `CI_PROJECT_PATH`, `GITONE_BUILD_ID`, and equivalent GitOne commit variables.
 
 The remote runner API is disabled until `GITONE_RUNNER_TOKEN` is configured on the GitOne server:
 
@@ -361,8 +362,9 @@ Build reads require repository read access. Rerun and cancellation require devel
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/repositories/{repository}/builds` | List builds newest-first with queued, running, succeeded, failed, or canceled status and the viewer's `canManage` capability. |
+| `GET` | `/api/repositories/{repository}/builds` | List builds newest-first with manual, queued, running, succeeded, failed, or canceled status and the viewer's `canManage` capability. |
 | `GET` | `/api/repositories/{repository}/builds/{id}` | Get one build and its captured log. |
+| `POST` | `/api/repositories/{repository}/builds/{id}/start` | Move a manual build into the runner queue. |
 | `POST` | `/api/repositories/{repository}/builds/{id}/rerun` | Create a new queued build for the same branch, commit, and build definition as a terminal build. |
 | `POST` | `/api/repositories/{repository}/builds/{id}/cancel` | Cancel a queued or running build. Repeated cancellation is idempotent. |
 
@@ -524,7 +526,7 @@ Roles are cumulative: `owner` includes `maintainer`, `maintainer` includes `deve
 | Resolve a thread as its author or the merge-request author | ✓ | ✓ | ✓ | ✓ |
 | Push Git changes and upload LFS objects | — | ✓ | ✓ | ✓ |
 | Edit files and create branches through the web API | — | ✓ | ✓ | ✓ |
-| Rerun and cancel repository builds | — | ✓ | ✓ | ✓ |
+| Start, rerun, and cancel repository builds | — | ✓ | ✓ | ✓ |
 | Create or update merge requests; approve others; merge approved requests | — | ✓ | ✓ | ✓ |
 | Resolve any review thread | — | ✓ | ✓ | ✓ |
 | Create subgroups and repositories; import repository archives or mirrors | — | — | ✓ | ✓ |

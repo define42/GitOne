@@ -131,17 +131,24 @@ func (r *Runner) ScheduleLocked(
 	if !build.MatchesBranch(branch) {
 		return nil, nil
 	}
+	status := StatusQueued
+	if build.Manual {
+		status = StatusManual
+	}
 	job := Job{
 		ID:         newJobID(),
 		Repository: repositoryPath.Full(),
 		Branch:     branch,
 		Commit:     commit.String(),
 		Image:      build.Image,
-		Status:     StatusQueued,
+		Status:     status,
 		CreatedAt:  time.Now().UTC(),
 	}
 	if err = r.state.save(repositoryPath, job); err != nil {
 		return nil, err
+	}
+	if build.Manual {
+		return &job, nil
 	}
 	request := buildRequest{repository: repositoryPath, job: job, config: build}
 	select {
@@ -156,6 +163,61 @@ func (r *Runner) ScheduleLocked(
 			return nil, errors.Join(errors.New(job.Error), saveErr)
 		}
 		return &job, errors.New(job.Error)
+	}
+}
+
+// Start queues a manual build when using the in-process runner.
+func (r *Runner) Start(
+	repositoryPath repopath.Repository,
+	id string,
+) (Job, error) {
+	releaseOperation, repository, err := acquireRepositoryBuildLock(
+		r.storage,
+		repositoryPath,
+		id,
+	)
+	if err != nil {
+		return Job{}, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	job, err := r.state.Get(repositoryPath, id)
+	if errors.Is(err, os.ErrNotExist) {
+		return Job{}, ErrBuildNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+	if job.Status != StatusManual {
+		return Job{}, ErrBuildNotStartable
+	}
+	config, found, err := repoconfig.Read(repository, plumbing.NewHash(job.Commit))
+	if err != nil {
+		return Job{}, fmt.Errorf("prepare manual build: %w", err)
+	}
+	if !found || config.Build == nil {
+		return Job{}, errors.New("build configuration is missing")
+	}
+	build := *config.Build
+	if err = build.Validate(); err != nil {
+		return Job{}, fmt.Errorf("prepare manual build: %w", err)
+	}
+	if !build.Manual {
+		return Job{}, errors.New("build configuration is not manual")
+	}
+	original := job
+	job.Status = StatusQueued
+	if err = r.state.save(repositoryPath, job); err != nil {
+		return Job{}, err
+	}
+	request := buildRequest{repository: repositoryPath, job: job, config: build}
+	select {
+	case r.jobs <- request:
+		return job, nil
+	default:
+		restoreErr := r.state.save(repositoryPath, original)
+		return Job{}, errors.Join(errors.New("build queue is full"), restoreErr)
 	}
 }
 

@@ -566,6 +566,7 @@ func commitRunnerBuildConfig(
 	t *testing.T,
 	service API,
 	repositoryPath repopath.Repository,
+	manual ...bool,
 ) plumbing.Hash {
 	t.Helper()
 	gitPath, err := service.Storage.GitPath(repositoryPath)
@@ -577,9 +578,10 @@ func commitRunnerBuildConfig(
 	if err != nil {
 		t.Fatal(err)
 	}
+	isManual := len(manual) > 0 && manual[0]
 	contents, err := yaml.Marshal(repoconfig.Config{
 		Build: &repoconfig.BuildConfig{
-			Image: "alpine:3", Script: []string{"true"},
+			Image: "alpine:3", Script: []string{"true"}, Manual: isManual,
 		},
 	})
 	if err != nil {

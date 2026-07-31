@@ -114,6 +114,7 @@ build:
   image: golang:1.25
   script:
     - go test ./...
+  manual: true
   branches:
     - main
   environment:
@@ -145,6 +146,7 @@ build:
 	if !found || config.Description != "Backend API" || config.Build == nil ||
 		config.Build.Image != "golang:1.25" ||
 		len(config.Build.Script) != 1 ||
+		!config.Build.Manual ||
 		config.Build.Environment["CGO_ENABLED"] != "0" ||
 		config.Build.TimeoutSeconds != 1200 {
 		t.Fatalf("YAML config = %#v, found=%v", config, found)

@@ -23,6 +23,7 @@ const (
 
 var (
 	ErrBuildNotFound      = errors.New("build not found")
+	ErrBuildNotStartable  = errors.New("build is not waiting for manual start")
 	ErrBuildNotRerunnable = errors.New("only a completed build can be rerun")
 	ErrBuildNotCancelable = errors.New("completed build cannot be canceled")
 )
@@ -127,19 +128,63 @@ func (c *Coordinator) ScheduleLocked(
 	if !build.MatchesBranch(branch) {
 		return nil, nil
 	}
+	status := StatusQueued
+	if build.Manual {
+		status = StatusManual
+	}
 	job := Job{
 		ID:         newJobID(),
 		Repository: repositoryPath.Full(),
 		Branch:     branch,
 		Commit:     commit.String(),
 		Image:      build.Image,
-		Status:     StatusQueued,
+		Status:     status,
 		CreatedAt:  time.Now().UTC(),
 	}
 	if err = c.state.save(repositoryPath, job); err != nil {
 		return nil, err
 	}
 	return &job, nil
+}
+
+// Start moves a manually gated build into the runner queue.
+func (c *Coordinator) Start(
+	repositoryPath repopath.Repository,
+	id string,
+) (Job, error) {
+	releaseOperation, _, err := acquireRepositoryBuildLock(
+		c.storage,
+		repositoryPath,
+		id,
+	)
+	if err != nil {
+		return Job{}, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	job, err := c.state.Get(repositoryPath, id)
+	if errors.Is(err, os.ErrNotExist) {
+		return Job{}, ErrBuildNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+	if job.Status != StatusManual {
+		return Job{}, ErrBuildNotStartable
+	}
+	build, err := c.buildConfig(repositoryPath, job)
+	if err != nil {
+		return Job{}, fmt.Errorf("prepare manual build: %w", err)
+	}
+	if !build.Manual {
+		return Job{}, errors.New("build configuration is not manual")
+	}
+	job.Status = StatusQueued
+	if err = c.state.save(repositoryPath, job); err != nil {
+		return Job{}, err
+	}
+	return job, nil
 }
 
 // Rerun creates a new queued build for the exact commit and branch recorded by

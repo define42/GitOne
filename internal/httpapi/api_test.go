@@ -200,6 +200,65 @@ func TestRepositoryBuildRerunAndCancelEndpoints(t *testing.T) {
 	requireStatusError(t, err, http.StatusForbidden)
 }
 
+func TestRepositoryManualBuildStartEndpoint(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	commit := commitRunnerBuildConfig(t, service, repository, true)
+	coordinator, err := runner.NewCoordinator(runner.CoordinatorConfig{
+		Storage: service.Storage,
+		State:   runner.NewStore(service.Storage.Root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Coordinator = coordinator
+	buildStore := coordinator.Store()
+	service.Builds = &buildStore
+
+	manual, err := coordinator.Schedule(repository, "main", commit)
+	if err != nil || manual == nil || manual.Status != runner.StatusManual {
+		t.Fatalf("manual build = %#v, %v", manual, err)
+	}
+	if lease, claimErr := coordinator.Claim("runner-one"); claimErr != nil || lease != nil {
+		t.Fatalf("manual build was claimable: %#v, %v", lease, claimErr)
+	}
+	started, err := service.startRepositoryBuild(context.Background(), &repositoryBuildInput{
+		AuthInput: credentials, Repository: repository.Full(), ID: manual.ID,
+	})
+	if err != nil || started.Body.Build.Status != runner.StatusQueued {
+		t.Fatalf("manual start response = %#v, %v", started, err)
+	}
+	_, err = service.startRepositoryBuild(context.Background(), &repositoryBuildInput{
+		AuthInput: credentials, Repository: repository.Full(), ID: manual.ID,
+	})
+	requireStatusError(t, err, http.StatusConflict)
+
+	second, err := coordinator.Schedule(repository, "main", commit)
+	if err != nil || second == nil || second.Status != runner.StatusManual {
+		t.Fatalf("second manual build = %#v, %v", second, err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, service)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/builds/"+second.ID+"/start",
+		nil,
+	)
+	request.Header.Set("Authorization", credentials.Authorization)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("manual start HTTP status = %d: %s", response.Code, response.Body.String())
+	}
+	var output repositoryBuildMutationOutput
+	if err = json.Unmarshal(response.Body.Bytes(), &output.Body); err != nil {
+		t.Fatal(err)
+	}
+	if output.Body.Build.ID != second.ID || output.Body.Build.Status != runner.StatusQueued {
+		t.Fatalf("manual start HTTP response = %#v", output.Body)
+	}
+}
+
 func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 	service, _, _ := repositoryAPIFixture(t)
 	ctx := context.Background()

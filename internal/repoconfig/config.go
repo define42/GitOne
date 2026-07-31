@@ -32,6 +32,7 @@ type Config struct {
 type BuildConfig struct {
 	Image          string            `json:"image" yaml:"image"`
 	Script         []string          `json:"script" yaml:"script"`
+	Manual         bool              `json:"manual,omitempty" yaml:"manual,omitempty"`
 	Branches       []string          `json:"branches,omitempty" yaml:"branches,omitempty"`
 	Environment    map[string]string `json:"environment,omitempty" yaml:"environment,omitempty"`
 	TimeoutSeconds int               `json:"timeoutSeconds,omitempty" yaml:"timeoutSeconds,omitempty"`

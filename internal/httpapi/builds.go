@@ -64,6 +64,14 @@ func registerBuildAPI(api huma.API, service API) {
 	}), service.getRepositoryBuild)
 
 	huma.Register(api, protected(huma.Operation{
+		OperationID: "start-repository-build",
+		Method:      http.MethodPost,
+		Path:        "/api/repositories/{repository}/builds/{id}/start",
+		Summary:     "Start a manual repository build",
+		Tags:        []string{"Builds"},
+	}), service.startRepositoryBuild)
+
+	huma.Register(api, protected(huma.Operation{
 		OperationID:   "rerun-repository-build",
 		Method:        http.MethodPost,
 		Path:          "/api/repositories/{repository}/builds/{id}/rerun",
@@ -140,6 +148,29 @@ func (a API) getRepositoryBuild(
 	output := &repositoryBuildOutput{}
 	output.Body.Build = build
 	output.Body.Log = log
+	return output, nil
+}
+
+func (a API) startRepositoryBuild(
+	ctx context.Context,
+	input *repositoryBuildInput,
+) (*repositoryBuildMutationOutput, error) {
+	repository, err := a.mutableBuildRepository(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	build, err := a.Coordinator.Start(repository, input.ID)
+	if errors.Is(err, runner.ErrBuildNotFound) {
+		return nil, huma.Error404NotFound("build not found")
+	}
+	if errors.Is(err, runner.ErrBuildNotStartable) {
+		return nil, huma.Error409Conflict(err.Error())
+	}
+	if err != nil {
+		return nil, huma.Error409Conflict("could not start build", err)
+	}
+	output := &repositoryBuildMutationOutput{}
+	output.Body.Build = build
 	return output, nil
 }
 

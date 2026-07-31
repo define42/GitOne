@@ -100,6 +100,59 @@ func TestRunnerSchedulesExactCommitAndPersistsResult(t *testing.T) {
 	}
 }
 
+func TestRunnerDoesNotAutomaticallyExecuteManualBuild(t *testing.T) {
+	root := t.TempDir()
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commit := commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
+		Build: &repoconfig.BuildConfig{
+			Image: "alpine:3", Script: []string{"true"}, Manual: true,
+		},
+	})
+	executor := &recordingExecutor{}
+	buildRunner, err := New(Config{
+		Storage: store, State: NewStore(root), Executor: executor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buildRunner.Close()
+	job, err := buildRunner.Schedule(repositoryPath, "main", commit)
+	if err != nil || job == nil || job.Status != StatusManual {
+		t.Fatalf("manual build = %#v, %v", job, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	executor.mu.Lock()
+	requestCount := len(executor.requests)
+	executor.mu.Unlock()
+	if requestCount != 0 {
+		t.Fatalf("manual build executed automatically: %d requests", requestCount)
+	}
+	stored, err := buildRunner.Store().Get(repositoryPath, job.ID)
+	if err != nil || stored.Status != StatusManual {
+		t.Fatalf("stored manual build = %#v, %v", stored, err)
+	}
+	started, err := buildRunner.Start(repositoryPath, job.ID)
+	if err != nil || started.Status != StatusQueued {
+		t.Fatalf("started manual build = %#v, %v", started, err)
+	}
+	waitForJob(t, buildRunner.Store(), repositoryPath, job.ID, StatusSucceeded)
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.requests) != 1 {
+		t.Fatalf("started manual build requests = %#v", executor.requests)
+	}
+}
+
 func TestRunnerSkipsUnconfiguredAndFilteredBranches(t *testing.T) {
 	root := t.TempDir()
 	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}

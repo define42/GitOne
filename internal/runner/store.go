@@ -17,6 +17,7 @@ import (
 type Status string
 
 const (
+	StatusManual    Status = "manual"
 	StatusQueued    Status = "queued"
 	StatusRunning   Status = "running"
 	StatusSucceeded Status = "succeeded"

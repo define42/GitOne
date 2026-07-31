@@ -253,7 +253,7 @@ interface RepositoryMergeRequests {
   mergeRequests: RepositoryMergeRequest[];
 }
 
-type RepositoryBuildStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+type RepositoryBuildStatus = "manual" | "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 interface RepositoryBuild {
   id: string;
@@ -814,7 +814,7 @@ function repositoryBuildAPIURL(repository: string, id: string): string {
 function repositoryBuildActionAPIURL(
   repository: string,
   id: string,
-  action: "rerun" | "cancel",
+  action: "start" | "rerun" | "cancel",
 ): string {
   return `${repositoryBuildAPIURL(repository, id)}/${action}`;
 }
@@ -2285,7 +2285,10 @@ function stopRepositoryBuildPolling(): void {
 
 function buildDuration(build: RepositoryBuild): string {
   if (!build.startedAt) {
-    return build.status === "canceled" ? "Canceled before start" : "Waiting to start";
+    if (build.status === "canceled") {
+      return "Canceled before start";
+    }
+    return build.status === "manual" ? "Waiting for manual start" : "Waiting to start";
   }
   const end = build.finishedAt ? new Date(build.finishedAt).getTime() : Date.now();
   const seconds = Math.max(
@@ -2307,7 +2310,9 @@ function buildStatusBadge(status: RepositoryBuildStatus): HTMLElement {
   badge.className = `build-status build-status-${status}`;
   const statusIcon = status === "succeeded"
     ? "check"
-    : status === "failed" || status === "canceled" ? "close" : "clock";
+    : status === "failed" || status === "canceled"
+    ? "close"
+    : status === "manual" ? "play" : "clock";
   const label = status[0].toUpperCase() + status.slice(1);
   badge.append(icon(statusIcon), document.createTextNode(label));
   badge.setAttribute("aria-label", `Build status: ${label}`);
@@ -2514,14 +2519,17 @@ function repositoryBuildsView(
       controls.append(buildStatusBadge(build.status));
       if (data.canManage) {
         const active = build.status === "queued" || build.status === "running";
+        const manual = build.status === "manual";
         const mutationButton = actionButton(
-          active ? "Cancel" : "Run again",
-          active ? "close" : "refresh",
-          active ? "danger-secondary build-cancel" : "secondary build-rerun",
+          manual ? "Run" : active ? "Cancel" : "Run again",
+          manual ? "play" : active ? "close" : "refresh",
+          active
+            ? "danger-secondary build-cancel"
+            : manual ? "primary build-start" : "secondary build-rerun",
         );
         mutationButton.disabled = mutatingBuilds.has(build.id);
         mutationButton.addEventListener("click", () => {
-          void mutateBuild(build, active ? "cancel" : "rerun");
+          void mutateBuild(build, manual ? "start" : active ? "cancel" : "rerun");
         });
         controls.append(mutationButton);
       }
@@ -2579,7 +2587,7 @@ function repositoryBuildsView(
 
   async function mutateBuild(
     build: RepositoryBuild,
-    action: "rerun" | "cancel",
+    action: "start" | "rerun" | "cancel",
   ): Promise<void> {
     if (mutatingBuilds.has(build.id) || canceled) {
       return;
@@ -2599,14 +2607,18 @@ function repositoryBuildsView(
         showStatus(`Build ${shortCommitHash(result.build.commit)} queued again.`);
       } else {
         updateBuild(result.build);
-        showStatus(`Build ${shortCommitHash(result.build.commit)} canceled.`);
+        showStatus(
+          action === "start"
+            ? `Build ${shortCommitHash(result.build.commit)} queued.`
+            : `Build ${shortCommitHash(result.build.commit)} canceled.`,
+        );
       }
     } catch (reason) {
       if (!canceled) {
         showStatus(
           reason instanceof Error
-            ? `Could not ${action === "rerun" ? "rerun" : "cancel"} build: ${reason.message}`
-            : `Could not ${action === "rerun" ? "rerun" : "cancel"} build.`,
+            ? `Could not ${action} build: ${reason.message}`
+            : `Could not ${action} build.`,
           true,
         );
       }
