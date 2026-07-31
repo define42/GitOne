@@ -3508,7 +3508,10 @@ function latestCommitBar(data, route, builds) {
     const hash = element("code", shortCommitHash(commit.hash));
     const metadata = element("div");
     metadata.className = "latest-commit-metadata";
-    metadata.append(latestBranchBuildIndicator(route, builds), hash);
+    if (builds !== null) {
+        metadata.append(latestBranchBuildIndicator(route, builds));
+    }
+    metadata.append(hash);
     bar.append(identity, detail, metadata);
     return bar;
 }
@@ -3950,7 +3953,12 @@ async function renderRepositoryBrowser(route) {
                 ? request(repositoryAPIURL(route.repository, "tree", route.ref, route.path))
                 : request(repositoryAPIURL(route.repository, "blob", route.ref, route.file));
     const buildsRequest = route.view === "builds" || (route.view === "files" && route.file === null)
-        ? request(repositoryBuildsAPIURL(route.repository))
+        ? request(repositoryBuildsAPIURL(route.repository)).catch((reason) => {
+            if (reason instanceof RequestError && (reason.status === 401 || reason.status === 403)) {
+                return null;
+            }
+            throw reason;
+        })
         : Promise.resolve(null);
     const [commits, content, builds] = await Promise.all([
         commitsRequest,
@@ -4044,7 +4052,8 @@ async function renderRepositoryBrowser(route) {
     }
     if (route.view === "builds") {
         if (builds === null) {
-            throw new Error("Repository builds are unavailable.");
+            app.append(emptyState("Builds are available to group members."));
+            return;
         }
         app.append(repositoryBuildsView(route, builds));
         return;
@@ -4069,9 +4078,6 @@ async function renderRepositoryBrowser(route) {
     if ("entries" in content) {
         const section = element("section");
         section.className = "content-section";
-        if (builds === null) {
-            throw new Error("Repository builds are unavailable.");
-        }
         const latestCommit = latestCommitBar(commits, route, builds);
         if (latestCommit) {
             section.append(latestCommit);
@@ -4133,12 +4139,12 @@ async function renderRepositoryBrowser(route) {
         app.append(await repositoryBlobSection(route, content));
     }
 }
-function setBrowserSession(session) {
+function setBrowserSession(session, loginShell = session === null) {
     browserSession = session;
     globalNavigation.hidden = session === null;
     sessionControls.hidden = session === null;
     sessionUsername.textContent = session?.username ?? "";
-    app.classList.toggle("login-shell", session === null);
+    app.classList.toggle("login-shell", loginShell);
 }
 function renderLogin(message = "") {
     stopRepositoryBuildPolling();
@@ -4354,12 +4360,33 @@ async function renderAuthenticated() {
 }
 async function render() {
     try {
+        const repository = currentRepository();
+        const group = currentGroup();
         let session;
         try {
             session = await request("/api/session");
         }
         catch (reason) {
             if (reason instanceof RequestError && reason.status === 401) {
+                if (repository !== null) {
+                    setBrowserSession(null, false);
+                    await renderRepositoryBrowser(repository);
+                    return;
+                }
+                if (group !== null) {
+                    setBrowserSession(null, false);
+                    try {
+                        await renderGroup(group);
+                    }
+                    catch (groupReason) {
+                        if (groupReason instanceof RequestError && groupReason.status === 401) {
+                            renderLogin();
+                            return;
+                        }
+                        throw groupReason;
+                    }
+                    return;
+                }
                 renderLogin();
                 return;
             }

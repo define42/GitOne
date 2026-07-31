@@ -402,7 +402,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
-	principal, err := a.authorizePrincipal(ctx, input.AuthInput, path, control.RoleRead)
+	principal, err := a.authorizeGroupRead(ctx, input.AuthInput, path)
 	if err != nil {
 		return nil, err
 	}
@@ -435,11 +435,10 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		if strings.Contains(name, "/") {
 			continue
 		}
-		subgroupPrincipal, authErr := a.authorizePrincipal(
+		subgroupPrincipal, authErr := a.authorizeGroupRead(
 			ctx,
 			input.AuthInput,
 			group.Path,
-			control.RoleRead,
 		)
 		if authErr != nil {
 			continue
@@ -1073,6 +1072,29 @@ func (a API) authorizePrincipal(
 	}
 	if !principal.Role.Allows(need) {
 		return auth.Principal{}, huma.Error403Forbidden("forbidden")
+	}
+	return principal, nil
+}
+
+func (a API) authorizeGroupRead(
+	ctx context.Context,
+	credentials AuthInput,
+	group string,
+) (auth.Principal, error) {
+	document, loadErr := a.Resolver.Controls.Load(ctx, group)
+	if loadErr != nil || document.Visibility != "public" {
+		return a.authorizePrincipal(ctx, credentials, group, control.RoleRead)
+	}
+
+	principal := auth.Principal{Role: control.RoleRead, Group: group}
+	identity, authenticated := a.sessionIdentity(credentials)
+	if !authenticated {
+		return principal, nil
+	}
+	principal.Name = identity.Name
+	member, authorizeErr := a.Resolver.AuthorizeIdentity(ctx, group, identity)
+	if authorizeErr == nil && member.Role.Allows(control.RoleRead) {
+		return member, nil
 	}
 	return principal, nil
 }

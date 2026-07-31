@@ -650,6 +650,20 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 		t.Fatal(err)
 	}
 	controls := control.NewStore(root)
+	if err := store.CreateGroup("public-group/public-child", "alice", "Public child"); err != nil {
+		t.Fatal(err)
+	}
+	publicChild, err := controls.Load(context.Background(), "public-group/public-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicChild.Visibility = "public"
+	if err = store.UpdateGroupControl("public-group/public-child", publicChild, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.CreateGroup("public-group/private-child", "alice", "Private child"); err != nil {
+		t.Fatal(err)
+	}
 	document, err := controls.Load(context.Background(), "engineering")
 	if err != nil {
 		t.Fatal(err)
@@ -695,6 +709,95 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("group visibility did not apply to second repository: %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/groups/public-group", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("anonymous public group returned %d: %s", response.Code, response.Body.String())
+	}
+	var publicGroup struct {
+		Username  string       `json:"username"`
+		Role      control.Role `json:"role"`
+		Subgroups []struct {
+			Path string `json:"path"`
+		} `json:"subgroups"`
+		Repositories []struct {
+			Name string `json:"name"`
+		} `json:"repositories"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &publicGroup); err != nil {
+		t.Fatal(err)
+	}
+	if publicGroup.Username != "" ||
+		publicGroup.Role != control.RoleRead ||
+		len(publicGroup.Subgroups) != 1 ||
+		publicGroup.Subgroups[0].Path != "public-group/public-child" ||
+		len(publicGroup.Repositories) != 2 {
+		t.Fatalf("unexpected anonymous public group detail: %#v", publicGroup)
+	}
+
+	login := httptest.NewRequest(
+		http.MethodPost,
+		"/api/session",
+		strings.NewReader(`{"username":"alice","password":"secret"}`),
+	)
+	login.Header.Set("Content-Type", "application/json")
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, login)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("public group owner login returned %d: %s", loginResponse.Code, loginResponse.Body.String())
+	}
+	cookies := loginResponse.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("public group owner login returned cookies %#v", cookies)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/groups/public-group", nil)
+	request.AddCookie(cookies[0])
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("public group owner detail returned %d: %s", response.Code, response.Body.String())
+	}
+	var ownerGroup struct {
+		Username string       `json:"username"`
+		Role     control.Role `json:"role"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &ownerGroup); err != nil {
+		t.Fatal(err)
+	}
+	if ownerGroup.Username != "alice" || ownerGroup.Role != control.RoleOwner {
+		t.Fatalf("public group owner was downgraded: %#v", ownerGroup)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/groups/engineering", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous private group returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/api/repositories/public-group%2Fpublic/tree/main",
+		nil,
+	)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("anonymous public repository browser returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/api/repositories/public-group%2Fpublic/builds",
+		nil,
+	)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous public build access returned %d: %s", response.Code, response.Body.String())
 	}
 
 	request = httptest.NewRequest(
@@ -3447,7 +3550,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
 			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=13">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=32">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=34">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -3495,6 +3598,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "renderLogin") ||
 		!strings.Contains(assetResponse.Body.String(), `request("/api/session"`) {
 		t.Fatal("served UI does not persist and apply color themes")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "setBrowserSession(null, false)") ||
+		!strings.Contains(assetResponse.Body.String(), "Builds are available to group members.") ||
+		!strings.Contains(assetResponse.Body.String(), "await renderGroup(group)") ||
+		!strings.Contains(assetResponse.Body.String(), "groupReason instanceof RequestError") {
+		t.Fatal("served UI does not allow anonymous public group and repository browsing")
 	}
 	if !strings.Contains(assetResponse.Body.String(), `label: "Root"`) ||
 		!strings.Contains(assetResponse.Body.String(), `kind: "root"`) ||
