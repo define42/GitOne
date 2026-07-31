@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type executorFunc func(context.Context, ExecuteRequest, io.Writer) error
@@ -45,6 +46,13 @@ func TestNewRemoteValidatesConfigurationAndUsesDefaults(t *testing.T) {
 		{name: "missing work root", mutate: func(c *RemoteConfig) { c.WorkRoot = "" }},
 		{name: "negative workers", mutate: func(c *RemoteConfig) { c.Workers = -1 }},
 		{name: "too many workers", mutate: func(c *RemoteConfig) { c.Workers = 33 }},
+		{
+			name: "ID too long for worker suffix",
+			mutate: func(c *RemoteConfig) {
+				c.ID = strings.Repeat("r", maximumRunnerIDLength-2)
+				c.Workers = 10
+			},
+		},
 		{
 			name:   "short poll interval",
 			mutate: func(c *RemoteConfig) { c.PollInterval = 100 * time.Millisecond },
@@ -249,6 +257,39 @@ func TestRemoteDownloadAndCompleteErrors(t *testing.T) {
 			t.Fatalf("completion API error = %v", err)
 		}
 	})
+
+	t.Run("completion bounds long build errors", func(t *testing.T) {
+		received := make(chan runnerCompleteRequest, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(
+			response http.ResponseWriter,
+			request *http.Request,
+		) {
+			var input runnerCompleteRequest
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				http.Error(response, err.Error(), http.StatusBadRequest)
+				return
+			}
+			received <- input
+			response.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+		remote := newHTTPRemote(t, server.URL)
+		buildErr := errors.New(strings.Repeat("ø", maximumCompletionErrorBytes))
+		if err := remote.postCompletion(
+			context.Background(),
+			"runner-one",
+			Job{ID: "build", Repository: "engineering/api"},
+			buildErr,
+		); err != nil {
+			t.Fatal(err)
+		}
+		completion := <-received
+		if len(completion.Error) > maximumCompletionErrorBytes ||
+			!strings.HasSuffix(completion.Error, "... [truncated]") ||
+			!utf8.ValidString(completion.Error) {
+			t.Fatalf("bounded completion error has %d bytes: %q", len(completion.Error), completion.Error)
+		}
+	})
 }
 
 func TestRemoteLogWriterChunksAndReportsErrors(t *testing.T) {
@@ -382,6 +423,7 @@ func TestRemoteHeartbeatReportsAPIError(t *testing.T) {
 	defer cancel()
 	errorsChannel := make(chan error, 1)
 	done := make(chan struct{})
+	var requests sync.Mutex
 	go remote.heartbeat(
 		ctx,
 		cancel,
@@ -394,6 +436,7 @@ func TestRemoteHeartbeatReportsAPIError(t *testing.T) {
 		},
 		errorsChannel,
 		done,
+		&requests,
 	)
 	select {
 	case <-done:
@@ -407,6 +450,128 @@ func TestRemoteHeartbeatReportsAPIError(t *testing.T) {
 		}
 	default:
 		t.Fatal("heartbeat error was not reported")
+	}
+}
+
+func TestRemoteHeartbeatRequestIsBoundedBelowLease(t *testing.T) {
+	requestStarted := make(chan struct{}, 1)
+	releaseHandler := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(
+		_ http.ResponseWriter,
+		_ *http.Request,
+	) {
+		requestStarted <- struct{}{}
+		<-releaseHandler
+	}))
+	defer func() {
+		close(releaseHandler)
+		server.Close()
+	}()
+	remote := newHTTPRemote(t, server.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errorsChannel := make(chan error, 1)
+	done := make(chan struct{})
+	var requests sync.Mutex
+	startedAt := time.Now()
+	go remote.heartbeat(
+		ctx,
+		cancel,
+		"runner-one",
+		Lease{
+			Job:          Job{ID: "build", Repository: "engineering/api"},
+			LeaseSeconds: 3,
+		},
+		errorsChannel,
+		done,
+		&requests,
+	)
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat request did not start")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("hung heartbeat request was not canceled")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 3*time.Second {
+		t.Fatalf("heartbeat failed after the lease could expire: %s", elapsed)
+	}
+	select {
+	case err := <-errorsChannel:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("heartbeat timeout error = %v", err)
+		}
+	default:
+		t.Fatal("heartbeat timeout was not reported")
+	}
+}
+
+func TestRemoteRetriesCompletionWhileHeartbeatContinues(t *testing.T) {
+	var completionCalls atomic.Int32
+	var heartbeatCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		response http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/api/runner/jobs/complete":
+			if completionCalls.Add(1) == 1 {
+				time.Sleep(750 * time.Millisecond)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+		case "/api/runner/jobs/heartbeat":
+			heartbeatCalls.Add(1)
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	remote := newHTTPRemote(t, server.URL)
+	ctx, stopHeartbeat := context.WithCancel(context.Background())
+	defer stopHeartbeat()
+	lease := Lease{
+		Job:          Job{ID: "build", Repository: "engineering/api"},
+		LeaseSeconds: 3,
+	}
+	heartbeatErrors := make(chan error, 1)
+	heartbeatDone := make(chan struct{})
+	var requests sync.Mutex
+	go remote.heartbeat(
+		ctx,
+		stopHeartbeat,
+		"runner-one",
+		lease,
+		heartbeatErrors,
+		heartbeatDone,
+		&requests,
+	)
+	if err := remote.completeWithHeartbeat(
+		ctx,
+		"runner-one",
+		lease,
+		nil,
+		stopHeartbeat,
+		&requests,
+	); err != nil {
+		t.Fatal(err)
+	}
+	<-heartbeatDone
+	if completionCalls.Load() != 2 || heartbeatCalls.Load() == 0 {
+		t.Fatalf(
+			"completion calls=%d heartbeat calls=%d",
+			completionCalls.Load(),
+			heartbeatCalls.Load(),
+		)
+	}
+	select {
+	case err := <-heartbeatErrors:
+		t.Fatalf("heartbeat failed during completion retry: %v", err)
+	default:
 	}
 }
 

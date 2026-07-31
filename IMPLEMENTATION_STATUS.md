@@ -23,6 +23,7 @@ Implemented:
 - Group-wide repository visibility and LFS policy enforcement
 - Go and TypeScript build validation plus a multi-stage Dockerfile
 - Separate `gitone` web and `gitone-runner` applications and container images, connected through an authenticated build API with durable leases, exact-commit source archives, remote log streaming, branch filters, timeouts, build APIs, and a live Builds UI
+- Libvirt runner execution in disposable KVM guests, with pure-Go Ed25519 key provisioning, atomic download and SHA-512 verification of a pinned Flatcar base image, Flatcar Ignition, qcow2 overlays, guest-only Docker, pre-claim capacity reservation, and a replenished pool of pre-heated SSH-and-Docker-ready VMs
 - Repository ZIP/tar.gz downloads and branch-safe UI/API operations for creating, editing, renaming, and deleting files
 - Repository blame views and complete commit-history navigation with paginated API results
 - Persisted merge requests with exact-commit approvals, threaded discussions, and approval-gated merging

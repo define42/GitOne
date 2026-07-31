@@ -18,6 +18,8 @@ services:
     volumes:
       - /data/:/data/
   gitone-runner:
+    profiles:
+      - libvirt-runner
     image: gitone-runner:local
     build:
       context: ./
@@ -26,19 +28,36 @@ services:
       - -runner-url
       - http://gitone:8080
       - -runner-id
-      - docker-runner
+      - kvm-runner
       - -runner-workers
       - "1"
       - -runner-work-root
       - /var/lib/gitone-runner
+      - -libvirt-pool-path
+      - ${GITONE_LIBVIRT_POOL_PATH:-/var/lib/libvirt/images}
+      - -libvirt-base-volume
+      - ${GITONE_LIBVIRT_BASE_VOLUME:-flatcar_production_qemu_image.img}
+      - -libvirt-base-image-url
+      - ${GITONE_LIBVIRT_BASE_IMAGE_URL:-https://stable.release.flatcar-linux.net/amd64-usr/4593.2.4/flatcar_production_qemu_image.img}
+      - -libvirt-base-image-sha512
+      - ${GITONE_LIBVIRT_BASE_IMAGE_SHA512:-9cd59da624ad47c58686ea05ab216e0343fa1181219f493f27a81256c68170817f2f40759f9437fad80958f671e658cff9f84a67b2cb40fdc90931ce74651a21}
+      - -libvirt-network-cidr
+      - ${GITONE_LIBVIRT_NETWORK_CIDR:-}
+      - -libvirt-ssh-key
+      - /etc/gitone-runner/id_ed25519
     environment:
       - GITONE_RUNNER_TOKEN=${GITONE_RUNNER_TOKEN:-gitone-development-runner-token}
     depends_on:
       - gitone
     restart: unless-stopped
+    stop_grace_period: 3m
+    security_opt:
+      - label=disable
     volumes:
       - /var/lib/gitone-runner:/var/lib/gitone-runner
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${GITONE_LIBVIRT_SOCKET:-/var/run/libvirt/libvirt-sock}:/var/run/libvirt/libvirt-sock
+      - ${GITONE_LIBVIRT_POOL_PATH:-/var/lib/libvirt/images}:${GITONE_LIBVIRT_POOL_PATH:-/var/lib/libvirt/images}
+      - ${GITONE_LIBVIRT_SSH_DIR:-/etc/gitone-runner}:/etc/gitone-runner
   ldap:
     image: glauth/glauth
     container_name: ldap

@@ -16,7 +16,10 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
-const defaultLeaseDuration = 30 * time.Second
+const (
+	defaultLeaseDuration  = 30 * time.Second
+	maximumRunnerIDLength = 100
+)
 
 type Scheduler interface {
 	Schedule(repopath.Repository, string, plumbing.Hash) (*Job, error)
@@ -199,9 +202,18 @@ func (c *Coordinator) Heartbeat(
 	defer func() {
 		_ = releaseOperation()
 	}()
-	job, err := c.ownedRunningJob(repository, id, runnerID)
+	job, err := c.ownedJob(repository, id, runnerID)
 	if err != nil {
 		return time.Time{}, err
+	}
+	if job.Status == StatusSucceeded || job.Status == StatusFailed {
+		if job.FinishedAt == nil {
+			return time.Time{}, errors.New("completed build has no finish time")
+		}
+		return *job.FinishedAt, nil
+	}
+	if job.Status != StatusRunning {
+		return time.Time{}, errors.New("build is not running")
 	}
 	expires := time.Now().UTC().Add(c.leaseDuration)
 	job.LeaseExpiresAt = &expires
@@ -254,9 +266,22 @@ func (c *Coordinator) Complete(
 	defer func() {
 		_ = releaseOperation()
 	}()
-	job, err := c.ownedRunningJob(repository, id, runnerID)
+	job, err := c.ownedJob(repository, id, runnerID)
 	if err != nil {
 		return Job{}, err
+	}
+	expectedStatus := StatusSucceeded
+	if buildError != "" {
+		expectedStatus = StatusFailed
+	}
+	if job.Status == StatusSucceeded || job.Status == StatusFailed {
+		if job.Status == expectedStatus && job.Error == buildError {
+			return job, nil
+		}
+		return Job{}, errors.New("build was already completed with a different result")
+	}
+	if job.Status != StatusRunning {
+		return Job{}, errors.New("build is not running")
 	}
 	finished := time.Now().UTC()
 	job.FinishedAt = &finished
@@ -359,6 +384,21 @@ func (c *Coordinator) ownedRunningJob(
 	id string,
 	runnerID string,
 ) (Job, error) {
+	job, err := c.ownedJob(repository, id, runnerID)
+	if err != nil {
+		return Job{}, err
+	}
+	if job.Status != StatusRunning {
+		return Job{}, errors.New("build is not running")
+	}
+	return job, nil
+}
+
+func (c *Coordinator) ownedJob(
+	repository repopath.Repository,
+	id string,
+	runnerID string,
+) (Job, error) {
 	if !validRunnerID(runnerID) {
 		return Job{}, errors.New("invalid runner ID")
 	}
@@ -369,9 +409,6 @@ func (c *Coordinator) ownedRunningJob(
 	if err != nil {
 		return Job{}, err
 	}
-	if job.Status != StatusRunning {
-		return Job{}, errors.New("build is not running")
-	}
 	if job.RunnerID != runnerID {
 		return Job{}, errors.New("build is leased by another runner")
 	}
@@ -380,7 +417,7 @@ func (c *Coordinator) ownedRunningJob(
 
 func validRunnerID(id string) bool {
 	id = strings.TrimSpace(id)
-	if id == "" || len(id) > 100 {
+	if id == "" || len(id) > maximumRunnerIDLength {
 		return false
 	}
 	for _, character := range id {

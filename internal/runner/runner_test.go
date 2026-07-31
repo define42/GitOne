@@ -292,6 +292,16 @@ func TestCoordinatorLeasesAndCompletesDurableBuild(t *testing.T) {
 	if completed.Status != StatusSucceeded || completed.FinishedAt == nil {
 		t.Fatalf("completed job = %#v", completed)
 	}
+	repeated, err := coordinator.Complete(repositoryPath, job.ID, "runner-one", "")
+	if err != nil || repeated.Status != StatusSucceeded || repeated.Error != "" {
+		t.Fatalf("idempotent completion = %#v, %v", repeated, err)
+	}
+	if _, err = coordinator.Heartbeat(repositoryPath, job.ID, "runner-one"); err != nil {
+		t.Fatalf("late in-flight heartbeat after completion: %v", err)
+	}
+	if _, err = coordinator.Complete(repositoryPath, job.ID, "runner-one", "different result"); err == nil {
+		t.Fatal("completion accepted a conflicting repeated result")
+	}
 	log, err := state.Log(repositoryPath, job.ID)
 	if err != nil || log != "tests passed\n" {
 		t.Fatalf("stored remote log = %q, %v", log, err)

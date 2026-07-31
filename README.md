@@ -35,11 +35,15 @@ The session keys encrypt and authenticate browser cookies and can be generated w
 
 Remote HTTP(S) repository imports block loopback, private, link-local, metadata, shared, multicast, documentation, and reserved address ranges by default. DNS is checked again when connecting, the validated numeric address is dialed directly, and every redirect is subject to the same policy. Administrators can set `GITONE_IMPORT_ALLOWLIST` or `-import-allowlist` to a comma-separated list of exact hostnames, IP addresses, or CIDR prefixes, such as `git.internal.example,10.20.0.0/16`. Allowlist entries explicitly permit otherwise blocked destinations.
 
-The complete development stack can be started with:
+The development web server and LDAP directory can be started with:
 
 ```bash
 docker compose up --build
 ```
+
+The KVM runner is an opt-in Compose profile because it needs a prepared
+libvirt host. Its SSH key and pinned Flatcar base image are provisioned
+automatically. See Repository builds below; `make docker` enables the profile.
 
 GitOne currently supports exactly one web-server process for each storage root.
 Mutation coordination is in memory and is scoped to the affected group,
@@ -66,7 +70,16 @@ make ui
 
 ## Repository builds
 
-GitOne builds are split across two applications and container images. The `gitone` web server owns repositories, the durable build queue, logs, and the runner API. The separate `gitone-runner` worker claims jobs over that API and is the only application that needs access to Docker. After a successful branch update, the server reads the build definition from `.gitone.yaml` at the exact new commit and persists a queued job. A runner claims the job with a renewable lease, downloads an exact-commit source archive, runs the script in an ephemeral Docker-compatible container, and streams logs and completion state back to GitOne. Branches created, edited, or merged through the API trigger builds too.
+GitOne builds are split across two applications and container images. The
+`gitone` web server owns repositories, the durable build queue, logs, and the
+runner API. The separate `gitone-runner` controller owns a libvirt warm pool.
+It reserves an already-running, SSH-and-Docker-ready KVM before claiming a job,
+downloads the exact-commit source archive, transfers it into that VM over SSH,
+and runs the build container against the VM's Docker daemon. Output is streamed
+back to GitOne. The disposable qcow2 overlay, domain, and Ignition file are
+deleted after one assigned job, while a replacement VM is started immediately.
+The libvirt host's Docker daemon and filesystem are never mounted into a build.
+Branches created, edited, or merged through the API trigger builds too.
 
 ```yaml
 description: Backend API
@@ -88,26 +101,200 @@ build:
 The remote runner API is disabled until `GITONE_RUNNER_TOKEN` is configured on the GitOne server:
 
 ```bash
-GITONE_RUNNER_TOKEN="$(openssl rand -hex 32)" make run RUN_ARGS="-root ./data"
+export GITONE_RUNNER_TOKEN="$(openssl rand -hex 32)"
+make run RUN_ARGS="-root ./data"
 ```
 
-Start the worker on the runner server with the same token:
+### Libvirt/KVM runner host
+
+The runner currently requires x86-64 Linux, libvirt/QEMU 8.3 or newer with
+working hardware virtualization, and a writable libvirt directory storage
+pool. KVM is mandatory;
+the runner deliberately has no silent TCG fallback. On a host that is itself a
+VM, nested virtualization must be enabled. A typical host preparation is:
 
 ```bash
-docker build -f Dockerfile.runner -t gitone-runner:local .
-docker run --rm \
-  -e GITONE_RUNNER_TOKEN="$GITONE_RUNNER_TOKEN" \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /var/lib/gitone-runner:/var/lib/gitone-runner \
-  gitone-runner:local \
-    -runner-url https://gitone.example \
-    -runner-id build-server-1 \
-    -runner-work-root /var/lib/gitone-runner
+sudo apt-get install -y libvirt-daemon-system libvirt-clients qemu-kvm
+test -c /dev/kvm
+sudo virsh pool-info default
 ```
 
-The runner makes outbound HTTP(S) requests only and does not mount GitOne's `/data`. Its work root must be bind-mounted at the same absolute path on the runner host because the local Docker daemon bind-mounts each downloaded workspace into the build container. The default runner command is `docker`; use `-runner-command podman` for a Docker-compatible alternative. `-runner-workers` controls concurrency and defaults to one. The web image is built from `Dockerfile`; the worker image is built from `Dockerfile.runner`. `docker compose up --build` builds and starts both.
+At startup the runner checks
+`flatcar_production_qemu_image.img` in the configured pool. If it is absent,
+the runner downloads the version-pinned Flatcar 4593.2.4 QEMU image over HTTPS,
+streams it into a private temporary file, verifies the pinned SHA-512 from the
+[official digest file](https://stable.release.flatcar-linux.net/amd64-usr/4593.2.4/flatcar_production_qemu_image.img.DIGESTS),
+and publishes it atomically before refreshing libvirt. Concurrent runner
+starts share a filesystem lock, so only one download is performed. An existing
+image is verified on every startup; a mismatch fails safely and is never
+overwritten. An existing image must be owned by root or the runner user and
+must not be group- or world-writable. This path is implemented entirely in Go
+and does not need `curl`, `gpg`, or `ssh-keygen`.
 
-The Docker socket is a privileged host capability and belongs only on the runner server. Build containers do not receive that socket. The GitOne server retains repositories, durable queue state, and logs beside each bare repository under `<root>/<group>/<repository>.build`; stored logs are capped at 10 MiB and API log responses at 1 MiB. Leases allow another runner to reclaim work after a runner failure or network loss.
+Downloads are staged under a runner-owned `0700` subdirectory that libvirt does
+not scan as a volume. Crash leftovers for the selected base name are removed
+under the same lock before retrying. The pool path and all of its ancestors
+must be real directories owned by root or the runner user; the pool itself must
+not be group- or world-writable. This trusted namespace is required for atomic
+no-replace publication of a verified image.
+
+The image is pinned rather than resolved through Flatcar's moving `current`
+alias. For an intentional upgrade, set both `-libvirt-base-image-url` and
+`-libvirt-base-image-sha512`; use a new `-libvirt-base-volume` name while old
+VM overlays may still exist. Guest Ignition disables automatic Flatcar updates
+so they cannot reboot a disposable VM during a long build. Never replace a
+backing image in place while overlays still reference it.
+
+QEMU reads each generated Ignition file directly through `fw_cfg`. On an
+SELinux or AppArmor host, permit QEMU read access to `*.ign` beneath the pool
+path before starting the runner. For SELinux, label the pool files
+`virt_content_t`; for AppArmor, add the pool's Ignition path to the
+`libvirt-qemu` abstraction and reload the profile. The exact commands and
+policy examples are in Flatcar's
+[libvirt guide](https://www.flatcar.org/docs/latest/deploy/virt-options/libvirt/).
+The provided Compose service disables its SELinux process label so the trusted
+controller can use the existing libvirt socket and storage-pool labels without
+relabeling those host resources. Do not add `:Z` to the libvirt socket or pool:
+private relabeling can disrupt libvirtd. Disabling the label weakens container
+isolation and is appropriate only for this privileged controller on a dedicated
+runner host; deployments that prohibit it need a site-specific SELinux policy.
+
+Run the controller as a user allowed to connect to `qemu:///system` and write
+the trusted configured pool path and SSH-key directory. An existing key directory must
+be a real directory owned by that user and must not be group- or world-writable
+(`0700` is recommended); its path must not traverse symlinks or untrusted
+writable parent directories. The runner generates a passwordless Ed25519 key
+pair with Go when `-libvirt-ssh-key` does not exist;
+the private key is created with mode `0600` and the matching `.pub` file with
+mode `0644`. Existing valid keys are preserved. After upgrading from the old
+file-level Docker bind, recreate the container with the provided parent-
+directory mount; the runner then safely replaces the empty source directory
+Docker left at the exact key path. It rejects a non-empty directory and cannot
+replace a key path that is still itself an active bind mount. The GitOne server
+and runner use the same API token:
+
+```bash
+go build -o gitone-runner ./cmd/gitone-runner
+sudo env GITONE_RUNNER_TOKEN="$GITONE_RUNNER_TOKEN" ./gitone-runner \
+  -runner-url https://gitone.example \
+  -runner-id build-server-1 \
+  -runner-workers 4 \
+  -runner-work-root /var/lib/gitone-runner \
+  -libvirt-uri qemu:///system \
+  -libvirt-pool-name default \
+  -libvirt-pool-path /var/lib/libvirt/images \
+  -libvirt-base-volume flatcar_production_qemu_image.img \
+  -libvirt-ssh-key /etc/gitone-runner/id_ed25519 \
+  -libvirt-network-cidr 10.240.0.0/20 \
+  -libvirt-idle-count 4 \
+  -libvirt-max-instances 8
+```
+
+The important libvirt options are:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `-libvirt-base-image-url` | pinned Flatcar 4593.2.4 image | HTTPS source used only when the base volume is absent. |
+| `-libvirt-base-image-sha512` | pinned release digest | Required digest for downloaded and existing base images. |
+| `-libvirt-idle-count` | `runner-workers` | Number of pre-heated, ready, unassigned VMs. |
+| `-libvirt-max-instances` | `workers + idle` | Hard cap across creating, idle, and assigned VMs. |
+| `-libvirt-vcpus` | `2` | vCPUs per KVM guest. |
+| `-libvirt-memory-mib` | `4096` | Guest memory in MiB. |
+| `-libvirt-disk-size-gib` | `20` | Disposable overlay virtual size. |
+| `-libvirt-network-cidr` | deterministic `/20` | Dedicated guest subnet; set an unused host CIDR explicitly. |
+| `-libvirt-ready-timeout` | `10m` | Deadline for DHCP, authenticated SSH, and Docker health. |
+| `-libvirt-registry-mirrors` | empty | Comma-separated mirrors written to guest `daemon.json`. |
+
+All creating, ready, and assigned VMs count toward the maximum. Reserving idle
+capacity happens before `/jobs/claim`, and the domain, SSH, and Docker health
+are rechecked, so a runner that cannot provide an isolated VM does not take a
+server lease. Assignment triggers replenishment;
+an unassigned reservation is returned without creating another VM. Each
+assigned VM is used once, even if source download or execution fails. This is
+the equivalent of Fleeting's `capacity_per_instance = 1`, `max_use_count = 1`,
+positive `idle_count`, and preemptive mode. Use a registry pull-through cache or
+bake common layers into a versioned base image for container-image warmth; do
+not replace a backing image in place while overlays use it.
+
+The VM layout and policy are modeled on the public-domain
+[Fleeting libvirt plugin](https://gitlab.com/fleetingplugin/fleeting-plugin-libvirt),
+adapted to GitOne's lease and log protocol rather than loaded as a GitLab Runner
+plugin.
+
+The controller creates a dedicated `gitone-runner` NAT network when necessary.
+It uses a `/20` DHCP pool with five-minute leases so one-use VM MAC addresses
+cannot exhaust the pool under normal churn. The deterministic default may
+overlap Docker, VPN, or site routes; inspect the host's `ip route` output and
+set `-libvirt-network-cidr` to an unused, aligned IPv4 `/20` in production. An
+existing network must match the requested bridge, NAT, CIDR, DHCP range, and
+lease policy exactly. Libvirt bridge-port isolation blocks direct traffic
+between concurrent build guests while preserving access to the NAT gateway.
+That port setting does not block a guest from initiating connections to the
+libvirt host or routed management networks. Production runners must use a
+dedicated, hardened virtualization host and a host firewall or libvirt
+`nwfilter` policy that allows guest DHCP/DNS and required outbound NAT plus
+controller-to-guest SSH, while denying guest-initiated access to host and
+management services. Do not co-locate sensitive services on the runner host.
+Generated domains, overlays, and Ignition files are scoped to the libvirt URI,
+storage pool, and runner ID; ownership metadata and the overlay path are
+verified before teardown. Stale resources from a previous controller
+generation are reconciled at startup. VM readiness requires both SSH
+authentication and `docker info`, not only a DHCP address. The SSH private key
+remains on the controller; only its public key is provisioned into the guest.
+Host keys use per-VM known-hosts files, and normal teardown asks libvirt to
+remove the one-use QEMU log. The image's configured non-root user can use the
+transferred workspace. Build containers receive neither the libvirt socket nor
+the host filesystem.
+
+To run the packaged controller container, mount the libvirt socket and pool
+path at the same absolute path seen by the host daemon, plus a writable SSH-key
+directory. The provided Compose service persists the generated key pair in
+`/etc/gitone-runner` on the host. `make docker` enables and starts this runner
+profile. On its first successful start, expect one roughly 500 MB Flatcar
+download before the runner creates its pre-heated VM. It can also be started
+explicitly with:
+
+```bash
+GITONE_LIBVIRT_POOL_PATH=/var/lib/libvirt/images \
+GITONE_LIBVIRT_SSH_DIR=/etc/gitone-runner \
+GITONE_LIBVIRT_NETWORK_CIDR=10.240.0.0/20 \
+docker compose --profile libvirt-runner up --build
+```
+
+`GITONE_LIBVIRT_BASE_IMAGE_URL` and
+`GITONE_LIBVIRT_BASE_IMAGE_SHA512` expose the matching Compose overrides.
+
+The Compose service allows three minutes for an orderly stop with the default
+30-second per-VM cleanup timeout. Increase `stop_grace_period` when configuring
+a materially larger `-libvirt-cleanup-timeout`.
+
+Unit tests use fake hypervisor and SSH transports and need no libvirt daemon.
+An opt-in end-to-end smoke test boots real KVM guests and runs a container:
+
+```bash
+sudo make test-libvirt
+```
+
+Run that target only on a dedicated runner host; normal CI deliberately does
+not assume nested KVM, a privileged network, or permission to populate a
+libvirt pool. The
+target disables Go's test-result cache and should run as the service account
+that can write the key directory and pool and use `qemu:///system` (`sudo` in
+the example above). Set `GITONE_RUNNER_LIBVIRT_SSH_KEY` only to test with an
+existing private key; otherwise the test creates a temporary key pair.
+
+The runner makes outbound HTTP(S) requests to GitOne and SSH connections to its
+private guests; it never mounts GitOne's `/data`. `-runner-workers` controls
+concurrent builds and defaults to one. `-runner-command` selects the
+Docker-compatible command inside each guest. The old host-Docker executor is
+available only as the explicit migration option `-runner-executor docker`.
+The web image is built from `Dockerfile`; the controller image is built from
+`Dockerfile.runner` and contains `virsh` plus the OpenSSH client.
+
+The GitOne server retains repositories, durable queue state, and logs beside
+each bare repository under `<root>/<group>/<repository>.build`; stored logs are
+capped at 10 MiB and API log responses at 1 MiB. Leases allow another runner to
+reclaim work after a runner failure or network loss.
 
 ## Endpoint reference
 

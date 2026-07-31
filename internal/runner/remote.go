@@ -16,6 +16,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+)
+
+const (
+	defaultExecutorCleanupTimeout = 30 * time.Second
+	maximumExecutorCleanupTimeout = time.Hour
+	maximumCompletionErrorBytes   = 4096
 )
 
 type RemoteConfig struct {
@@ -48,9 +55,6 @@ func NewRemote(config RemoteConfig) (*Remote, error) {
 	if config.Token == "" {
 		return nil, errors.New("runner token is required")
 	}
-	if !validRunnerID(config.ID) {
-		return nil, errors.New("valid runner ID is required")
-	}
 	if config.WorkRoot == "" {
 		return nil, errors.New("runner work root is required")
 	}
@@ -59,6 +63,20 @@ func NewRemote(config RemoteConfig) (*Remote, error) {
 	}
 	if config.Workers < 1 || config.Workers > 32 {
 		return nil, errors.New("runner workers must be between 1 and 32")
+	}
+	config.ID = strings.TrimSpace(config.ID)
+	if !validRunnerID(config.ID) {
+		return nil, errors.New("valid runner ID is required")
+	}
+	if config.Workers > 1 {
+		longestSuffix := 1 + len(strconv.Itoa(config.Workers))
+		if len(config.ID)+longestSuffix > maximumRunnerIDLength {
+			return nil, fmt.Errorf(
+				"runner ID is too long for %d workers (maximum base length %d)",
+				config.Workers,
+				maximumRunnerIDLength-longestSuffix,
+			)
+		}
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = 2 * time.Second
@@ -87,7 +105,29 @@ func NewRemote(config RemoteConfig) (*Remote, error) {
 	}, nil
 }
 
-func (r *Remote) Run(ctx context.Context) error {
+func (r *Remote) Run(ctx context.Context) (runErr error) {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if lifecycle, ok := r.executor.(ExecutorLifecycle); ok {
+		defer func() {
+			cleanupContext, cancelCleanup := context.WithTimeout(
+				context.Background(),
+				executorShutdownTimeout(lifecycle),
+			)
+			defer cancelCleanup()
+			if err := lifecycle.Shutdown(cleanupContext); err != nil {
+				runErr = errors.Join(
+					runErr,
+					fmt.Errorf("shutdown remote build executor: %w", err),
+				)
+			}
+		}()
+		if err := lifecycle.Start(ctx); err != nil {
+			return fmt.Errorf("start remote build executor: %w", err)
+		}
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	errorsChannel := make(chan error, r.workers)
@@ -131,8 +171,26 @@ func (r *Remote) Run(ctx context.Context) error {
 
 func (r *Remote) worker(ctx context.Context, runnerID string) error {
 	for {
+		executor := r.executor
+		var reservation ExecutorReservation
+		if reserving, ok := r.executor.(ReservingExecutor); ok {
+			var err error
+			reservation, err = reserving.Reserve(ctx)
+			if err != nil {
+				return fmt.Errorf("reserve build executor: %w", err)
+			}
+			if reservation == nil {
+				return errors.New("reserve build executor: executor returned a nil reservation")
+			}
+			executor = reservation
+		}
+
 		lease, err := r.claim(ctx, runnerID)
 		if err != nil {
+			releaseErr := releaseExecutorReservation(reservation)
+			if releaseErr != nil {
+				return errors.Join(err, releaseErr)
+			}
 			var responseErr *remoteResponseError
 			if errors.As(err, &responseErr) &&
 				(responseErr.Status == http.StatusUnauthorized ||
@@ -146,41 +204,76 @@ func (r *Remote) worker(ctx context.Context, runnerID string) error {
 			continue
 		}
 		if lease == nil {
+			if err = releaseExecutorReservation(reservation); err != nil {
+				return err
+			}
 			if err = waitForRemote(ctx, r.pollInterval); err != nil {
 				return err
 			}
 			continue
 		}
-		if err = r.runLease(ctx, runnerID, *lease); err != nil {
+		if assignable, ok := reservation.(AssignableExecutorReservation); ok {
+			assignable.Assign()
+		}
+		if err = r.runLease(ctx, runnerID, *lease, executor); err != nil {
 			log.Printf("runner %s build %s: %v", runnerID, lease.Job.ID, err)
 		}
 	}
 }
 
-func (r *Remote) runLease(parent context.Context, runnerID string, lease Lease) error {
+func (r *Remote) runLease(
+	parent context.Context,
+	runnerID string,
+	lease Lease,
+	executor Executor,
+) error {
+	heartbeatContext, stopHeartbeat := context.WithCancel(parent)
+	defer stopHeartbeat()
+	heartbeatErrors := make(chan error, 1)
+	heartbeatDone := make(chan struct{})
+	var leaseRequests sync.Mutex
+	go r.heartbeat(
+		heartbeatContext,
+		stopHeartbeat,
+		runnerID,
+		lease,
+		heartbeatErrors,
+		heartbeatDone,
+		&leaseRequests,
+	)
+	finish := func(buildErr error) error {
+		completionErr := r.completeWithHeartbeat(
+			heartbeatContext,
+			runnerID,
+			lease,
+			buildErr,
+			stopHeartbeat,
+			&leaseRequests,
+		)
+		stopHeartbeat()
+		<-heartbeatDone
+		select {
+		case heartbeatErr := <-heartbeatErrors:
+			return errors.Join(buildErr, completionErr, heartbeatErr)
+		default:
+			return errors.Join(buildErr, completionErr)
+		}
+	}
+
 	workspace, err := os.MkdirTemp(r.workRoot, "build-"+lease.Job.ID+"-")
 	if err != nil {
-		return r.complete(parent, runnerID, lease.Job, err)
+		err = errors.Join(err, releaseReservedExecutor(executor))
+		return finish(err)
 	}
 	defer func() {
 		_ = os.RemoveAll(workspace)
 	}()
 
-	buildContext, cancel := context.WithTimeout(
-		parent,
+	buildContext, cancelBuild := context.WithTimeout(
+		heartbeatContext,
 		time.Duration(lease.Config.Timeout())*time.Second,
 	)
-	defer cancel()
-	heartbeatErrors := make(chan error, 1)
-	heartbeatDone := make(chan struct{})
-	go r.heartbeat(
-		buildContext,
-		cancel,
-		runnerID,
-		lease,
-		heartbeatErrors,
-		heartbeatDone,
-	)
+	defer cancelBuild()
 
 	logWriter := &remoteLogWriter{
 		remote:   r,
@@ -214,7 +307,7 @@ func (r *Remote) runLease(parent context.Context, runnerID string, lease Lease) 
 		_, err = fmt.Fprintln(logWriter, "downloaded source at "+lease.Job.Commit)
 	}
 	if err == nil {
-		err = r.executor.Run(buildContext, ExecuteRequest{
+		err = executor.Run(buildContext, ExecuteRequest{
 			Job:       lease.Job,
 			Directory: workspace,
 			Config:    lease.Config,
@@ -223,16 +316,58 @@ func (r *Remote) runLease(parent context.Context, runnerID string, lease Lease) 
 	if errors.Is(buildContext.Err(), context.DeadlineExceeded) {
 		err = fmt.Errorf("build timed out after %s", time.Duration(lease.Config.Timeout())*time.Second)
 	}
-	cancel()
-	<-heartbeatDone
-	select {
-	case heartbeatErr := <-heartbeatErrors:
-		if err == nil {
-			err = heartbeatErr
-		}
-	default:
+	err = errors.Join(err, releaseReservedExecutor(executor))
+	cancelBuild()
+	return finish(err)
+}
+
+func releaseReservedExecutor(executor Executor) error {
+	reservation, ok := executor.(ExecutorReservation)
+	if !ok {
+		return nil
 	}
-	return r.complete(parent, runnerID, lease.Job, err)
+	return releaseExecutorReservation(reservation)
+}
+
+func releaseExecutorReservation(reservation ExecutorReservation) error {
+	if reservation == nil {
+		return nil
+	}
+	cleanupContext, cancelCleanup := context.WithTimeout(
+		context.Background(),
+		executorReleaseTimeout(reservation),
+	)
+	defer cancelCleanup()
+	if err := reservation.Release(cleanupContext); err != nil {
+		return fmt.Errorf("release build executor reservation: %w", err)
+	}
+	return nil
+}
+
+func executorShutdownTimeout(executor ExecutorLifecycle) time.Duration {
+	provider, ok := executor.(ExecutorShutdownTimeoutProvider)
+	if !ok {
+		return defaultExecutorCleanupTimeout
+	}
+	return boundedExecutorCleanupTimeout(provider.ShutdownTimeout())
+}
+
+func executorReleaseTimeout(reservation ExecutorReservation) time.Duration {
+	provider, ok := reservation.(ExecutorReleaseTimeoutProvider)
+	if !ok {
+		return defaultExecutorCleanupTimeout
+	}
+	return boundedExecutorCleanupTimeout(provider.ReleaseTimeout())
+}
+
+func boundedExecutorCleanupTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return defaultExecutorCleanupTimeout
+	}
+	if timeout > maximumExecutorCleanupTimeout {
+		return maximumExecutorCleanupTimeout
+	}
+	return timeout
 }
 
 func (r *Remote) heartbeat(
@@ -242,12 +377,11 @@ func (r *Remote) heartbeat(
 	lease Lease,
 	errorsChannel chan<- error,
 	done chan<- struct{},
+	requests *sync.Mutex,
 ) {
 	defer close(done)
-	interval := time.Duration(lease.LeaseSeconds) * time.Second / 3
-	if interval < time.Second {
-		interval = time.Second
-	}
+	interval := heartbeatInterval(lease.LeaseSeconds)
+	requestTimeout := heartbeatRequestTimeout(interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -258,7 +392,19 @@ func (r *Remote) heartbeat(
 			body := runnerJobRequest{
 				RunnerID: runnerID, Repository: lease.Job.Repository, ID: lease.Job.ID,
 			}
-			if err := r.post(ctx, "/api/runner/jobs/heartbeat", body, nil); err != nil {
+			requests.Lock()
+			if ctx.Err() != nil {
+				requests.Unlock()
+				return
+			}
+			requestContext, cancelRequest := context.WithTimeout(ctx, requestTimeout)
+			err := r.post(requestContext, "/api/runner/jobs/heartbeat", body, nil)
+			cancelRequest()
+			requests.Unlock()
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				select {
 				case errorsChannel <- fmt.Errorf("heartbeat build: %w", err):
 				default:
@@ -268,6 +414,22 @@ func (r *Remote) heartbeat(
 			}
 		}
 	}
+}
+
+func heartbeatInterval(leaseSeconds int) time.Duration {
+	interval := time.Duration(leaseSeconds) * time.Second / 3
+	if interval < time.Second {
+		return time.Second
+	}
+	return interval
+}
+
+func heartbeatRequestTimeout(interval time.Duration) time.Duration {
+	timeout := interval / 2
+	if timeout < 250*time.Millisecond {
+		return 250 * time.Millisecond
+	}
+	return timeout
 }
 
 func (r *Remote) claim(ctx context.Context, runnerID string) (*Lease, error) {
@@ -339,9 +501,55 @@ func (r *Remote) complete(
 	job Job,
 	buildErr error,
 ) error {
+	if err := r.postCompletion(ctx, runnerID, job, buildErr); err != nil {
+		return err
+	}
+	return buildErr
+}
+
+func (r *Remote) completeWithHeartbeat(
+	ctx context.Context,
+	runnerID string,
+	lease Lease,
+	buildErr error,
+	stopHeartbeat context.CancelFunc,
+	requests *sync.Mutex,
+) error {
+	interval := heartbeatInterval(lease.LeaseSeconds)
+	requestTimeout := heartbeatRequestTimeout(interval)
+	for {
+		requests.Lock()
+		if ctx.Err() != nil {
+			requests.Unlock()
+			return fmt.Errorf("complete build: %w", ctx.Err())
+		}
+		requestContext, cancelRequest := context.WithTimeout(ctx, requestTimeout)
+		err := r.postCompletion(requestContext, runnerID, lease.Job, buildErr)
+		cancelRequest()
+		if err == nil {
+			stopHeartbeat()
+			requests.Unlock()
+			return nil
+		}
+		requests.Unlock()
+		if !retryableRemoteRequest(err) {
+			return err
+		}
+		if waitErr := waitForRemote(ctx, interval); waitErr != nil {
+			return errors.Join(err, fmt.Errorf("wait to retry completion: %w", waitErr))
+		}
+	}
+}
+
+func (r *Remote) postCompletion(
+	ctx context.Context,
+	runnerID string,
+	job Job,
+	buildErr error,
+) error {
 	errorMessage := ""
 	if buildErr != nil {
-		errorMessage = buildErr.Error()
+		errorMessage = boundedCompletionError(buildErr.Error())
 	}
 	request := runnerCompleteRequest{
 		RunnerID: runnerID, Repository: job.Repository, ID: job.ID, Error: errorMessage,
@@ -349,7 +557,30 @@ func (r *Remote) complete(
 	if err := r.post(ctx, "/api/runner/jobs/complete", request, nil); err != nil {
 		return fmt.Errorf("complete build: %w", err)
 	}
-	return buildErr
+	return nil
+}
+
+func boundedCompletionError(message string) string {
+	message = strings.ToValidUTF8(message, "�")
+	if len(message) <= maximumCompletionErrorBytes {
+		return message
+	}
+	const suffix = "... [truncated]"
+	end := maximumCompletionErrorBytes - len(suffix)
+	for end > 0 && !utf8.RuneStart(message[end]) {
+		end--
+	}
+	return message[:end] + suffix
+}
+
+func retryableRemoteRequest(err error) bool {
+	var responseErr *remoteResponseError
+	if !errors.As(err, &responseErr) {
+		return true
+	}
+	return responseErr.Status == http.StatusRequestTimeout ||
+		responseErr.Status == http.StatusTooManyRequests ||
+		responseErr.Status >= http.StatusInternalServerError
 }
 
 func (r *Remote) post(ctx context.Context, endpoint string, body any, output any) error {

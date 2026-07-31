@@ -23,6 +23,46 @@ type Executor interface {
 	Run(context.Context, ExecuteRequest, io.Writer) error
 }
 
+// ExecutorLifecycle lets an executor prepare shared resources before the
+// remote runner starts claiming work and clean them up after its workers stop.
+type ExecutorLifecycle interface {
+	Start(context.Context) error
+	Shutdown(context.Context) error
+}
+
+// ExecutorShutdownTimeoutProvider overrides the remote runner's default
+// bounded shutdown window for executors with their own cleanup policy.
+type ExecutorShutdownTimeoutProvider interface {
+	ShutdownTimeout() time.Duration
+}
+
+// ExecutorReservation is a build executor backed by capacity reserved before
+// a remote job is claimed. Release returns that capacity to its owner or tears
+// it down after use.
+type ExecutorReservation interface {
+	Executor
+	Release(context.Context) error
+}
+
+// ExecutorReleaseTimeoutProvider overrides the default bounded release window
+// for a reserved execution environment.
+type ExecutorReleaseTimeoutProvider interface {
+	ReleaseTimeout() time.Duration
+}
+
+// AssignableExecutorReservation is notified once the remote runner has
+// successfully claimed a job for the reserved capacity.
+type AssignableExecutorReservation interface {
+	ExecutorReservation
+	Assign()
+}
+
+// ReservingExecutor reserves ready execution capacity before the remote runner
+// asks the server for a job.
+type ReservingExecutor interface {
+	Reserve(context.Context) (ExecutorReservation, error)
+}
+
 // ContainerExecutor runs each build in an ephemeral Docker-compatible container.
 type ContainerExecutor struct {
 	Command string
