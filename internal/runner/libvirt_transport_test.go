@@ -582,7 +582,11 @@ func TestDockerRunArgumentsMatchContainerIsolationContract(t *testing.T) {
 		!containsString(environment, "CI_PROJECT_PATH=group/project") {
 		t.Fatalf("Docker environment = %#v", environment)
 	}
-	wantSuffix := []string{"alpine:3.22", "-ec", "printf '%s\\n' ready\nmake test"}
+	wantSuffix := []string{
+		"alpine:3.22",
+		"-ec",
+		renderBuildScript([]string{"printf '%s\\n' ready", "make test"}),
+	}
 	if !reflect.DeepEqual(arguments[len(arguments)-len(wantSuffix):], wantSuffix) {
 		t.Fatalf("Docker argument suffix = %#v", arguments[len(arguments)-len(wantSuffix):])
 	}

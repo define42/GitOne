@@ -117,7 +117,7 @@ func (e ContainerExecutor) Run(
 		arguments,
 		request.Config.Image,
 		"-ec",
-		strings.Join(request.Config.Script, "\n"),
+		renderBuildScript(request.Config.Script),
 	)
 	process := exec.CommandContext(ctx, command, arguments...)
 	process.Stdout = output
@@ -133,4 +133,23 @@ func (e ContainerExecutor) Run(
 		return fmt.Errorf("container build: %w", err)
 	}
 	return nil
+}
+
+// renderBuildScript writes each configured command to the build log before
+// executing it. The displayed command is shell-quoted as data rather than
+// traced with `set -x`, so environment values expanded by the shell are not
+// accidentally included in the command marker.
+func renderBuildScript(commands []string) string {
+	var script strings.Builder
+	for index, command := range commands {
+		if index > 0 {
+			script.WriteByte('\n')
+		}
+		display := "$ " + strings.ReplaceAll(command, "\n", "\n  ")
+		script.WriteString("printf '%s\\n' ")
+		script.WriteString(shellQuote(display))
+		script.WriteByte('\n')
+		script.WriteString(command)
+	}
+	return script.String()
 }

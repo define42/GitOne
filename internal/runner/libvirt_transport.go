@@ -530,7 +530,7 @@ func (p *virshVMProvider) dockerRunArguments(
 		arguments,
 		request.Config.Image,
 		"-ec",
-		strings.Join(request.Config.Script, "\n"),
+		renderBuildScript(request.Config.Script),
 	)
 }
 
