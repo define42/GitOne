@@ -60,6 +60,14 @@ type attemptState struct {
 	lastAccess time.Time
 }
 
+type attemptOutcome uint8
+
+const (
+	attemptAborted attemptOutcome = iota
+	attemptFailed
+	attemptSucceeded
+)
+
 // AttemptLimiter applies the same admission policy independently to a request's
 // peer IP and normalized username. Reservations are made before authentication
 // starts, which also bounds a burst of simultaneous first attempts.
@@ -116,8 +124,25 @@ func (l *AttemptLimiter) Begin(
 	ctx context.Context,
 	username string,
 ) (func(bool), error) {
+	complete, err := l.begin(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	return func(success bool) {
+		outcome := attemptFailed
+		if success {
+			outcome = attemptSucceeded
+		}
+		complete(outcome)
+	}, nil
+}
+
+func (l *AttemptLimiter) begin(
+	ctx context.Context,
+	username string,
+) (func(attemptOutcome), error) {
 	if l == nil {
-		return func(bool) {}, nil
+		return func(attemptOutcome) {}, nil
 	}
 	keys := []string{"user:" + strings.ToLower(strings.TrimSpace(username))}
 	if ip := ClientIP(ctx); ip != "" {
@@ -151,9 +176,9 @@ func (l *AttemptLimiter) Begin(
 	l.mutex.Unlock()
 
 	var once sync.Once
-	return func(success bool) {
+	return func(outcome attemptOutcome) {
 		once.Do(func() {
-			l.finish(keys, success)
+			l.finish(keys, outcome)
 		})
 	}, nil
 }
@@ -182,7 +207,7 @@ func (l *AttemptLimiter) trackedKeysLocked(keys []string, now time.Time) []strin
 	return tracked
 }
 
-func (l *AttemptLimiter) finish(keys []string, success bool) {
+func (l *AttemptLimiter) finish(keys []string, outcome attemptOutcome) {
 	now := l.now()
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
@@ -195,14 +220,18 @@ func (l *AttemptLimiter) finish(keys []string, success bool) {
 			state.inFlight--
 		}
 		state.lastAccess = now
-		if success {
+		switch outcome {
+		case attemptAborted:
+			continue
+		case attemptSucceeded:
 			state.failures = 0
 			state.retryAt = time.Time{}
 			continue
-		}
-		state.failures++
-		if state.failures >= l.failureThreshold {
-			state.retryAt = now.Add(l.backoff(state.failures))
+		case attemptFailed:
+			state.failures++
+			if state.failures >= l.failureThreshold {
+				state.retryAt = now.Add(l.backoff(state.failures))
+			}
 		}
 	}
 }

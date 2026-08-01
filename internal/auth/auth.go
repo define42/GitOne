@@ -53,9 +53,9 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 	if err != nil {
 		return Principal{}, err
 	}
-	succeeded := false
+	outcome := attemptFailed
 	defer func() {
-		finish(succeeded)
+		finish(outcome)
 	}()
 
 	type groupControl struct {
@@ -77,10 +77,14 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 			}
 			matched, verifyErr := verifySecret(r.secretKDFLimiter(), token.Hash, secret)
 			if verifyErr != nil {
+				// KDF admission or execution failed before a credential verdict.
+				// Release the attempt reservation without counting a failure or
+				// clearing any prior failures.
+				outcome = attemptAborted
 				return Principal{}, verifyErr
 			}
 			if matched {
-				succeeded = true
+				outcome = attemptSucceeded
 				return Principal{
 					Name:  user,
 					Role:  token.Role,
@@ -100,7 +104,7 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 		if role, ok := candidate.document.Members[identity.Name]; ok {
 			identity.Role = role
 			identity.Group = candidate.path
-			succeeded = true
+			outcome = attemptSucceeded
 			return identity, nil
 		}
 	}
@@ -116,13 +120,13 @@ func (r *Resolver) AuthenticateIdentity(
 	if err != nil {
 		return Principal{}, err
 	}
-	succeeded := false
+	outcome := attemptFailed
 	defer func() {
-		finish(succeeded)
+		finish(outcome)
 	}()
 	principal, err := r.authenticateIdentity(ctx, user, secret)
 	if err == nil {
-		succeeded = true
+		outcome = attemptSucceeded
 	}
 	return principal, err
 }
@@ -145,11 +149,11 @@ func (r *Resolver) authenticateIdentity(
 func (r *Resolver) beginAttempt(
 	ctx context.Context,
 	user string,
-) (func(bool), error) {
+) (func(attemptOutcome), error) {
 	if r.Attempts == nil {
-		return func(bool) {}, nil
+		return func(attemptOutcome) {}, nil
 	}
-	return r.Attempts.Begin(ctx, user)
+	return r.Attempts.begin(ctx, user)
 }
 
 func (r *Resolver) secretKDFLimiter() *secretKDFLimiter {

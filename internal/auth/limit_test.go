@@ -172,3 +172,95 @@ func TestResolverDoesNotBindLDAPWhenSecretKDFIsBusy(t *testing.T) {
 		t.Fatalf("LDAP calls after busy token KDF = %d, want 0", directory.calls)
 	}
 }
+
+func TestResolverKDFSaturationDoesNotCountAsAuthenticationFailure(t *testing.T) {
+	hash, err := HashSecret("actual-token-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := NewAttemptLimiter(AttemptLimiterOptions{
+		MaximumConcurrent: 1,
+		FailureThreshold:  5,
+		InitialBackoff:    time.Minute,
+		MaximumBackoff:    time.Minute,
+	})
+	now := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	attempts.now = func() time.Time { return now }
+	kdf := newSecretKDFLimiter(1)
+	release, err := kdf.acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := Resolver{
+		Controls: fixedControlStore{document: control.Document{
+			Tokens: []control.Token{{
+				Key:  "ci",
+				Hash: hash,
+				Role: control.RoleRead,
+			}},
+		}},
+		Directory: &countedRejectingIdentityProvider{},
+		Attempts:  attempts,
+		secretKDF: kdf,
+	}
+
+	for _, remoteAddress := range []string{
+		"192.0.2.31:1234",
+		"192.0.2.32:1234",
+		"192.0.2.33:1234",
+		"192.0.2.34:1234",
+		"192.0.2.35:1234",
+	} {
+		ctx := WithClientIP(context.Background(), remoteAddress)
+		if _, authErr := resolver.Authenticate(
+			ctx,
+			"engineering",
+			"ci",
+			"actual-token-secret",
+		); !errors.Is(authErr, ErrRateLimited) {
+			t.Fatalf("busy KDF authentication error = %v, want %v", authErr, ErrRateLimited)
+		}
+	}
+	finish, err := attempts.Begin(
+		WithClientIP(context.Background(), "192.0.2.36:1234"),
+		"ci",
+	)
+	if err != nil {
+		t.Fatalf("KDF saturation created username backoff: %v", err)
+	}
+	finish(false)
+	if _, authErr := resolver.Authenticate(
+		WithClientIP(context.Background(), "192.0.2.37:1234"),
+		"engineering",
+		"ci",
+		"actual-token-secret",
+	); !errors.Is(authErr, ErrRateLimited) {
+		t.Fatalf("busy KDF authentication error = %v, want %v", authErr, ErrRateLimited)
+	}
+
+	attempts.mutex.Lock()
+	statePointer := attempts.states["user:ci"]
+	if statePointer == nil {
+		attempts.mutex.Unlock()
+		t.Fatal("username attempt state was not recorded")
+	}
+	state := *statePointer
+	attempts.mutex.Unlock()
+	if state.failures != 1 || state.inFlight != 0 || !state.retryAt.IsZero() {
+		t.Fatalf("KDF saturation changed attempt state: %#v", state)
+	}
+
+	release()
+	principal, err := resolver.Authenticate(
+		WithClientIP(context.Background(), "192.0.2.38:1234"),
+		"engineering",
+		"ci",
+		"actual-token-secret",
+	)
+	if err != nil {
+		t.Fatalf("correct token remained locked out after KDF slot release: %v", err)
+	}
+	if principal.Name != "ci" || principal.Role != control.RoleRead {
+		t.Fatalf("authenticated principal = %#v", principal)
+	}
+}
