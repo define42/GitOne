@@ -1638,7 +1638,72 @@ function buildDuration(build) {
     }
     return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
-function buildStatusBadge(status) {
+function repositoryPipelines(builds) {
+    const pipelines = new Map();
+    for (const build of builds) {
+        const key = JSON.stringify([build.branch, build.commit, build.createdAt]);
+        const pipeline = pipelines.get(key);
+        if (pipeline) {
+            pipeline.jobs.push(build);
+            continue;
+        }
+        pipelines.set(key, {
+            key,
+            branch: build.branch,
+            commit: build.commit,
+            createdAt: build.createdAt,
+            jobs: [build],
+        });
+    }
+    return [...pipelines.values()];
+}
+function aggregateBuildStatus(jobs) {
+    for (const status of [
+        "failed",
+        "running",
+        "queued",
+        "waiting",
+        "canceled",
+        "manual",
+        "succeeded",
+    ]) {
+        if (jobs.some((job) => job.status === status)) {
+            return status;
+        }
+    }
+    return "succeeded";
+}
+function pipelineStages(jobs) {
+    const byID = new Map(jobs.map((job) => [job.id, job]));
+    const depths = new Map();
+    const visiting = new Set();
+    const depth = (job) => {
+        const known = depths.get(job.id);
+        if (known !== undefined) {
+            return known;
+        }
+        if (visiting.has(job.id)) {
+            return 0;
+        }
+        visiting.add(job.id);
+        const dependencies = (job.needs ?? [])
+            .map((need) => byID.get(need.id))
+            .filter((dependency) => dependency !== undefined);
+        const value = dependencies.length === 0
+            ? 0
+            : Math.max(...dependencies.map((dependency) => depth(dependency))) + 1;
+        visiting.delete(job.id);
+        depths.set(job.id, value);
+        return value;
+    };
+    const stages = [];
+    for (const job of jobs) {
+        const index = depth(job);
+        (stages[index] ??= []).push(job);
+    }
+    return stages;
+}
+function buildStatusBadge(status, subject = "Build") {
     const badge = element("span");
     badge.className = `build-status build-status-${status}`;
     const statusIcon = status === "succeeded"
@@ -1648,7 +1713,7 @@ function buildStatusBadge(status) {
             : status === "manual" ? "play" : "clock";
     const label = status[0].toUpperCase() + status.slice(1);
     badge.append(icon(statusIcon), document.createTextNode(label));
-    badge.setAttribute("aria-label", `Build status: ${label}`);
+    badge.setAttribute("aria-label", `${subject} status: ${label}`);
     return badge;
 }
 function latestBranchBuildIndicator(route, initial) {
@@ -1671,24 +1736,8 @@ function latestBranchBuildIndicator(route, initial) {
             build.commit === latest.commit &&
             build.createdAt === latest.createdAt);
     };
-    const latestStatus = (jobs) => {
-        for (const status of [
-            "failed",
-            "running",
-            "queued",
-            "waiting",
-            "canceled",
-            "manual",
-            "succeeded",
-        ]) {
-            if (jobs.some((job) => job.status === status)) {
-                return status;
-            }
-        }
-        return "succeeded";
-    };
     const render = () => {
-        const label = element("span", "Latest jobs");
+        const label = element("span", "Latest pipeline");
         label.className = "latest-build-label";
         const jobs = latestJobs();
         if (jobs.length === 0) {
@@ -1701,16 +1750,16 @@ function latestBranchBuildIndicator(route, initial) {
             return;
         }
         const build = jobs[0];
-        const status = latestStatus(jobs);
-        const badge = buildStatusBadge(status);
+        const status = aggregateBuildStatus(jobs);
+        const badge = buildStatusBadge(status, "Pipeline");
         link.replaceChildren(label, badge);
         link.title = [
-            `Latest jobs on ${route.ref}: ${status}`,
+            `Latest pipeline on ${route.ref}: ${status}`,
             `${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}`,
             shortCommitHash(build.commit),
             relativeTime(build.createdAt),
         ].join(" · ");
-        link.setAttribute("aria-label", `Latest jobs on ${route.ref}: ${status} at ${shortCommitHash(build.commit)}`);
+        link.setAttribute("aria-label", `Latest pipeline on ${route.ref}: ${status} at ${shortCommitHash(build.commit)}`);
     };
     const scheduleRefresh = () => {
         if (canceled) {
@@ -1768,141 +1817,294 @@ function repositoryBuildsView(route, initial) {
     const refreshState = element("span", "Updated just now");
     refreshState.className = "build-refresh-state";
     const refreshButton = actionButton("Refresh", "refresh", "secondary build-refresh");
-    const heading = sectionHeading("Builds", initial.builds.length, [
+    const heading = sectionHeading("Pipelines", repositoryPipelines(initial.builds).length, [
         refreshState,
         refreshButton,
     ]);
     const listRoot = element("div");
     listRoot.className = "build-list-root";
-    section.append(heading, listRoot);
+    const logDialog = element("dialog");
+    logDialog.className = "action-dialog build-log-dialog";
+    logDialog.id = "build-log-dialog";
+    const logDialogContent = element("div");
+    logDialogContent.className = "dialog-form build-log-dialog-content";
+    const logHeader = element("div");
+    logHeader.className = "dialog-header";
+    const logTitle = element("h2", "Build log");
+    logTitle.id = "build-log-dialog-title";
+    logDialog.setAttribute("aria-labelledby", logTitle.id);
+    const closeLog = actionButton("Close", "close", "icon-button");
+    closeLog.setAttribute("aria-label", "Close build log");
+    closeLog.title = "Close";
+    logHeader.append(logTitle, closeLog);
+    const logToolbar = element("div");
+    logToolbar.className = "build-log-dialog-toolbar";
+    const logContext = element("div");
+    logContext.className = "build-log-dialog-context";
+    const refreshLog = actionButton("Refresh log", "refresh", "secondary");
+    logToolbar.append(logContext, refreshLog);
+    const logOutput = element("pre", "No log output yet.");
+    logOutput.className = "build-log build-log-dialog-output";
+    logOutput.tabIndex = 0;
+    logDialogContent.append(logHeader, logToolbar, logOutput);
+    logDialog.append(logDialogContent);
+    section.append(heading, listRoot, logDialog);
     let data = initial;
     let canceled = false;
     let refreshing = false;
     let timer;
-    const expanded = new Set();
+    let activeLogBuildID = null;
+    let logTrigger = null;
     const logs = new Map();
     const loadingLogs = new Set();
     const mutatingBuilds = new Set();
-    const renderBuilds = () => {
-        const scrollPositions = new Map();
-        for (const log of listRoot.querySelectorAll(".build-log")) {
-            const id = log.dataset.buildId;
-            if (id) {
-                scrollPositions.set(id, {
-                    top: log.scrollTop,
-                    pinned: log.scrollHeight - log.scrollTop - log.clientHeight < 24,
-                });
+    let dependencyFrame;
+    const drawDependencyLines = () => {
+        dependencyFrame = undefined;
+        for (const canvas of listRoot.querySelectorAll(".pipeline-graph-canvas")) {
+            const svg = canvas.querySelector(".pipeline-dependencies");
+            if (!svg) {
+                continue;
+            }
+            const canvasBounds = canvas.getBoundingClientRect();
+            const width = Math.ceil(canvasBounds.width);
+            const height = Math.ceil(canvasBounds.height);
+            svg.setAttribute("width", String(width));
+            svg.setAttribute("height", String(height));
+            svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+            svg.replaceChildren();
+            const cards = new Map();
+            for (const card of canvas.querySelectorAll(".build-item")) {
+                if (card.dataset.buildId) {
+                    cards.set(card.dataset.buildId, card);
+                }
+            }
+            for (const target of cards.values()) {
+                for (const dependencyID of (target.dataset.needs ?? "").split(" ").filter(Boolean)) {
+                    const source = cards.get(dependencyID);
+                    if (!source) {
+                        continue;
+                    }
+                    const sourceBounds = source.getBoundingClientRect();
+                    const targetBounds = target.getBoundingClientRect();
+                    const startX = sourceBounds.right - canvasBounds.left;
+                    const startY = sourceBounds.top + sourceBounds.height / 2 - canvasBounds.top;
+                    const endX = targetBounds.left - canvasBounds.left;
+                    const endY = targetBounds.top + targetBounds.height / 2 - canvasBounds.top;
+                    if (endX <= startX) {
+                        continue;
+                    }
+                    const bend = Math.max(24, (endX - startX) * 0.45);
+                    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+                    path.classList.add("pipeline-dependency-line");
+                    path.setAttribute("d", `M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`);
+                    svg.append(path);
+                }
             }
         }
+    };
+    const scheduleDependencyLines = () => {
+        if (dependencyFrame !== undefined) {
+            window.cancelAnimationFrame(dependencyFrame);
+        }
+        dependencyFrame = window.requestAnimationFrame(drawDependencyLines);
+    };
+    const renderLogDialog = () => {
+        if (activeLogBuildID === null) {
+            return;
+        }
+        const build = data.builds.find((candidate) => candidate.id === activeLogBuildID);
+        if (!build) {
+            logTitle.textContent = "Build log";
+            logContext.replaceChildren(element("span", "Build is no longer available."));
+            logOutput.textContent = "No log output available.";
+            refreshLog.disabled = true;
+            return;
+        }
+        const pinned = logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight < 24;
+        const scrollTop = logOutput.scrollTop;
+        const contents = loadingLogs.has(build.id) && !logs.has(build.id)
+            ? "Loading build log…"
+            : logs.get(build.id) ?? "No log output yet.";
+        logTitle.textContent = `Build log · ${build.name}`;
+        const branch = element("span", build.branch);
+        branch.prepend(icon("git-branch"));
+        logContext.replaceChildren(buildStatusBadge(build.status), branch, element("code", shortCommitHash(build.commit)));
+        refreshLog.disabled = loadingLogs.has(build.id);
+        logOutput.dataset.buildId = build.id;
+        if (logOutput.textContent !== contents) {
+            logOutput.textContent = contents;
+            window.requestAnimationFrame(() => {
+                logOutput.scrollTop = pinned ? logOutput.scrollHeight : scrollTop;
+            });
+        }
+    };
+    const openBuildLog = (build, trigger) => {
+        activeLogBuildID = build.id;
+        logTrigger = trigger;
+        logOutput.scrollTop = 0;
+        renderLogDialog();
+        if (!logDialog.open) {
+            logDialog.showModal();
+        }
+        logOutput.focus();
+        void loadLog(build.id);
+    };
+    closeLog.addEventListener("click", () => logDialog.close());
+    refreshLog.addEventListener("click", () => {
+        if (activeLogBuildID !== null) {
+            void loadLog(activeLogBuildID);
+        }
+    });
+    logDialog.addEventListener("click", (event) => {
+        if (event.target === logDialog) {
+            logDialog.close();
+        }
+    });
+    logDialog.addEventListener("close", () => {
+        const closedBuildID = activeLogBuildID;
+        const currentTrigger = closedBuildID === null
+            ? null
+            : listRoot.querySelector(`.build-log-toggle[data-build-id="${CSS.escape(closedBuildID)}"]`);
+        activeLogBuildID = null;
+        (logTrigger?.isConnected ? logTrigger : currentTrigger)?.focus();
+        logTrigger = null;
+    });
+    const renderBuilds = () => {
+        const graphScrollPositions = new Map();
+        for (const graph of listRoot.querySelectorAll(".pipeline-graph-scroll")) {
+            if (graph.dataset.pipelineKey) {
+                graphScrollPositions.set(graph.dataset.pipelineKey, graph.scrollLeft);
+            }
+        }
+        const pipelines = repositoryPipelines(data.builds);
         const count = heading.querySelector(".count-badge");
         if (count) {
-            count.textContent = String(data.builds.length);
+            count.textContent = String(pipelines.length);
         }
         if (data.builds.length === 0) {
-            listRoot.replaceChildren(emptyState("No builds yet. Push a branch containing a .gitone.yaml build definition."));
+            listRoot.replaceChildren(emptyState("No pipelines yet. Push a branch containing a .gitone.yaml build definition."));
             return;
         }
         const list = element("ol");
-        list.className = "build-list";
-        for (const build of data.builds) {
-            const item = element("li");
-            item.className = `build-item build-item-${build.status}`;
-            const summary = element("div");
-            summary.className = "build-summary";
-            const identity = element("div");
-            identity.className = "build-identity";
-            const title = element("div");
-            title.className = "build-title";
-            title.append(element("strong", build.name), element("code", shortCommitHash(build.commit)));
-            const metadata = element("div");
-            metadata.className = "build-metadata";
-            const branch = element("span", `Branch ${build.branch}`);
-            const created = element("span", `${build.status === "manual" || build.status === "waiting" ? "Created" : "Queued"} ${relativeTime(build.createdAt)}`);
-            created.title = new Date(build.createdAt).toLocaleString();
-            const duration = element("span", buildDuration(build));
-            const image = element("span", build.image ? `Image ${build.image}` : "No image");
-            metadata.append(branch, created, duration, image);
-            if (build.needs && build.needs.length > 0) {
-                metadata.append(element("span", `Needs ${build.needs.map((need) => need.name).join(", ")}`));
-            }
-            if (build.rerunOf) {
-                const rerun = element("span", `Re-run of ${build.rerunOf}`);
-                rerun.title = build.rerunOf;
-                metadata.append(rerun);
-            }
-            identity.append(title, metadata);
-            const controls = element("div");
-            controls.className = "build-controls";
-            const logButton = actionButton(expanded.has(build.id) ? "Hide log" : "View log", undefined, "secondary build-log-toggle");
-            logButton.setAttribute("aria-expanded", String(expanded.has(build.id)));
-            logButton.addEventListener("click", () => {
-                if (expanded.has(build.id)) {
-                    expanded.delete(build.id);
-                    renderBuilds();
-                    return;
+        list.className = "pipeline-list";
+        for (const pipeline of pipelines) {
+            const pipelineItem = element("li");
+            const pipelineStatus = aggregateBuildStatus(pipeline.jobs);
+            pipelineItem.className = `pipeline-item pipeline-item-${pipelineStatus}`;
+            const pipelineHeader = element("div");
+            pipelineHeader.className = "pipeline-header";
+            const pipelineIdentity = element("div");
+            pipelineIdentity.className = "pipeline-identity";
+            const pipelineTitle = element("div");
+            pipelineTitle.className = "pipeline-title";
+            pipelineTitle.append(element("strong", `Pipeline · ${pipeline.branch}`), element("code", shortCommitHash(pipeline.commit)));
+            const pipelineMetadata = element("div");
+            pipelineMetadata.className = "pipeline-metadata";
+            const created = element("span", `Created ${relativeTime(pipeline.createdAt)}`);
+            created.title = new Date(pipeline.createdAt).toLocaleString();
+            pipelineMetadata.append(created, element("span", `${pipeline.jobs.length} ${pipeline.jobs.length === 1 ? "job" : "jobs"}`));
+            pipelineIdentity.append(pipelineTitle, pipelineMetadata);
+            pipelineHeader.append(pipelineIdentity, buildStatusBadge(pipelineStatus, "Pipeline"));
+            const graphScroll = element("div");
+            graphScroll.className = "pipeline-graph-scroll";
+            graphScroll.dataset.pipelineKey = pipeline.key;
+            graphScroll.setAttribute("aria-label", `Job dependencies for pipeline on ${pipeline.branch} at ${shortCommitHash(pipeline.commit)}`);
+            const graph = element("div");
+            graph.className = "pipeline-graph-canvas";
+            const dependencies = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            dependencies.classList.add("pipeline-dependencies");
+            dependencies.setAttribute("aria-hidden", "true");
+            graph.append(dependencies);
+            const stages = pipelineStages(pipeline.jobs);
+            stages.forEach((jobs, stageIndex) => {
+                const stage = element("section");
+                stage.className = "pipeline-stage";
+                const stageHeading = element("div");
+                stageHeading.className = "pipeline-stage-heading";
+                stageHeading.append(element("strong", stageIndex === 0 ? "Starts pipeline" : `Stage ${stageIndex + 1}`), element("span", `${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}`));
+                const stageJobs = element("div");
+                stageJobs.className = "pipeline-stage-jobs";
+                for (const build of jobs) {
+                    const item = element("article");
+                    item.className = `build-item build-item-${build.status}`;
+                    item.dataset.buildId = build.id;
+                    item.dataset.needs = (build.needs ?? []).map((need) => need.id).join(" ");
+                    const summary = element("div");
+                    summary.className = "build-summary";
+                    const identity = element("div");
+                    identity.className = "build-identity";
+                    const title = element("div");
+                    title.className = "build-title";
+                    title.append(element("strong", build.name));
+                    const metadata = element("div");
+                    metadata.className = "build-metadata";
+                    metadata.append(element("span", buildDuration(build)), element("span", build.image ? `Image ${build.image}` : "No image"));
+                    if (build.needs && build.needs.length > 0) {
+                        metadata.append(element("span", `Needs ${build.needs.map((need) => need.name).join(", ")}`));
+                    }
+                    if (build.rerunOf) {
+                        const rerun = element("span", `Re-run of ${build.rerunOf}`);
+                        rerun.title = build.rerunOf;
+                        metadata.append(rerun);
+                    }
+                    identity.append(title, metadata);
+                    const controls = element("div");
+                    controls.className = "build-controls";
+                    const logButton = actionButton("View log", "file", "secondary icon-button build-log-toggle");
+                    logButton.setAttribute("aria-label", "View log");
+                    logButton.title = "View log";
+                    logButton.dataset.buildId = build.id;
+                    logButton.setAttribute("aria-haspopup", "dialog");
+                    logButton.setAttribute("aria-controls", logDialog.id);
+                    logButton.addEventListener("click", () => openBuildLog(build, logButton));
+                    controls.append(buildStatusBadge(build.status));
+                    if (data.canManage) {
+                        const active = build.status === "waiting" || build.status === "queued" ||
+                            build.status === "running";
+                        const manual = build.status === "manual";
+                        const mutationButton = actionButton(manual ? "Run" : active ? "Cancel" : "Run again", manual ? "play" : active ? "close" : "refresh", active
+                            ? "danger-secondary icon-button build-cancel"
+                            : manual ? "primary icon-button build-start" : "secondary icon-button build-rerun");
+                        const mutationLabel = manual ? "Run manual job" : active ? "Cancel job" : "Run again";
+                        mutationButton.setAttribute("aria-label", mutationLabel);
+                        mutationButton.title = mutationLabel;
+                        const dependenciesReady = (build.needs ?? []).every((need) => data.builds.find((candidate) => candidate.id === need.id)?.status === "succeeded");
+                        mutationButton.disabled = mutatingBuilds.has(build.id) ||
+                            (manual && !dependenciesReady);
+                        if (manual && !dependenciesReady) {
+                            mutationButton.title = "This job can start after all dependencies succeed.";
+                        }
+                        mutationButton.addEventListener("click", () => {
+                            void mutateBuild(build, manual ? "start" : active ? "cancel" : "rerun");
+                        });
+                        controls.append(mutationButton);
+                    }
+                    controls.append(logButton);
+                    summary.append(identity, controls);
+                    item.append(summary);
+                    if (build.error) {
+                        const error = element("p", build.error);
+                        error.className = "build-error";
+                        error.setAttribute("role", "alert");
+                        item.append(error);
+                    }
+                    stageJobs.append(item);
                 }
-                expanded.add(build.id);
-                renderBuilds();
-                void loadLog(build.id);
+                stage.append(stageHeading, stageJobs);
+                graph.append(stage);
             });
-            controls.append(buildStatusBadge(build.status));
-            if (data.canManage) {
-                const active = build.status === "waiting" || build.status === "queued" ||
-                    build.status === "running";
-                const manual = build.status === "manual";
-                const mutationButton = actionButton(manual ? "Run" : active ? "Cancel" : "Run again", manual ? "play" : active ? "close" : "refresh", active
-                    ? "danger-secondary build-cancel"
-                    : manual ? "primary build-start" : "secondary build-rerun");
-                const dependenciesReady = (build.needs ?? []).every((need) => data.builds.find((candidate) => candidate.id === need.id)?.status === "succeeded");
-                mutationButton.disabled = mutatingBuilds.has(build.id) ||
-                    (manual && !dependenciesReady);
-                if (manual && !dependenciesReady) {
-                    mutationButton.title = "This job can start after all dependencies succeed.";
-                }
-                mutationButton.addEventListener("click", () => {
-                    void mutateBuild(build, manual ? "start" : active ? "cancel" : "rerun");
-                });
-                controls.append(mutationButton);
-            }
-            controls.append(logButton);
-            summary.append(identity, controls);
-            item.append(summary);
-            if (build.error) {
-                const error = element("p", build.error);
-                error.className = "build-error";
-                error.setAttribute("role", "alert");
-                item.append(error);
-            }
-            if (expanded.has(build.id)) {
-                const panel = element("div");
-                panel.className = "build-log-panel";
-                const logHeader = element("div");
-                logHeader.className = "build-log-header";
-                const label = element("strong", `Build log · ${build.name}`);
-                const refreshLog = actionButton("Refresh log", "refresh", "secondary");
-                refreshLog.disabled = loadingLogs.has(build.id);
-                refreshLog.addEventListener("click", () => void loadLog(build.id));
-                logHeader.append(label, refreshLog);
-                const log = element("pre", loadingLogs.has(build.id)
-                    ? "Loading build log…"
-                    : logs.get(build.id) ?? "No log output yet.");
-                log.className = "build-log";
-                log.dataset.buildId = build.id;
-                log.tabIndex = 0;
-                panel.append(logHeader, log);
-                item.append(panel);
-            }
-            list.append(item);
+            graphScroll.append(graph);
+            pipelineItem.append(pipelineHeader, graphScroll);
+            list.append(pipelineItem);
         }
         listRoot.replaceChildren(list);
-        for (const log of listRoot.querySelectorAll(".build-log")) {
-            const position = log.dataset.buildId
-                ? scrollPositions.get(log.dataset.buildId)
-                : undefined;
-            if (position) {
-                log.scrollTop = position.pinned ? log.scrollHeight : position.top;
+        for (const graph of listRoot.querySelectorAll(".pipeline-graph-scroll")) {
+            if (graph.dataset.pipelineKey) {
+                graph.scrollLeft = graphScrollPositions.get(graph.dataset.pipelineKey) ?? 0;
             }
         }
+        scheduleDependencyLines();
     };
     const updateBuild = (updated) => {
         const index = data.builds.findIndex((build) => build.id === updated.id);
@@ -1951,7 +2153,7 @@ function repositoryBuildsView(route, initial) {
             return;
         }
         loadingLogs.add(id);
-        renderBuilds();
+        renderLogDialog();
         try {
             const detail = await request(repositoryBuildAPIURL(route.repository, id));
             if (canceled) {
@@ -1969,6 +2171,7 @@ function repositoryBuildsView(route, initial) {
             loadingLogs.delete(id);
             if (!canceled) {
                 renderBuilds();
+                renderLogDialog();
             }
         }
     }
@@ -1993,15 +2196,15 @@ function repositoryBuildsView(route, initial) {
         refreshButton.disabled = true;
         refreshState.textContent = "Refreshing…";
         try {
-            const previouslyActive = new Set(data.builds.filter((build) => expanded.has(build.id) &&
+            const previouslyActiveLog = activeLogBuildID !== null && data.builds.some((build) => build.id === activeLogBuildID &&
                 (build.status === "waiting" || build.status === "queued" ||
-                    build.status === "running")).map((build) => build.id));
+                    build.status === "running"));
             const refreshed = await request(repositoryBuildsAPIURL(route.repository));
-            const liveLogs = refreshed.builds.filter((build) => expanded.has(build.id) &&
+            const liveLogs = refreshed.builds.filter((build) => build.id === activeLogBuildID &&
                 (build.status === "waiting" ||
                     build.status === "queued" ||
                     build.status === "running" ||
-                    previouslyActive.has(build.id) ||
+                    previouslyActiveLog ||
                     !logs.has(build.id)));
             data = refreshed;
             const details = await Promise.all(liveLogs.map(async (build) => {
@@ -2024,6 +2227,7 @@ function repositoryBuildsView(route, initial) {
                 refreshState.title = updated.toLocaleString();
                 refreshState.removeAttribute("role");
                 renderBuilds();
+                renderLogDialog();
             }
         }
         catch (reason) {
@@ -2046,13 +2250,24 @@ function repositoryBuildsView(route, initial) {
             void refreshBuilds();
         }
     };
+    const resizeHandler = () => scheduleDependencyLines();
     document.addEventListener("visibilitychange", visibilityHandler);
+    window.addEventListener("resize", resizeHandler);
     repositoryBuildPollingStop = () => {
         canceled = true;
+        activeLogBuildID = null;
+        logTrigger = null;
+        if (logDialog.open) {
+            logDialog.close();
+        }
         if (timer !== undefined) {
             window.clearTimeout(timer);
         }
+        if (dependencyFrame !== undefined) {
+            window.cancelAnimationFrame(dependencyFrame);
+        }
         document.removeEventListener("visibilitychange", visibilityHandler);
+        window.removeEventListener("resize", resizeHandler);
     };
     renderBuilds();
     scheduleRefresh();
