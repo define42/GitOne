@@ -6,9 +6,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -282,7 +285,7 @@ func TestRepositoryBranchAndFileWritesWaitForOperationLock(t *testing.T) {
 
 func TestRepositoryArchivesContainTheSelectedTree(t *testing.T) {
 	service, credentials, head := repositoryAPIFixture(t)
-	repository, _, err := service.openBrowsableRepository(
+	repository, parsed, err := service.openBrowsableRepository(
 		context.Background(),
 		credentials,
 		"engineering/api",
@@ -298,9 +301,10 @@ func TestRepositoryArchivesContainTheSelectedTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	source := repositoryArchiveSource{storage: service.Storage, repository: parsed}
 
 	var zipContents bytes.Buffer
-	if err = writeRepositoryZIP(tree, commit, "api-main/", &zipContents); err != nil {
+	if err = writeRepositoryZIP(source, tree, commit, "api-main/", &zipContents); err != nil {
 		t.Fatal(err)
 	}
 	reader, err := zip.NewReader(
@@ -328,7 +332,7 @@ func TestRepositoryArchivesContainTheSelectedTree(t *testing.T) {
 	}
 
 	var tarContents bytes.Buffer
-	if err = writeRepositoryTarGzip(tree, commit, "api-main/", &tarContents); err != nil {
+	if err = writeRepositoryTarGzip(source, tree, commit, "api-main/", &tarContents); err != nil {
 		t.Fatal(err)
 	}
 	compressed, err := gzip.NewReader(&tarContents)
@@ -362,9 +366,105 @@ func TestRepositoryArchivesContainTheSelectedTree(t *testing.T) {
 	}
 }
 
+func TestRepositoryArchivesResolveLFSContent(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	repository, parsed, err := service.openBrowsableRepository(
+		context.Background(),
+		credentials,
+		"engineering/api",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("the real Git LFS payload\x00with binary data")
+	oid := fmt.Sprintf("%x", sha256.Sum256(payload))
+	pointer := []byte(fmt.Sprintf(
+		"version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d\n",
+		oid,
+		len(payload),
+	))
+	tree := storeTestTree(t, repository, object.TreeEntry{
+		Name: "asset.bin", Mode: filemode.Regular,
+		Hash: storeTestBlob(t, repository, pointer),
+	})
+	commit := storeTestCommit(t, repository, tree)
+	lfsRoot, err := service.Storage.LFSPath(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objectPath := filepath.Join(lfsRoot, "objects", oid[:2], oid[2:4], oid)
+	if err = os.MkdirAll(filepath.Dir(objectPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(objectPath, payload, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	source := repositoryArchiveSource{storage: service.Storage, repository: parsed}
+	if err = source.verifyLFSObjects(tree); err != nil {
+		t.Fatal(err)
+	}
+
+	var zipContents bytes.Buffer
+	if err = writeRepositoryZIP(source, tree, commit, "api-main/", &zipContents); err != nil {
+		t.Fatal(err)
+	}
+	zipReader, err := zip.NewReader(
+		bytes.NewReader(zipContents.Bytes()),
+		int64(zipContents.Len()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(zipReader.File) != 1 || zipReader.File[0].Name != "api-main/asset.bin" {
+		t.Fatalf("ZIP entries = %#v", zipReader.File)
+	}
+	zipEntry, err := zipReader.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipPayload, readErr := io.ReadAll(zipEntry)
+	closeErr := zipEntry.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read ZIP LFS entry: %v, %v", readErr, closeErr)
+	}
+	if !bytes.Equal(zipPayload, payload) {
+		t.Fatalf("ZIP LFS entry = %q, want %q", zipPayload, payload)
+	}
+
+	var tarContents bytes.Buffer
+	if err = writeRepositoryTarGzip(source, tree, commit, "api-main/", &tarContents); err != nil {
+		t.Fatal(err)
+	}
+	compressed, err := gzip.NewReader(&tarContents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarReader := tar.NewReader(compressed)
+	header, err := tarReader.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarPayload, err := io.ReadAll(tarReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header.Name != "api-main/asset.bin" || header.Size != int64(len(payload)) {
+		t.Fatalf("tar LFS header = %#v", header)
+	}
+	if !bytes.Equal(tarPayload, payload) {
+		t.Fatalf("tar LFS entry = %q, want %q", tarPayload, payload)
+	}
+	if _, err = tarReader.Next(); !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected second tar entry: %v", err)
+	}
+	if err = compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRepositoryArchivesPreserveExecutableAndSymlinkMetadata(t *testing.T) {
 	service, credentials, _ := repositoryAPIFixture(t)
-	repository, _, err := service.openBrowsableRepository(
+	repository, parsed, err := service.openBrowsableRepository(
 		context.Background(),
 		credentials,
 		"engineering/api",
@@ -391,9 +491,10 @@ func TestRepositoryArchivesPreserveExecutableAndSymlinkMetadata(t *testing.T) {
 	commit := storeTestCommit(t, repository, tree)
 	modified := time.Date(2024, time.January, 2, 3, 4, 6, 0, time.UTC)
 	commit.Committer.When = modified
+	source := repositoryArchiveSource{storage: service.Storage, repository: parsed}
 
 	var zipContents bytes.Buffer
-	if err = writeRepositoryZIP(tree, commit, "api-main/", &zipContents); err != nil {
+	if err = writeRepositoryZIP(source, tree, commit, "api-main/", &zipContents); err != nil {
 		t.Fatal(err)
 	}
 	zipReader, err := zip.NewReader(
@@ -444,7 +545,7 @@ func TestRepositoryArchivesPreserveExecutableAndSymlinkMetadata(t *testing.T) {
 	requireZIPEntry("current", os.ModeSymlink|0o777, "run.sh")
 
 	var tarContents bytes.Buffer
-	if err = writeRepositoryTarGzip(tree, commit, "api-main/", &tarContents); err != nil {
+	if err = writeRepositoryTarGzip(source, tree, commit, "api-main/", &tarContents); err != nil {
 		t.Fatal(err)
 	}
 	compressed, err := gzip.NewReader(&tarContents)

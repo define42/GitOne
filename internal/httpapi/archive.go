@@ -17,9 +17,17 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/httpio"
+	"github.com/define42/GitOne/internal/lfs"
+	"github.com/define42/GitOne/internal/repopath"
+	"github.com/define42/GitOne/internal/storage"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+type repositoryArchiveSource struct {
+	storage    storage.Store
+	repository repopath.Repository
+}
 
 func (a API) downloadRepositoryArchive(
 	ctx context.Context,
@@ -57,6 +65,16 @@ func (a API) downloadRepositoryArchive(
 	baseName := archiveName(parsed.Name, input.Ref)
 	fileName := baseName + "." + format
 	prefix := baseName + "/"
+	source := repositoryArchiveSource{
+		storage:    a.Storage,
+		repository: parsed,
+	}
+	if err = source.verifyLFSObjects(tree); err != nil {
+		return nil, huma.Error500InternalServerError(
+			"could not resolve repository LFS objects",
+			err,
+		)
+	}
 
 	return &huma.StreamResponse{
 		Body: func(response huma.Context) {
@@ -74,9 +92,9 @@ func (a API) downloadRepositoryArchive(
 			defer cleanup()
 			var writeErr error
 			if format == "zip" {
-				writeErr = writeRepositoryZIP(tree, commit, prefix, output)
+				writeErr = writeRepositoryZIP(source, tree, commit, prefix, output)
 			} else {
-				writeErr = writeRepositoryTarGzip(tree, commit, prefix, output)
+				writeErr = writeRepositoryTarGzip(source, tree, commit, prefix, output)
 			}
 			if writeErr != nil {
 				log.Printf(
@@ -92,6 +110,7 @@ func (a API) downloadRepositoryArchive(
 }
 
 func writeRepositoryZIP(
+	source repositoryArchiveSource,
 	tree *object.Tree,
 	commit *object.Commit,
 	prefix string,
@@ -119,8 +138,18 @@ func writeRepositoryZIP(
 		default:
 			return nil
 		}
+		var reader io.ReadCloser
+		if file.Mode != filemode.Symlink {
+			reader, _, err = source.open(file)
+			if err != nil {
+				return err
+			}
+		}
 		writer, err := archive.CreateHeader(header)
 		if err != nil {
+			if reader != nil {
+				return errors.Join(err, reader.Close())
+			}
 			return err
 		}
 		if file.Mode == filemode.Symlink {
@@ -131,10 +160,6 @@ func writeRepositoryZIP(
 			_, err = io.WriteString(writer, contents)
 			return err
 		}
-		reader, err := file.Reader()
-		if err != nil {
-			return err
-		}
 		_, writeErr := io.Copy(writer, reader)
 		closeErr := reader.Close()
 		return errors.Join(writeErr, closeErr)
@@ -143,6 +168,7 @@ func writeRepositoryZIP(
 }
 
 func writeRepositoryTarGzip(
+	source repositoryArchiveSource,
 	tree *object.Tree,
 	commit *object.Commit,
 	prefix string,
@@ -177,21 +203,106 @@ func writeRepositoryTarGzip(
 		default:
 			return nil
 		}
+		var reader io.ReadCloser
+		if header.Typeflag != tar.TypeSymlink {
+			reader, header.Size, err = source.open(file)
+			if err != nil {
+				return err
+			}
+		}
 		if err = archive.WriteHeader(header); err != nil {
+			if reader != nil {
+				return errors.Join(err, reader.Close())
+			}
 			return err
 		}
 		if header.Typeflag == tar.TypeSymlink {
 			return nil
-		}
-		reader, err := file.Reader()
-		if err != nil {
-			return err
 		}
 		_, writeErr := io.Copy(archive, reader)
 		closeErr := reader.Close()
 		return errors.Join(writeErr, closeErr)
 	})
 	return errors.Join(err, archive.Close(), compressed.Close())
+}
+
+func (s repositoryArchiveSource) verifyLFSObjects(tree *object.Tree) error {
+	return tree.Files().ForEach(func(file *object.File) error {
+		switch file.Mode {
+		case filemode.Executable, filemode.Regular, filemode.Deprecated:
+		default:
+			return nil
+		}
+		pointer, ok, err := repositoryArchiveLFSPointer(file)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		if err = lfs.VerifyObject(s.storage, s.repository, pointer.OID, pointer.Size); err != nil {
+			return fmt.Errorf("resolve LFS object for %q: %w", file.Name, err)
+		}
+		return nil
+	})
+}
+
+func (s repositoryArchiveSource) open(file *object.File) (io.ReadCloser, int64, error) {
+	pointer, ok, err := repositoryArchiveLFSPointer(file)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !ok {
+		reader, openErr := file.Reader()
+		return reader, file.Size, openErr
+	}
+
+	reader, err := lfs.OpenObject(s.storage, s.repository, pointer.OID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open LFS object for %q: %w", file.Name, err)
+	}
+	info, err := reader.Stat()
+	if err != nil {
+		return nil, 0, errors.Join(
+			fmt.Errorf("inspect LFS object for %q: %w", file.Name, err),
+			reader.Close(),
+		)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, 0, errors.Join(
+			fmt.Errorf("LFS object for %q is not a regular file", file.Name),
+			reader.Close(),
+		)
+	}
+	if info.Size() != pointer.Size {
+		return nil, 0, errors.Join(
+			fmt.Errorf(
+				"LFS object for %q has size %d, expected %d",
+				file.Name,
+				info.Size(),
+				pointer.Size,
+			),
+			reader.Close(),
+		)
+	}
+	return reader, pointer.Size, nil
+}
+
+func repositoryArchiveLFSPointer(file *object.File) (lfs.Pointer, bool, error) {
+	if file.Size > lfs.MaxPointerSize {
+		return lfs.Pointer{}, false, nil
+	}
+	reader, err := file.Reader()
+	if err != nil {
+		return lfs.Pointer{}, false, fmt.Errorf("open Git blob %q: %w", file.Name, err)
+	}
+	content, readErr := io.ReadAll(io.LimitReader(reader, lfs.MaxPointerSize+1))
+	closeErr := reader.Close()
+	if err = errors.Join(readErr, closeErr); err != nil {
+		return lfs.Pointer{}, false, fmt.Errorf("read Git blob %q: %w", file.Name, err)
+	}
+	pointer, ok := lfs.ParsePointer(content)
+	return pointer, ok, nil
 }
 
 func archiveEntryName(prefix, fileName string) (string, error) {
