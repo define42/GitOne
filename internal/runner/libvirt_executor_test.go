@@ -250,7 +250,6 @@ func TestLibvirtConfigNormalizationAndValidation(t *testing.T) {
 		config.NetworkName != defaultLibvirtNetworkName ||
 		config.NetworkCIDR != defaultLibvirtNetworkCIDR(defaultLibvirtNetworkName) ||
 		config.SSHUser != defaultLibvirtSSHUser ||
-		config.VirshCommand != defaultLibvirtVirshCommand ||
 		config.DockerCommand != defaultLibvirtDockerCommand ||
 		config.SSHPort != defaultLibvirtSSHPort ||
 		config.VCPUs != defaultLibvirtVCPUs ||

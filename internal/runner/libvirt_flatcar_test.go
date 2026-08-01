@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,30 +15,17 @@ import (
 	"testing"
 	"time"
 
+	libvirt "github.com/digitalocean/go-libvirt"
 	"golang.org/x/sys/unix"
 )
 
 type flatcarRefreshRunner struct {
+	fakeLibvirtRPCClient
 	mu        sync.Mutex
 	refreshes int
 }
 
-func (r *flatcarRefreshRunner) LookPath(command string) (string, error) {
-	return command, nil
-}
-
-func (r *flatcarRefreshRunner) Run(
-	_ context.Context,
-	_ string,
-	arguments []string,
-	_ io.Reader,
-	_ io.Writer,
-	_ io.Writer,
-) error {
-	if len(arguments) != 4 || arguments[0] != "--connect" ||
-		arguments[2] != "pool-refresh" {
-		return fmt.Errorf("unexpected Flatcar virsh arguments: %#v", arguments)
-	}
+func (r *flatcarRefreshRunner) StoragePoolRefresh(libvirt.StoragePool, uint32) error {
 	r.mu.Lock()
 	r.refreshes++
 	r.mu.Unlock()
@@ -57,9 +43,9 @@ func newFlatcarTestProvider(
 	imageURL string,
 	digest string,
 	client *http.Client,
-	runner libvirtCommandRunner,
-) *virshVMProvider {
-	return &virshVMProvider{
+	rpcClient libvirtRPCClient,
+) *libvirtRPCProvider {
+	return &libvirtRPCProvider{
 		config: LibvirtConfig{
 			URI:             "test:///system",
 			PoolName:        "test-pool",
@@ -67,10 +53,10 @@ func newFlatcarTestProvider(
 			BaseVolumeName:  "flatcar-base.qcow2",
 			BaseImageURL:    imageURL,
 			BaseImageSHA512: digest,
-			VirshCommand:    "virsh",
 		},
 		httpClient: client,
-		runner:     runner,
+		client:     rpcClient,
+		pool:       libvirt.StoragePool{Name: "test-pool"},
 	}
 }
 

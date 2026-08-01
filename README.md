@@ -136,9 +136,9 @@ the runner deliberately has no silent TCG fallback. On a host that is itself a
 VM, nested virtualization must be enabled. A typical host preparation is:
 
 ```bash
-sudo apt-get install -y libvirt-daemon-system libvirt-clients qemu-kvm
+sudo apt-get install -y libvirt-daemon-system qemu-kvm
 test -c /dev/kvm
-sudo virsh pool-info default
+test -S /var/run/libvirt/libvirt-sock
 ```
 
 At startup the runner checks
@@ -186,8 +186,9 @@ socket and write the trusted configured pool path. Each runner process creates
 a fresh Ed25519 identity with Go. The private key never leaves process memory;
 only its public key is placed in each disposable VM through Ignition. Guest
 host keys are pinned per VM in memory and forgotten only after teardown
-completes. Libvirt `+ssh` URIs are rejected because they would require an
-external SSH transport; expose a local libvirt socket to the controller instead.
+completes. Libvirt `+ssh` URIs are rejected to keep hypervisor management on the
+dedicated local socket and avoid a second host-transport trust boundary; expose
+a local libvirt socket to the controller instead.
 The GitOne server and runner use the same API token:
 
 ```bash
@@ -302,8 +303,11 @@ old host-Docker executor is available only as the explicit migration option
 `-runner-executor docker`, where `-docker-workers` controls concurrency and
 defaults to one.
 The web image is built from `Dockerfile`; the controller image is built from
-`Dockerfile.runner` and contains `virsh`. Guest SSH is implemented by the
-compiled Go runner, so the image does not contain an OpenSSH client.
+`Dockerfile.runner`. The compiled runner speaks libvirt's RPC protocol directly
+over the mounted Unix socket using `digitalocean/go-libvirt`, so the image
+contains neither `virsh` nor the native libvirt client library. Guest SSH is
+also implemented by the compiled Go runner, so the image does not contain an
+OpenSSH client.
 
 The GitOne server retains repositories, durable queue state, and logs beside
 each bare repository under `<root>/<group>/<repository>.build`; stored logs are

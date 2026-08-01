@@ -26,7 +26,6 @@ const (
 	defaultLibvirtPoolPath       = "/var/lib/libvirt/images"
 	defaultLibvirtNetworkName    = "gitone-runner"
 	defaultLibvirtSSHUser        = "core"
-	defaultLibvirtVirshCommand   = "virsh"
 	defaultLibvirtDockerCommand  = "docker"
 	defaultLibvirtSSHPort        = 22
 	defaultLibvirtVCPUs          = 2
@@ -53,7 +52,6 @@ type LibvirtConfig struct {
 	NetworkName        string
 	NetworkCIDR        string
 	SSHUser            string
-	VirshCommand       string
 	DockerCommand      string
 	SSHPort            int
 	VCPUs              int
@@ -136,7 +134,7 @@ func NewLibvirtExecutor(config LibvirtConfig) (*LibvirtExecutor, error) {
 	}
 	return newLibvirtExecutorWithNormalizedConfig(
 		normalized,
-		newVirshVMProvider(normalized),
+		newLibvirtRPCProvider(normalized),
 	)
 }
 
@@ -190,7 +188,6 @@ func normalizeLibvirtConfig(config LibvirtConfig) (LibvirtConfig, error) {
 		return LibvirtConfig{}, err
 	}
 	config.SSHUser = defaultString(config.SSHUser, defaultLibvirtSSHUser)
-	config.VirshCommand = defaultString(config.VirshCommand, defaultLibvirtVirshCommand)
 	config.DockerCommand = defaultString(config.DockerCommand, defaultLibvirtDockerCommand)
 	if config.SSHPort == 0 {
 		config.SSHPort = defaultLibvirtSSHPort
@@ -234,7 +231,7 @@ func normalizeLibvirtConfig(config LibvirtConfig) (LibvirtConfig, error) {
 	switch {
 	case !validRunnerID(config.RunnerID):
 		return LibvirtConfig{}, errors.New("valid libvirt runner ID is required")
-	case libvirtURIUsesExternalSSH(config.URI):
+	case libvirtURIUsesSSHTransport(config.URI):
 		return LibvirtConfig{}, errors.New("libvirt +ssh transport is unsupported; use a local libvirt socket")
 	case config.BaseVolumeName == "":
 		return LibvirtConfig{}, errors.New("libvirt base volume name is required")
@@ -270,7 +267,7 @@ func normalizeLibvirtConfig(config LibvirtConfig) (LibvirtConfig, error) {
 	return config, nil
 }
 
-func libvirtURIUsesExternalSSH(uri string) bool {
+func libvirtURIUsesSSHTransport(uri string) bool {
 	scheme, _, found := strings.Cut(strings.TrimSpace(uri), ":")
 	return found && strings.HasSuffix(strings.ToLower(scheme), "+ssh")
 }

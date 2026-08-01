@@ -25,12 +25,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type recordingLibvirtCommandRunner struct {
-	command   string
-	arguments []string
-	run       func(io.Reader, io.Writer, io.Writer) error
-}
-
 type recordingLibvirtGuestSSH struct {
 	mu            sync.Mutex
 	commands      []string
@@ -79,26 +73,6 @@ func (s *recordingLibvirtGuestSSH) lastCommand() string {
 	return s.commands[len(s.commands)-1]
 }
 
-func (r *recordingLibvirtCommandRunner) LookPath(command string) (string, error) {
-	return command, nil
-}
-
-func (r *recordingLibvirtCommandRunner) Run(
-	_ context.Context,
-	command string,
-	arguments []string,
-	input io.Reader,
-	output io.Writer,
-	errorOutput io.Writer,
-) error {
-	r.command = command
-	r.arguments = append([]string(nil), arguments...)
-	if r.run == nil {
-		return nil
-	}
-	return r.run(input, output, errorOutput)
-}
-
 func TestRunSSHDoesNotExposeRemoteCommand(t *testing.T) {
 	const secret = "TOP_SECRET_BUILD_VALUE"
 	guestSSH := &recordingLibvirtGuestSSH{
@@ -107,7 +81,7 @@ func TestRunSSHDoesNotExposeRemoteCommand(t *testing.T) {
 			return errors.New("exit status 17")
 		},
 	}
-	provider := &virshVMProvider{
+	provider := &libvirtRPCProvider{
 		config: LibvirtConfig{
 			SSHUser:       "core",
 			DockerCommand: "docker",
@@ -138,7 +112,7 @@ func TestRunSSHPreservesControlledTransportDiagnostic(t *testing.T) {
 			return &libvirtSSHTransportError{message: "VM SSH host key changed"}
 		},
 	}
-	provider := &virshVMProvider{guestSSH: guestSSH}
+	provider := &libvirtRPCProvider{guestSSH: guestSSH}
 	instance := vmInstance{Name: "owned-warm-vm", Address: "192.0.2.20"}
 	err := provider.runSSH(context.Background(), instance, nil, io.Discard, io.Discard, "secret")
 	if err == nil || !strings.Contains(err.Error(), "VM SSH host key changed") {
@@ -480,7 +454,7 @@ func TestRunSSHSanitizesRealServerExitSignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := &virshVMProvider{guestSSH: transport}
+	provider := &libvirtRPCProvider{guestSSH: transport}
 	err = provider.runSSH(
 		context.Background(),
 		vmInstance{Name: "warm-vm-1", Address: host},
@@ -513,89 +487,15 @@ func (w *concurrencyDetectingWriter) Write(contents []byte) (int, error) {
 	return len(contents), nil
 }
 
-func TestRunLibvirtCommandDoesNotCaptureStreamedStderr(t *testing.T) {
-	const stderrBytes = 4 << 20
-	runner := &recordingLibvirtCommandRunner{
-		run: func(_ io.Reader, _ io.Writer, errorOutput io.Writer) error {
-			block := bytes.Repeat([]byte("x"), 4096)
-			for written := 0; written < stderrBytes; written += len(block) {
-				if _, err := errorOutput.Write(block); err != nil {
-					return err
-				}
-			}
-			return errors.New("exit status 1")
-		},
-	}
-	err := runLibvirtCommand(
-		context.Background(),
-		runner,
-		"ssh",
-		[]string{"host", "remote command"},
-		"ssh test-vm",
-		nil,
-		io.Discard,
-		io.Discard,
-	)
-	if err == nil {
-		t.Fatal("command succeeded unexpectedly")
-	}
-	if len(err.Error()) > 256 || strings.Contains(err.Error(), strings.Repeat("x", 32)) {
-		t.Fatalf("command error retained streamed stderr: length=%d", len(err.Error()))
-	}
-}
-
-func TestRunLibvirtCommandDefaultsOutputAndSucceeds(t *testing.T) {
-	runner := &recordingLibvirtCommandRunner{}
-	if err := runLibvirtCommand(
-		context.Background(),
-		runner,
-		"virsh",
-		[]string{"list"},
-		"virsh list",
-		nil,
-		nil,
-		nil,
-	); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestSystemLibvirtCommandRunnerExecutesProcess(t *testing.T) {
-	runner := systemLibvirtCommandRunner{}
-	command, err := runner.LookPath("sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	err = runner.Run(
-		context.Background(),
-		command,
-		[]string{"-c", "read value; printf 'out:%s' \"$value\"; printf 'err' >&2"},
-		strings.NewReader("payload\n"),
-		&stdout,
-		&stderr,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stdout.String() != "out:payload" || stderr.String() != "err" {
-		t.Fatalf("process output = %q, %q", stdout.String(), stderr.String())
-	}
-}
-
 func TestLibvirtTransportErrorHelpers(t *testing.T) {
 	cause := errors.New("failed")
-	commandErr := &libvirtCommandError{Command: "virsh list", Err: cause}
-	if !errors.Is(commandErr, cause) || commandErr.Error() != "virsh list: failed" {
+	commandErr := &libvirtGuestCommandError{Command: "ssh test-vm", Err: cause}
+	if !errors.Is(commandErr, cause) || commandErr.Error() != "ssh test-vm: failed" {
 		t.Fatalf("command error = %v", commandErr)
 	}
 	transportErr := &libvirtSSHTransportError{message: "safe diagnostic"}
 	if transportErr.Error() != "safe diagnostic" {
 		t.Fatalf("transport error = %q", transportErr.Error())
-	}
-	if summary := commandSummary("/usr/bin/tool", []string{"--password=secret", "safe"}); summary != "tool <redacted> safe" {
-		t.Fatalf("command summary = %q", summary)
 	}
 }
 
@@ -621,7 +521,7 @@ func TestSafeLibvirtSSHDialErrors(t *testing.T) {
 	}
 }
 
-func TestVirshProviderExecuteLifecycle(t *testing.T) {
+func TestLibvirtProviderExecuteLifecycle(t *testing.T) {
 	newRequest := func(directory string) ExecuteRequest {
 		return ExecuteRequest{
 			Job: Job{
@@ -658,7 +558,7 @@ func TestVirshProviderExecuteLifecycle(t *testing.T) {
 				return nil
 			},
 		}
-		provider := &virshVMProvider{
+		provider := &libvirtRPCProvider{
 			config:      LibvirtConfig{DockerCommand: "docker", CleanupTimeout: time.Second},
 			ownerPrefix: "gitone-test",
 			guestSSH:    guest,
@@ -684,7 +584,7 @@ func TestVirshProviderExecuteLifecycle(t *testing.T) {
 				return nil
 			},
 		}
-		provider := &virshVMProvider{
+		provider := &libvirtRPCProvider{
 			config:      LibvirtConfig{DockerCommand: "docker", CleanupTimeout: time.Second},
 			ownerPrefix: "gitone-test",
 			guestSSH:    guest,
@@ -696,7 +596,7 @@ func TestVirshProviderExecuteLifecycle(t *testing.T) {
 	})
 
 	t.Run("validates inputs", func(t *testing.T) {
-		provider := &virshVMProvider{ownerPrefix: "gitone-test"}
+		provider := &libvirtRPCProvider{ownerPrefix: "gitone-test"}
 		request := newRequest(t.TempDir())
 		if err := provider.Execute(context.Background(), vmInstance{Name: "unmanaged"}, request, nil); err == nil {
 			t.Fatal("unmanaged instance was accepted")
@@ -726,7 +626,7 @@ func TestVirshProviderExecuteLifecycle(t *testing.T) {
 }
 
 func TestDockerRunArgumentsMatchContainerIsolationContract(t *testing.T) {
-	provider := &virshVMProvider{config: LibvirtConfig{DockerCommand: "/usr/bin/docker"}}
+	provider := &libvirtRPCProvider{config: LibvirtConfig{DockerCommand: "/usr/bin/docker"}}
 	request := ExecuteRequest{
 		Job: Job{
 			ID:         "build-1",
@@ -784,7 +684,7 @@ func TestUploadMakesWorkspaceUsableByNonRootImageUser(t *testing.T) {
 			return err
 		},
 	}
-	provider := &virshVMProvider{
+	provider := &libvirtRPCProvider{
 		config:   LibvirtConfig{SSHUser: "core"},
 		guestSSH: guestSSH,
 	}

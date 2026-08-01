@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -24,113 +23,17 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type libvirtCommandRunner interface {
-	LookPath(string) (string, error)
-	Run(
-		context.Context,
-		string,
-		[]string,
-		io.Reader,
-		io.Writer,
-		io.Writer,
-	) error
-}
-
-type systemLibvirtCommandRunner struct{}
-
-func (systemLibvirtCommandRunner) LookPath(command string) (string, error) {
-	return exec.LookPath(command)
-}
-
-func (systemLibvirtCommandRunner) Run(
-	ctx context.Context,
-	command string,
-	arguments []string,
-	input io.Reader,
-	output io.Writer,
-	errorOutput io.Writer,
-) error {
-	process := exec.CommandContext(ctx, command, arguments...)
-	process.Stdin = input
-	process.Stdout = output
-	process.Stderr = errorOutput
-	process.Env = append(os.Environ(), "LANG=C", "LC_ALL=C")
-	process.WaitDelay = 5 * time.Second
-	return process.Run()
-}
-
-type libvirtCommandError struct {
+type libvirtGuestCommandError struct {
 	Command string
 	Err     error
-	Stderr  string
 }
 
-func (e *libvirtCommandError) Error() string {
-	if e.Stderr == "" {
-		return fmt.Sprintf("%s: %v", e.Command, e.Err)
-	}
-	return fmt.Sprintf("%s: %v: %s", e.Command, e.Err, e.Stderr)
+func (e *libvirtGuestCommandError) Error() string {
+	return fmt.Sprintf("%s: %v", e.Command, e.Err)
 }
 
-func (e *libvirtCommandError) Unwrap() error {
+func (e *libvirtGuestCommandError) Unwrap() error {
 	return e.Err
-}
-
-func runLibvirtCommandCapture(
-	ctx context.Context,
-	runner libvirtCommandRunner,
-	command string,
-	arguments ...string,
-) (string, error) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	err := runner.Run(ctx, command, arguments, nil, &stdout, &stderr)
-	if err != nil {
-		return strings.TrimSpace(stdout.String()), &libvirtCommandError{
-			Command: commandSummary(command, arguments),
-			Err:     err,
-			Stderr:  strings.TrimSpace(stderr.String()),
-		}
-	}
-	return strings.TrimSpace(stdout.String()), nil
-}
-
-func runLibvirtCommand(
-	ctx context.Context,
-	runner libvirtCommandRunner,
-	command string,
-	arguments []string,
-	summary string,
-	input io.Reader,
-	output io.Writer,
-	errorOutput io.Writer,
-) error {
-	if output == nil {
-		output = io.Discard
-	}
-	if errorOutput == nil {
-		errorOutput = io.Discard
-	}
-	err := runner.Run(ctx, command, arguments, input, output, errorOutput)
-	if err == nil {
-		return nil
-	}
-	return &libvirtCommandError{
-		Command: summary,
-		Err:     err,
-	}
-}
-
-func commandSummary(command string, arguments []string) string {
-	parts := []string{filepath.Base(command)}
-	for _, argument := range arguments {
-		if strings.Contains(strings.ToLower(argument), "password") {
-			parts = append(parts, "<redacted>")
-			continue
-		}
-		parts = append(parts, argument)
-	}
-	return strings.Join(parts, " ")
 }
 
 type libvirtGuestSSH interface {
@@ -394,7 +297,7 @@ func (s *nativeLibvirtSSH) ForgetHost(instanceName string) {
 	s.hostKeysMu.Unlock()
 }
 
-func (p *virshVMProvider) runSSH(
+func (p *libvirtRPCProvider) runSSH(
 	ctx context.Context,
 	instance vmInstance,
 	input io.Reader,
@@ -421,18 +324,18 @@ func (p *virshVMProvider) runSSH(
 			processErr = errors.New(transportErr.message)
 		}
 	}
-	return &libvirtCommandError{
+	return &libvirtGuestCommandError{
 		Command: "ssh " + instance.Name,
 		Err:     processErr,
 	}
 }
 
-func (p *virshVMProvider) verifyGuestReady(ctx context.Context, instance vmInstance) error {
+func (p *libvirtRPCProvider) verifyGuestReady(ctx context.Context, instance vmInstance) error {
 	command := shellJoin([]string{p.config.DockerCommand, "info", "--format", "{{.ServerVersion}}"})
 	return p.runSSH(ctx, instance, nil, io.Discard, io.Discard, command)
 }
 
-func (p *virshVMProvider) Execute(
+func (p *libvirtRPCProvider) Execute(
 	ctx context.Context,
 	instance vmInstance,
 	request ExecuteRequest,
@@ -488,7 +391,7 @@ func (p *virshVMProvider) Execute(
 	return errors.Join(runErr, cleanupErr)
 }
 
-func (p *virshVMProvider) dockerRunArguments(
+func (p *libvirtRPCProvider) dockerRunArguments(
 	request ExecuteRequest,
 	workspace string,
 	containerName string,
@@ -536,7 +439,7 @@ func (p *virshVMProvider) dockerRunArguments(
 	)
 }
 
-func (p *virshVMProvider) uploadBuildDirectory(
+func (p *libvirtRPCProvider) uploadBuildDirectory(
 	ctx context.Context,
 	instance vmInstance,
 	directory string,
@@ -562,7 +465,7 @@ func (p *virshVMProvider) uploadBuildDirectory(
 	return errors.Join(sshErr, archiveErr)
 }
 
-func (p *virshVMProvider) cleanupGuestBuild(
+func (p *libvirtRPCProvider) cleanupGuestBuild(
 	instance vmInstance,
 	workspace string,
 	containerName string,

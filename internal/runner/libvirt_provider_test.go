@@ -4,314 +4,20 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	libvirt "github.com/digitalocean/go-libvirt"
 )
 
-type prepareVirshRunner struct {
-	poolPath            string
-	networkName         string
-	kvm                 bool
-	poolActive          bool
-	concurrentPoolStart bool
-	networkDefined      bool
-	networkActive       bool
-	networkWrong        bool
-	concurrentStart     bool
-	autostarted         bool
-	poolTarget          string
-	poolType            string
-	verbs               []string
-}
-
-func (r *prepareVirshRunner) LookPath(command string) (string, error) {
-	return "/mock/" + command, nil
-}
-
-func (r *prepareVirshRunner) Run(
-	_ context.Context,
-	_ string,
-	arguments []string,
-	_ io.Reader,
-	output io.Writer,
-	_ io.Writer,
-) error {
-	if len(arguments) < 3 || arguments[0] != "--connect" {
-		return fmt.Errorf("unexpected virsh arguments %#v", arguments)
-	}
-	verb := arguments[2]
-	r.verbs = append(r.verbs, verb)
-	switch verb {
-	case "domcapabilities":
-		domainType := "qemu"
-		if r.kvm {
-			domainType = "kvm"
-		}
-		_, _ = fmt.Fprintf(output, "<domainCapabilities><domain>%s</domain></domainCapabilities>\n", domainType)
-	case "pool-info":
-		state := "inactive"
-		if r.poolActive {
-			state = "running"
-		}
-		_, _ = fmt.Fprintf(output, "Name: test-pool\nState: %s\n", state)
-	case "pool-start":
-		if r.concurrentPoolStart {
-			r.poolActive = true
-			return errors.New("storage pool is already active")
-		}
-		r.poolActive = true
-	case "pool-dumpxml":
-		target := r.poolTarget
-		if target == "" {
-			target = r.poolPath
-		}
-		poolType := r.poolType
-		if poolType == "" {
-			poolType = "dir"
-		}
-		_, _ = fmt.Fprintf(output, "<pool type='%s'><name>test-pool</name><target><path>%s</path></target></pool>\n", poolType, target)
-	case "pool-refresh":
-		// The verified base image is installed directly in this directory pool.
-	case "vol-dumpxml":
-		_, _ = io.WriteString(output, "<volume><name>flatcar-base.qcow2</name><capacity unit='bytes'>1073741824</capacity><target><format type='qcow2'/></target></volume>\n")
-	case "vol-path":
-		_, _ = fmt.Fprintln(output, filepath.Join(r.poolPath, "flatcar-base.qcow2"))
-	case "list":
-		// There are no stale domains in the Prepare fixture.
-	case "vol-list":
-		_, _ = io.WriteString(output, " Name   Path\n----------------\n")
-	case "net-list":
-		if r.networkDefined {
-			_, _ = fmt.Fprintln(output, r.networkName)
-		}
-	case "net-define":
-		r.networkDefined = true
-	case "net-dumpxml":
-		if r.networkWrong {
-			_, _ = fmt.Fprintf(output, "<network><name>%s</name><forward mode='bridge'/></network>\n", r.networkName)
-			break
-		}
-		contents, err := renderLibvirtNetworkXML(r.networkName)
-		if err != nil {
-			return err
-		}
-		_, _ = output.Write(contents)
-	case "net-info":
-		active := "no"
-		if r.networkActive {
-			active = "yes"
-		}
-		_, _ = fmt.Fprintf(output, "Name: %s\nActive: %s\n", r.networkName, active)
-	case "net-start":
-		if r.concurrentStart {
-			r.networkActive = true
-			return errors.New("network is already active")
-		}
-		r.networkActive = true
-	case "net-autostart":
-		r.autostarted = true
-	default:
-		return fmt.Errorf("unexpected Prepare virsh verb %q", verb)
-	}
-	return nil
-}
-
-type lifecycleVirshRunner struct {
-	poolPath   string
-	failVerb   string
-	failError  error
-	failStderr string
-	failDelete bool
-
-	domainName        string
-	domainExists      bool
-	domainRunning     bool
-	volumeExists      bool
-	domainDescription string
-	domainDiskPath    string
-	verbs             []string
-	calls             [][]string
-}
-
-type readinessCommandRunner struct {
-	state string
-}
-
-type readinessGuestSSH struct {
-	err   error
-	calls int
-}
-
-func (*readinessGuestSSH) AuthorizedKey() string {
-	return "ssh-ed25519 AAAATEST readiness@test"
-}
-
-func (s *readinessGuestSSH) Run(
-	_ context.Context,
-	_ vmInstance,
-	_ io.Reader,
-	_ io.Writer,
-	_ io.Writer,
-	_ string,
-) error {
-	s.calls++
-	return s.err
-}
-
-func (*readinessGuestSSH) ForgetHost(string) {}
-
-func (r *readinessCommandRunner) LookPath(command string) (string, error) {
-	return command, nil
-}
-
-func (r *readinessCommandRunner) Run(
-	_ context.Context,
-	command string,
-	arguments []string,
-	_ io.Reader,
-	output io.Writer,
-	_ io.Writer,
-) error {
-	if command == "virsh" {
-		if len(arguments) < 3 || arguments[2] != "domstate" {
-			return fmt.Errorf("unexpected readiness virsh arguments: %#v", arguments)
-		}
-		_, _ = fmt.Fprintln(output, r.state)
-		return nil
-	}
-	return fmt.Errorf("unexpected readiness command %q", command)
-}
-
-func (r *lifecycleVirshRunner) LookPath(command string) (string, error) {
-	return command, nil
-}
-
-func (r *lifecycleVirshRunner) Run(
-	_ context.Context,
-	command string,
-	arguments []string,
-	_ io.Reader,
-	output io.Writer,
-	errorOutput io.Writer,
-) error {
-	if command != "virsh" || len(arguments) < 3 || arguments[0] != "--connect" {
-		return fmt.Errorf("unexpected command %q %#v", command, arguments)
-	}
-	verb := arguments[2]
-	verbArguments := arguments[3:]
-	r.verbs = append(r.verbs, verb)
-	r.calls = append(r.calls, append([]string(nil), arguments...))
-	if verb == r.failVerb {
-		if r.failStderr != "" {
-			_, _ = io.WriteString(errorOutput, r.failStderr)
-		}
-		if r.failError != nil {
-			return r.failError
-		}
-		return fmt.Errorf("injected %s failure", verb)
-	}
-	switch verb {
-	case "dominfo":
-		if !r.domainExists {
-			return errors.New("no domain with matching name")
-		}
-	case "dumpxml":
-		description := r.domainDescription
-		if description == "" {
-			const instanceTailLength = len("-20060102150405-abcdef")
-			if len(r.domainName) <= instanceTailLength {
-				return fmt.Errorf("invalid fixture domain name %q", r.domainName)
-			}
-			description = "managed-by:gitone:" + r.domainName[:len(r.domainName)-instanceTailLength]
-		}
-		diskPath := r.domainDiskPath
-		if diskPath == "" {
-			diskPath = filepath.Join(r.poolPath, r.domainName+".qcow2")
-		}
-		_, _ = fmt.Fprintf(
-			output,
-			"<domain><description>%s</description><devices><disk device='disk'><source file='%s'/></disk></devices></domain>\n",
-			description,
-			diskPath,
-		)
-	case "vol-info":
-		if !r.volumeExists {
-			return errors.New("no storage vol with matching name")
-		}
-	case "list":
-		if r.domainExists {
-			_, _ = fmt.Fprintln(output, r.domainName)
-		}
-	case "domiflist":
-		// An identity allocation only asks about domains returned by list.
-	case "vol-list":
-		_, _ = io.WriteString(output, " Name   Path\n----------------\n")
-		if r.volumeExists {
-			_, _ = fmt.Fprintf(
-				output,
-				" %s.qcow2   %s\n",
-				r.domainName,
-				filepath.Join(r.poolPath, r.domainName+".qcow2"),
-			)
-		}
-	case "vol-create-as":
-		volumeName := virshOptionValue(verbArguments, "--name")
-		r.domainName = strings.TrimSuffix(volumeName, ".qcow2")
-		r.volumeExists = true
-		if err := os.WriteFile(filepath.Join(r.poolPath, volumeName), []byte("qcow2"), 0o600); err != nil {
-			return err
-		}
-	case "vol-path":
-		_, _ = fmt.Fprintln(output, filepath.Join(r.poolPath, verbArguments[0]))
-	case "define":
-		r.domainExists = true
-	case "start":
-		r.domainExists = true
-		r.domainRunning = true
-	case "domstate":
-		if r.domainRunning {
-			_, _ = io.WriteString(output, "running\n")
-		} else {
-			_, _ = io.WriteString(output, "shut off\n")
-		}
-	case "destroy":
-		r.domainRunning = false
-	case "undefine":
-		r.domainExists = false
-		r.domainRunning = false
-	case "vol-delete":
-		if r.failDelete {
-			return errors.New("injected volume deletion failure")
-		}
-		r.volumeExists = false
-		if err := os.Remove(filepath.Join(r.poolPath, verbArguments[0])); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	case "domifaddr", "net-dhcp-leases":
-		// No lease forces the bounded readiness failure used by the test.
-	default:
-		return fmt.Errorf("unexpected virsh verb %q", verb)
-	}
-	return nil
-}
-
-func virshOptionValue(arguments []string, option string) string {
-	for index := 0; index+1 < len(arguments); index++ {
-		if arguments[index] == option {
-			return arguments[index+1]
-		}
-	}
-	return ""
-}
-
-func newPrepareTestProvider(t *testing.T) (*virshVMProvider, *prepareVirshRunner) {
+func newPrepareTestProvider(t *testing.T) (*libvirtRPCProvider, *prepareLibvirtRPC) {
 	t.Helper()
 	poolPath := t.TempDir()
 	if err := os.Chmod(poolPath, 0o700); err != nil {
@@ -329,7 +35,6 @@ func newPrepareTestProvider(t *testing.T) (*virshVMProvider, *prepareVirshRunner
 		BaseImageSHA512: flatcarTestSHA512([]byte("base")),
 		NetworkName:     "gitone-prepare-test",
 		SSHUser:         "core",
-		VirshCommand:    "virsh",
 		DockerCommand:   "docker",
 		SSHPort:         22,
 		VCPUs:           1,
@@ -338,16 +43,18 @@ func newPrepareTestProvider(t *testing.T) (*virshVMProvider, *prepareVirshRunner
 		ReadyTimeout:    time.Second,
 		CleanupTimeout:  time.Second,
 	}
-	provider, ok := newVirshVMProvider(config).(*virshVMProvider)
+	provider, ok := newLibvirtRPCProvider(config).(*libvirtRPCProvider)
 	if !ok {
 		t.Fatal("production provider has an unexpected type")
 	}
-	runner := &prepareVirshRunner{
+	runner := &prepareLibvirtRPC{
 		poolPath:    poolPath,
 		networkName: config.NetworkName,
 		kvm:         true,
 	}
-	provider.runner = runner
+	provider.connector = func(context.Context, string) (libvirtRPCClient, error) {
+		return runner, nil
+	}
 	return provider, runner
 }
 
@@ -449,33 +156,33 @@ func TestPrepareAcceptsConcurrentStoragePoolStartFromAnotherRunner(t *testing.T)
 func TestPrepareFailureReleasesOwnershipWithoutCleanupSideEffects(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*prepareVirshRunner)
+		mutate func(*prepareLibvirtRPC)
 		want   string
 	}{
 		{
 			name: "KVM unavailable",
-			mutate: func(runner *prepareVirshRunner) {
+			mutate: func(runner *prepareLibvirtRPC) {
 				runner.kvm = false
 			},
 			want: "KVM",
 		},
 		{
 			name: "wrong storage type",
-			mutate: func(runner *prepareVirshRunner) {
+			mutate: func(runner *prepareLibvirtRPC) {
 				runner.poolType = "logical"
 			},
 			want: "directory pool",
 		},
 		{
 			name: "wrong storage target",
-			mutate: func(runner *prepareVirshRunner) {
+			mutate: func(runner *prepareLibvirtRPC) {
 				runner.poolTarget = filepath.Join(runner.poolPath, "other")
 			},
 			want: "targets",
 		},
 		{
 			name: "wrong existing network",
-			mutate: func(runner *prepareVirshRunner) {
+			mutate: func(runner *prepareLibvirtRPC) {
 				runner.networkDefined = true
 				runner.networkWrong = true
 			},
@@ -509,9 +216,9 @@ func flatcarTestSHA512(contents []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func newLifecycleTestProvider(poolPath string, runner libvirtCommandRunner) *virshVMProvider {
+func newLifecycleTestProvider(poolPath string, client libvirtRPCClient) *libvirtRPCProvider {
 	runnerID := "rollback-test"
-	return &virshVMProvider{
+	return &libvirtRPCProvider{
 		config: LibvirtConfig{
 			RunnerID:       runnerID,
 			URI:            "test:///system",
@@ -520,7 +227,6 @@ func newLifecycleTestProvider(poolPath string, runner libvirtCommandRunner) *vir
 			BaseVolumeName: "flatcar-base.qcow2",
 			NetworkName:    "gitone-test",
 			SSHUser:        "core",
-			VirshCommand:   "virsh",
 			DockerCommand:  "docker",
 			SSHPort:        22,
 			VCPUs:          1,
@@ -529,7 +235,11 @@ func newLifecycleTestProvider(poolPath string, runner libvirtCommandRunner) *vir
 			ReadyTimeout:   20 * time.Millisecond,
 			CleanupTimeout: time.Second,
 		},
-		runner:      runner,
+		client:      client,
+		pool:        libvirt.StoragePool{Name: "test-pool"},
+		baseVolume:  libvirt.StorageVol{Pool: "test-pool", Name: "flatcar-base.qcow2"},
+		basePath:    filepath.Join(poolPath, "flatcar-base.qcow2"),
+		network:     libvirt.Network{Name: "gitone-test"},
 		ownerPrefix: libvirtOwnerPrefix("test:///system", "test-pool", runnerID),
 		publicKey:   "ssh-ed25519 AAAATEST rollback@test",
 		guestSSH:    &recordingLibvirtGuestSSH{},
@@ -552,7 +262,7 @@ func TestCreateRollsBackEveryProvisioningStage(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			poolPath := t.TempDir()
-			runner := &lifecycleVirshRunner{poolPath: poolPath, failVerb: test.failVerb}
+			runner := &lifecycleLibvirtRPC{poolPath: poolPath, failVerb: test.failVerb}
 			provider := newLifecycleTestProvider(poolPath, runner)
 			instance, err := provider.Create(context.Background())
 			if err == nil || !strings.Contains(err.Error(), test.wantText) {
@@ -576,7 +286,7 @@ func TestCreateRollsBackEveryProvisioningStage(t *testing.T) {
 
 func TestCreateReturnsPartialInstanceWhenRollbackMustBeRetried(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &lifecycleVirshRunner{
+	runner := &lifecycleLibvirtRPC{
 		poolPath:   poolPath,
 		failVerb:   "vol-path",
 		failDelete: true,
@@ -600,22 +310,24 @@ func TestCreateReturnsPartialInstanceWhenRollbackMustBeRetried(t *testing.T) {
 
 func TestProviderCheckReadyRequiresRunningDomainSSHAndDocker(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &readinessCommandRunner{state: "running"}
+	runner := &readinessLibvirtRPC{state: "running"}
 	guestSSH := &readinessGuestSSH{}
-	provider := &virshVMProvider{
+	provider := &libvirtRPCProvider{
 		config: LibvirtConfig{
 			URI:           "test:///system",
 			PoolPath:      poolPath,
-			VirshCommand:  "virsh",
 			SSHUser:       "core",
 			SSHPort:       22,
 			DockerCommand: "docker",
 		},
-		runner:      runner,
+		client:      runner,
 		ownerPrefix: libvirtOwnerPrefix("test:///system", "test-pool", "readiness-test"),
 		guestSSH:    guestSSH,
 	}
 	name := provider.ownerPrefix + "-20260731120000-abcdef"
+	runner.domainName = name
+	runner.domainExists = true
+	runner.domainRunning = true
 	instance := vmInstance{Name: name, Address: "192.0.2.10"}
 	if err := provider.CheckReady(context.Background(), instance); err != nil {
 		t.Fatal(err)
@@ -641,7 +353,7 @@ func TestProviderCheckReadyRequiresRunningDomainSSHAndDocker(t *testing.T) {
 
 func TestDestroyIsStrictlyOwnedAndIdempotent(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &lifecycleVirshRunner{poolPath: poolPath}
+	runner := &lifecycleLibvirtRPC{poolPath: poolPath}
 	provider := newLifecycleTestProvider(poolPath, runner)
 	if err := provider.Destroy(context.Background(), vmInstance{Name: "someone-elses-vm"}); err == nil {
 		t.Fatal("Destroy accepted an unmanaged VM")
@@ -693,14 +405,14 @@ func TestDestroyIsStrictlyOwnedAndIdempotent(t *testing.T) {
 	}
 	provider.releaseInstanceIdentity(instance)
 	removeLogs := false
-	for _, call := range runner.calls {
-		if len(call) > 3 && call[2] == "destroy" && containsString(call[3:], "--remove-logs") {
+	for _, flags := range runner.destroyFlags {
+		if flags&libvirt.DomainDestroyRemoveLogs != 0 {
 			removeLogs = true
 			break
 		}
 	}
 	if !removeLogs {
-		t.Fatalf("Destroy did not request QEMU log cleanup: %#v", runner.calls)
+		t.Fatalf("Destroy did not request QEMU log cleanup: %#v", runner.destroyFlags)
 	}
 	if err := provider.Destroy(context.Background(), instance); err != nil {
 		t.Fatalf("second Destroy: %v", err)
@@ -717,7 +429,7 @@ func TestDestroyIsStrictlyOwnedAndIdempotent(t *testing.T) {
 }
 
 func TestConcurrentInstanceIdentityReservationsAreExclusive(t *testing.T) {
-	provider := &virshVMProvider{}
+	provider := &libvirtRPCProvider{}
 	instance := vmInstance{
 		Name:       "gitone-test-20260731120000-abcdef",
 		MACAddress: "52:54:00:ab:cd:ef",
@@ -760,7 +472,7 @@ func TestConcurrentInstanceIdentityReservationsAreExclusive(t *testing.T) {
 
 func TestDestroyRetainsArtifactsUntilDomainIsGone(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &lifecycleVirshRunner{
+	runner := &lifecycleLibvirtRPC{
 		poolPath:      poolPath,
 		failVerb:      "destroy",
 		domainExists:  true,
@@ -803,7 +515,7 @@ func TestDestroyRetainsArtifactsUntilDomainIsGone(t *testing.T) {
 
 func TestDestroyDoesNotTreatGenericDomainLookupFailureAsAbsence(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &lifecycleVirshRunner{
+	runner := &lifecycleLibvirtRPC{
 		poolPath:      poolPath,
 		failVerb:      "dominfo",
 		failError:     errors.New("failed to get domain 'vm': internal error: client socket is closed"),
@@ -838,60 +550,19 @@ func TestDestroyDoesNotTreatGenericDomainLookupFailureAsAbsence(t *testing.T) {
 	}
 }
 
-func TestLibvirtResourceAbsentRecognizesBareFailedDomainLookup(t *testing.T) {
+func TestLibvirtResourceAbsentUsesTypedRPCErrors(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 		want bool
 	}{
-		{
-			name: "virsh stderr",
-			err: &libvirtCommandError{
-				Command: "virsh dominfo missing-vm",
-				Err:     errors.New("exit status 1"),
-				Stderr:  "error: failed to get domain 'missing-vm'",
-			},
-			want: true,
-		},
-		{
-			name: "bare message without prefix",
-			err:  errors.New("failed to get domain 'missing-vm'"),
-			want: true,
-		},
-		{
-			name: "transport failure suffix",
-			err: &libvirtCommandError{
-				Command: "virsh dominfo missing-vm",
-				Err:     errors.New("exit status 1"),
-				Stderr: "error: failed to get domain 'missing-vm': " +
-					"internal error: client socket is closed",
-			},
-			want: false,
-		},
-		{
-			name: "multiline follow-on failure",
-			err: &libvirtCommandError{
-				Command: "virsh dominfo missing-vm",
-				Err:     errors.New("exit status 1"),
-				Stderr: "error: failed to get domain 'missing-vm'\n" +
-					"error: internal error: client socket is closed",
-			},
-			want: false,
-		},
-		{
-			name: "matching command text only",
-			err: &libvirtCommandError{
-				Command: "virsh domain not found",
-				Err:     errors.New("exit status 1"),
-				Stderr:  "error: permission denied",
-			},
-			want: false,
-		},
-		{
-			name: "empty domain",
-			err:  errors.New("error: failed to get domain ''"),
-			want: false,
-		},
+		{name: "domain", err: rpcMissing(libvirt.ErrNoDomain, "missing domain"), want: true},
+		{name: "network", err: rpcMissing(libvirt.ErrNoNetwork, "missing network"), want: true},
+		{name: "storage pool", err: rpcMissing(libvirt.ErrNoStoragePool, "missing pool"), want: true},
+		{name: "storage volume", err: rpcMissing(libvirt.ErrNoStorageVol, "missing volume"), want: true},
+		{name: "wrapped", err: fmt.Errorf("lookup: %w", rpcMissing(libvirt.ErrNoDomain, "missing")), want: true},
+		{name: "transport", err: errors.New("client socket is closed"), want: false},
+		{name: "permission", err: rpcMissing(libvirt.ErrOperationDenied, "permission denied"), want: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -902,12 +573,11 @@ func TestLibvirtResourceAbsentRecognizesBareFailedDomainLookup(t *testing.T) {
 	}
 }
 
-func TestInstanceNameAvailableAcceptsBareFailedDomainLookup(t *testing.T) {
-	runner := &lifecycleVirshRunner{
-		poolPath:   t.TempDir(),
-		failVerb:   "dominfo",
-		failError:  errors.New("exit status 1"),
-		failStderr: "error: failed to get domain 'candidate-vm'",
+func TestInstanceNameAvailableAcceptsTypedMissingDomain(t *testing.T) {
+	runner := &lifecycleLibvirtRPC{
+		poolPath:  t.TempDir(),
+		failVerb:  "dominfo",
+		failError: rpcMissing(libvirt.ErrNoDomain, "candidate domain not found"),
 	}
 	provider := newLifecycleTestProvider(runner.poolPath, runner)
 	available, err := provider.instanceNameAvailable(context.Background(), "candidate-vm")
@@ -915,13 +585,13 @@ func TestInstanceNameAvailableAcceptsBareFailedDomainLookup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !available {
-		t.Fatal("bare missing-domain diagnostic was treated as an identity collision")
+		t.Fatal("typed missing-domain error was treated as an identity collision")
 	}
 }
 
 func TestDestroyPreservesMatchingNameWithMismatchedOwnershipMarker(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &lifecycleVirshRunner{
+	runner := &lifecycleLibvirtRPC{
 		poolPath:          poolPath,
 		domainExists:      true,
 		domainRunning:     true,
@@ -951,7 +621,7 @@ func TestDestroyPreservesMatchingNameWithMismatchedOwnershipMarker(t *testing.T)
 
 func TestCleanupNeverSweepsArtifactsForDomainThatFailedTeardown(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &lifecycleVirshRunner{
+	runner := &lifecycleLibvirtRPC{
 		poolPath:      poolPath,
 		failVerb:      "destroy",
 		domainExists:  true,
@@ -993,7 +663,7 @@ func TestCleanupNeverSweepsArtifactsForDomainThatFailedTeardown(t *testing.T) {
 
 func TestCleanupRemovesLegacyKnownHostsForAbsentVM(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &lifecycleVirshRunner{poolPath: poolPath}
+	runner := &lifecycleLibvirtRPC{poolPath: poolPath}
 	provider := newLifecycleTestProvider(poolPath, runner)
 	name := provider.ownerPrefix + "-20260731120000-abcdef"
 	legacyKnownHostsPath := filepath.Join(poolPath, "."+name+".known_hosts")
@@ -1010,7 +680,7 @@ func TestCleanupRemovesLegacyKnownHostsForAbsentVM(t *testing.T) {
 
 func TestLibvirtNetworkLockHonorsContextAndCanBeReacquired(t *testing.T) {
 	poolPath := t.TempDir()
-	provider := &virshVMProvider{config: LibvirtConfig{
+	provider := &libvirtRPCProvider{config: LibvirtConfig{
 		URI:         "test:///system",
 		PoolPath:    poolPath,
 		NetworkName: "gitone-shared",
@@ -1038,7 +708,7 @@ func TestLibvirtNetworkLockHonorsContextAndCanBeReacquired(t *testing.T) {
 
 func TestProviderOwnershipAndAddressParsingAreStrict(t *testing.T) {
 	prefix := libvirtOwnerPrefix("test:///system", "test-pool", "Runner One")
-	provider := &virshVMProvider{
+	provider := &libvirtRPCProvider{
 		ownerPrefix: prefix,
 		config:      LibvirtConfig{PoolPath: "/var/lib/libvirt/images"},
 	}
@@ -1063,15 +733,50 @@ func TestProviderOwnershipAndAddressParsingAreStrict(t *testing.T) {
 			t.Fatalf("provider accepted unmanaged name %q", candidate)
 		}
 	}
-	output := "lo 00:00:00:00:00:00 ipv4 127.0.0.1/8\n" +
-		"vnet0 52:54:00:01:02:03 ipv6 fe80::1/64\n" +
-		"vnet0 52:54:00:01:02:03 ipv4 192.0.2.44/24\n"
-	if address := parseLibvirtIPAddress(output); address != "192.0.2.44" {
+	if address := preferredLibvirtIPAddress([]string{"127.0.0.1", "fe80::1", "192.0.2.44"}); address != "192.0.2.44" {
 		t.Fatalf("parsed address = %q", address)
 	}
 	if !pathWithinDirectory("/var/lib/libvirt/images", "/var/lib/libvirt/images/vm.qcow2") ||
 		pathWithinDirectory("/var/lib/libvirt/images", "/var/lib/libvirt/images-other/vm.qcow2") {
 		t.Fatal("storage path containment check is incorrect")
+	}
+}
+
+func TestRenderLibvirtVolumeXMLIncludesBackingStore(t *testing.T) {
+	contents, err := renderLibvirtVolumeXML("vm<&>.qcow2", 20<<30, "/pool/base<&>.qcow2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var volume libvirtVolumeCreateDescription
+	if err = xml.Unmarshal([]byte(contents), &volume); err != nil {
+		t.Fatal(err)
+	}
+	if volume.XMLName.Local != "volume" || volume.Name != "vm<&>.qcow2" ||
+		volume.Capacity != 20<<30 || volume.Allocation != 0 ||
+		volume.Target.Format.Type != "qcow2" ||
+		volume.BackingStore.Path != "/pool/base<&>.qcow2" ||
+		volume.BackingStore.Format.Type != "qcow2" {
+		t.Fatalf("rendered volume = %#v", volume)
+	}
+}
+
+func TestCallLibvirtRPCHonorsContextBeforeAndAfterCall(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	if err := callLibvirtRPC(ctx, func() error {
+		called = true
+		return nil
+	}); !errors.Is(err, context.Canceled) || called {
+		t.Fatalf("pre-cancelled RPC result = %v, called=%t", err, called)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	if err := callLibvirtRPC(ctx, func() error {
+		cancel()
+		return nil
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RPC cancellation after call = %v", err)
 	}
 }
 

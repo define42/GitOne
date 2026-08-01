@@ -165,7 +165,6 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 		"",
 		"comma-separated insecure Docker registry hosts installed in each VM",
 	)
-	virshCommand := flags.String("libvirt-virsh-command", "virsh", "virsh command")
 	if err := flags.Parse(args); err != nil {
 		return nil, "", "", err
 	}
@@ -208,7 +207,6 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 			CleanupTimeout:     *libvirtCleanupTimeout,
 			RegistryMirrors:    commaSeparatedValues(*libvirtRegistryMirrors),
 			InsecureRegistries: commaSeparatedValues(*libvirtInsecureRegistries),
-			VirshCommand:       *virshCommand,
 			DockerCommand:      *command,
 		})
 		if err != nil {

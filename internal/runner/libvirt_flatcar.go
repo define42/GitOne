@@ -193,7 +193,7 @@ func validateFlatcarPoolDirectoryFD(fd int, path string, poolDirectory bool) err
 	return nil
 }
 
-func (p *virshVMProvider) ensureFlatcarBaseImage(ctx context.Context) (returnErr error) {
+func (p *libvirtRPCProvider) ensureFlatcarBaseImage(ctx context.Context) (returnErr error) {
 	lockFile, err := p.acquireFlatcarBaseImageLock(ctx)
 	if err != nil {
 		return err
@@ -211,13 +211,15 @@ func (p *virshVMProvider) ensureFlatcarBaseImage(ctx context.Context) (returnErr
 	if err = p.ensureFlatcarBaseImageFile(ctx, basePath); err != nil {
 		return err
 	}
-	if _, err = p.virsh(ctx, "pool-refresh", p.config.PoolName); err != nil {
+	if err = callLibvirtRPC(ctx, func() error {
+		return p.client.StoragePoolRefresh(p.pool, 0)
+	}); err != nil {
 		return fmt.Errorf("refresh libvirt storage pool after Flatcar image check: %w", err)
 	}
 	return nil
 }
 
-func (p *virshVMProvider) acquireFlatcarBaseImageLock(ctx context.Context) (*os.File, error) {
+func (p *libvirtRPCProvider) acquireFlatcarBaseImageLock(ctx context.Context) (*os.File, error) {
 	// The containing pool directory scopes this lock. Hashing only the final
 	// volume name also serializes runners that reach the same directory through
 	// different libvirt URI or pool-name aliases.
@@ -262,7 +264,7 @@ func (p *virshVMProvider) acquireFlatcarBaseImageLock(ctx context.Context) (*os.
 	}
 }
 
-func (p *virshVMProvider) prepareFlatcarStagingDirectory() (string, error) {
+func (p *libvirtRPCProvider) prepareFlatcarStagingDirectory() (string, error) {
 	path := filepath.Join(p.config.PoolPath, flatcarStagingDirectoryName)
 	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", fmt.Errorf("create Flatcar download staging directory: %w", err)
@@ -296,12 +298,12 @@ func (p *virshVMProvider) prepareFlatcarStagingDirectory() (string, error) {
 	return path, nil
 }
 
-func (p *virshVMProvider) flatcarStagingFilePrefix() string {
+func (p *libvirtRPCProvider) flatcarStagingFilePrefix() string {
 	digest := sha256.Sum256([]byte(p.config.BaseVolumeName))
 	return fmt.Sprintf("gitone-%x-", digest[:8])
 }
 
-func (p *virshVMProvider) ensureFlatcarBaseImageFile(ctx context.Context, path string) error {
+func (p *libvirtRPCProvider) ensureFlatcarBaseImageFile(ctx context.Context, path string) error {
 	stagingDirectory, err := p.prepareFlatcarStagingDirectory()
 	if err != nil {
 		return err
@@ -384,7 +386,7 @@ func compareFlatcarBaseImageDigest(actual []byte, expectedHex string) error {
 	return nil
 }
 
-func (p *virshVMProvider) downloadFlatcarBaseImage(
+func (p *libvirtRPCProvider) downloadFlatcarBaseImage(
 	ctx context.Context,
 	path string,
 	stagingDirectory string,

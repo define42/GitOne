@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	libvirt "github.com/digitalocean/go-libvirt"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,17 +29,19 @@ const (
 )
 
 var (
-	libvirtResourceNamePattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
-	libvirtRemoteCommandPattern      = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
-	libvirtSSHUserPattern            = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
-	libvirtMissingDomainErrorPattern = regexp.MustCompile(
-		`(?i)^(error:[ \t]*)?failed to get domain '[^'\r\n]+'$`,
-	)
+	libvirtResourceNamePattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+	libvirtRemoteCommandPattern = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
+	libvirtSSHUserPattern       = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 )
 
-type virshVMProvider struct {
+type libvirtRPCProvider struct {
 	config      LibvirtConfig
-	runner      libvirtCommandRunner
+	client      libvirtRPCClient
+	connector   libvirtRPCConnector
+	pool        libvirt.StoragePool
+	baseVolume  libvirt.StorageVol
+	basePath    string
+	network     libvirt.Network
 	httpClient  *http.Client
 	ownerPrefix string
 
@@ -62,14 +65,19 @@ type libvirtOwnedDomainDescription struct {
 				File string `xml:"file,attr"`
 			} `xml:"source"`
 		} `xml:"disk"`
+		Interfaces []struct {
+			MAC struct {
+				Address string `xml:"address,attr"`
+			} `xml:"mac"`
+		} `xml:"interface"`
 	} `xml:"devices"`
 }
 
-func newVirshVMProvider(config LibvirtConfig) vmProvider {
+func newLibvirtRPCProvider(config LibvirtConfig) vmProvider {
 	ownerPrefix := libvirtOwnerPrefix(config.URI, config.PoolName, config.RunnerID)
-	return &virshVMProvider{
+	return &libvirtRPCProvider{
 		config:                config,
-		runner:                systemLibvirtCommandRunner{},
+		connector:             connectLibvirtRPC,
 		httpClient:            newFlatcarHTTPClient(),
 		ownerPrefix:           ownerPrefix,
 		allocatedNames:        make(map[string]string),
@@ -103,7 +111,7 @@ func libvirtOwnerPrefix(uri string, poolName string, runnerID string) string {
 	return fmt.Sprintf("gitone-%s-%x", trimmed, digest[:8])
 }
 
-func (p *virshVMProvider) Prepare(ctx context.Context) error {
+func (p *libvirtRPCProvider) Prepare(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.prepared {
@@ -113,11 +121,7 @@ func (p *virshVMProvider) Prepare(ctx context.Context) error {
 		return err
 	}
 
-	virshPath, err := p.runner.LookPath(p.config.VirshCommand)
-	if err != nil {
-		return fmt.Errorf("find virsh command %q: %w", p.config.VirshCommand, err)
-	}
-	p.config.VirshCommand = virshPath
+	var err error
 	if p.guestSSH == nil {
 		p.guestSSH, err = newNativeLibvirtSSH(p.config.SSHUser, p.config.SSHPort)
 		if err != nil {
@@ -134,8 +138,19 @@ func (p *virshVMProvider) Prepare(ctx context.Context) error {
 		if prepared {
 			return
 		}
+		if p.client != nil {
+			_ = p.client.Disconnect()
+			p.client = nil
+		}
 		_ = p.releaseLock()
 	}()
+	if p.connector == nil {
+		p.connector = connectLibvirtRPC
+	}
+	p.client, err = p.connector(ctx, p.config.URI)
+	if err != nil {
+		return fmt.Errorf("connect to libvirt: %w", err)
+	}
 
 	if err = p.validateKVM(ctx); err != nil {
 		return err
@@ -157,7 +172,7 @@ func (p *virshVMProvider) Prepare(ctx context.Context) error {
 	return nil
 }
 
-func (p *virshVMProvider) validateRuntimeConfig() error {
+func (p *libvirtRPCProvider) validateRuntimeConfig() error {
 	switch {
 	case !validRunnerID(p.config.RunnerID):
 		return errors.New("valid libvirt runner ID is required")
@@ -173,7 +188,7 @@ func (p *virshVMProvider) validateRuntimeConfig() error {
 		return errors.New("invalid guest Docker command")
 	case strings.TrimSpace(p.config.URI) == "" || containsControlCharacter(p.config.URI):
 		return errors.New("invalid libvirt URI")
-	case libvirtURIUsesExternalSSH(p.config.URI):
+	case libvirtURIUsesSSHTransport(p.config.URI):
 		return errors.New("libvirt +ssh transport is unsupported; use a local libvirt socket")
 	case !filepath.IsAbs(p.config.PoolPath):
 		return errors.New("libvirt storage pool path must be absolute")
@@ -206,7 +221,7 @@ func containsControlCharacter(value string) bool {
 	return false
 }
 
-func (p *virshVMProvider) acquireLock() error {
+func (p *libvirtRPCProvider) acquireLock() error {
 	digest := sha256.Sum256([]byte(p.config.URI + "\x00" + p.config.PoolName + "\x00" + p.config.RunnerID))
 	path := filepath.Join(p.config.PoolPath, fmt.Sprintf(".gitone-provider-%x.lock", digest[:8]))
 	lockFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
@@ -224,7 +239,7 @@ func (p *virshVMProvider) acquireLock() error {
 	return nil
 }
 
-func (p *virshVMProvider) acquireNetworkLock(ctx context.Context) (*os.File, error) {
+func (p *libvirtRPCProvider) acquireNetworkLock(ctx context.Context) (*os.File, error) {
 	digest := sha256.Sum256([]byte(p.config.URI + "\x00" + p.config.NetworkName))
 	path := filepath.Join(p.config.PoolPath, fmt.Sprintf(".gitone-network-%x.lock", digest[:8]))
 	lockFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
@@ -261,7 +276,7 @@ func releaseLibvirtFileLock(lockFile *os.File) error {
 	return errors.Join(err, lockFile.Close())
 }
 
-func (p *virshVMProvider) releaseLock() error {
+func (p *libvirtRPCProvider) releaseLock() error {
 	if p.lockFile == nil {
 		return nil
 	}
@@ -271,15 +286,18 @@ func (p *virshVMProvider) releaseLock() error {
 	return err
 }
 
-func (p *virshVMProvider) virsh(ctx context.Context, arguments ...string) (string, error) {
-	args := make([]string, 0, len(arguments)+2)
-	args = append(args, "--connect", p.config.URI)
-	args = append(args, arguments...)
-	return runLibvirtCommandCapture(ctx, p.runner, p.config.VirshCommand, args...)
-}
-
-func (p *virshVMProvider) validateKVM(ctx context.Context) error {
-	capabilities, err := p.virsh(ctx, "domcapabilities", "--virttype", "kvm")
+func (p *libvirtRPCProvider) validateKVM(ctx context.Context) error {
+	var capabilities string
+	err := callLibvirtRPC(ctx, func() (err error) {
+		capabilities, err = p.client.ConnectGetDomainCapabilities(
+			nil,
+			nil,
+			nil,
+			libvirt.OptString{"kvm"},
+			0,
+		)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("KVM domain capabilities are required: %w", err)
 	}
@@ -308,23 +326,79 @@ type libvirtVolumeDescription struct {
 	} `xml:"target"`
 }
 
-func (p *virshVMProvider) validateStoragePool(ctx context.Context) error {
-	poolInfo, err := p.virsh(ctx, "pool-info", p.config.PoolName)
+type libvirtVolumeCreateDescription struct {
+	XMLName    xml.Name `xml:"volume"`
+	Name       string   `xml:"name"`
+	Capacity   uint64   `xml:"capacity"`
+	Allocation uint64   `xml:"allocation"`
+	Target     struct {
+		Format struct {
+			Type string `xml:"type,attr"`
+		} `xml:"format"`
+	} `xml:"target"`
+	BackingStore struct {
+		Path   string `xml:"path"`
+		Format struct {
+			Type string `xml:"type,attr"`
+		} `xml:"format"`
+	} `xml:"backingStore"`
+}
+
+func renderLibvirtVolumeXML(name string, capacity uint64, backingPath string) (string, error) {
+	volume := libvirtVolumeCreateDescription{
+		Name:       name,
+		Capacity:   capacity,
+		Allocation: 0,
+	}
+	volume.Target.Format.Type = "qcow2"
+	volume.BackingStore.Path = backingPath
+	volume.BackingStore.Format.Type = "qcow2"
+	contents, err := xml.Marshal(volume)
+	if err != nil {
+		return "", fmt.Errorf("render libvirt volume XML: %w", err)
+	}
+	return string(contents), nil
+}
+
+func (p *libvirtRPCProvider) validateStoragePool(ctx context.Context) error {
+	var err error
+	err = callLibvirtRPC(ctx, func() error {
+		p.pool, err = p.client.StoragePoolLookupByName(p.config.PoolName)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("inspect libvirt storage pool: %w", err)
 	}
-	if !virshInfoBoolean(poolInfo, "state") {
-		if _, err = p.virsh(ctx, "pool-start", p.config.PoolName); err != nil {
+	var active int32
+	err = callLibvirtRPC(ctx, func() error {
+		active, err = p.client.StoragePoolIsActive(p.pool)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("inspect libvirt storage pool state: %w", err)
+	}
+	if active == 0 {
+		if err = callLibvirtRPC(ctx, func() error {
+			return p.client.StoragePoolCreate(p.pool, 0)
+		}); err != nil {
 			// Pool ownership is shared by runners, while the provider lock is
 			// intentionally runner-specific. Accept only a simultaneous start
-			// that can be confirmed by a fresh pool-info request.
-			recheck, recheckErr := p.virsh(ctx, "pool-info", p.config.PoolName)
-			if recheckErr != nil || !virshInfoBoolean(recheck, "state") {
+			// that can be confirmed by a fresh state request.
+			var recheck int32
+			recheckErr := callLibvirtRPC(ctx, func() (recheckErr error) {
+				recheck, recheckErr = p.client.StoragePoolIsActive(p.pool)
+				return recheckErr
+			})
+			if recheckErr != nil || recheck == 0 {
 				return errors.Join(fmt.Errorf("start libvirt storage pool: %w", err), recheckErr)
 			}
 		}
 	}
-	poolXML, err := p.virsh(ctx, "pool-dumpxml", p.config.PoolName)
+	var poolXML string
+	err = callLibvirtRPC(ctx, func() (err error) {
+		poolXML, err = p.client.StoragePoolGetXMLDesc(p.pool, 0)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("read libvirt storage pool XML: %w", err)
 	}
@@ -351,18 +425,23 @@ func (p *virshVMProvider) validateStoragePool(ctx context.Context) error {
 	return nil
 }
 
-func (p *virshVMProvider) validateBaseStorage(ctx context.Context) error {
+func (p *libvirtRPCProvider) validateBaseStorage(ctx context.Context) error {
 	if err := p.ensureFlatcarBaseImage(ctx); err != nil {
 		return fmt.Errorf("ensure Flatcar base image: %w", err)
 	}
 
-	volumeXML, err := p.virsh(
-		ctx,
-		"vol-dumpxml",
-		p.config.BaseVolumeName,
-		"--pool",
-		p.config.PoolName,
-	)
+	err := callLibvirtRPC(ctx, func() (err error) {
+		p.baseVolume, err = p.client.StorageVolLookupByName(p.pool, p.config.BaseVolumeName)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("inspect base libvirt volume: %w", err)
+	}
+	var volumeXML string
+	err = callLibvirtRPC(ctx, func() (err error) {
+		volumeXML, err = p.client.StorageVolGetXMLDesc(p.baseVolume, 0)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("inspect base libvirt volume: %w", err)
 	}
@@ -385,20 +464,17 @@ func (p *virshVMProvider) validateBaseStorage(ctx context.Context) error {
 			capacity,
 		)
 	}
-	basePath, err := p.virsh(
-		ctx,
-		"vol-path",
-		p.config.BaseVolumeName,
-		"--pool",
-		p.config.PoolName,
-	)
+	err = callLibvirtRPC(ctx, func() (err error) {
+		p.basePath, err = p.client.StorageVolGetPath(p.baseVolume)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("resolve base libvirt volume path: %w", err)
 	}
-	if !pathWithinDirectory(p.config.PoolPath, basePath) {
-		return fmt.Errorf("base libvirt volume path %q is outside storage pool", basePath)
+	if !pathWithinDirectory(p.config.PoolPath, p.basePath) {
+		return fmt.Errorf("base libvirt volume path %q is outside storage pool", p.basePath)
 	}
-	baseInfo, err := os.Lstat(basePath)
+	baseInfo, err := os.Lstat(p.basePath)
 	if err != nil {
 		return fmt.Errorf("inspect base libvirt volume file: %w", err)
 	}
@@ -406,21 +482,6 @@ func (p *virshVMProvider) validateBaseStorage(ctx context.Context) error {
 		return errors.New("base libvirt volume must be a regular file")
 	}
 	return nil
-}
-
-func virshInfoBoolean(output string, field string) bool {
-	field = strings.ToLower(strings.TrimSpace(field))
-	for _, line := range strings.Split(output, "\n") {
-		name, value, found := strings.Cut(line, ":")
-		if !found || strings.ToLower(strings.TrimSpace(name)) != field {
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "yes", "true", "active", "running":
-			return true
-		}
-	}
-	return false
 }
 
 func pathWithinDirectory(directory string, candidate string) bool {
@@ -455,7 +516,7 @@ type libvirtNetworkDescription struct {
 	} `xml:"ip"`
 }
 
-func (p *virshVMProvider) ensureNetwork(ctx context.Context) (err error) {
+func (p *libvirtRPCProvider) ensureNetwork(ctx context.Context) (err error) {
 	lockFile, err := p.acquireNetworkLock(ctx)
 	if err != nil {
 		return err
@@ -464,18 +525,14 @@ func (p *virshVMProvider) ensureNetwork(ctx context.Context) (err error) {
 		err = errors.Join(err, releaseLibvirtFileLock(lockFile))
 	}()
 
-	networkNames, err := p.virsh(ctx, "net-list", "--all", "--name")
-	if err != nil {
-		return fmt.Errorf("list libvirt networks: %w", err)
+	err = callLibvirtRPC(ctx, func() (lookupErr error) {
+		p.network, lookupErr = p.client.NetworkLookupByName(p.config.NetworkName)
+		return lookupErr
+	})
+	if err != nil && !libvirtResourceAbsent(err) {
+		return fmt.Errorf("inspect libvirt network: %w", err)
 	}
-	found := false
-	for _, name := range parseVirshNameLines(networkNames) {
-		if name == p.config.NetworkName {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if libvirtResourceAbsent(err) {
 		networkXML, renderErr := renderLibvirtNetworkXMLForCIDR(
 			p.config.NetworkName,
 			p.config.NetworkCIDR,
@@ -483,24 +540,28 @@ func (p *virshVMProvider) ensureNetwork(ctx context.Context) (err error) {
 		if renderErr != nil {
 			return renderErr
 		}
-		xmlPath, writeErr := writeLibvirtTemporaryFile(p.config.PoolPath, ".gitone-network-*.xml", networkXML, 0o600)
-		if writeErr != nil {
-			return fmt.Errorf("write libvirt network XML: %w", writeErr)
-		}
-		defer func() {
-			_ = os.Remove(xmlPath)
-		}()
-		if _, err = p.virsh(ctx, "net-define", xmlPath); err != nil {
+		err = callLibvirtRPC(ctx, func() (defineErr error) {
+			p.network, defineErr = p.client.NetworkDefineXML(string(networkXML))
+			return defineErr
+		})
+		if err != nil {
 			// A provider using another storage pool cannot share this lock file.
 			// Accept a simultaneous successful definition, but no other error.
-			recheck, recheckErr := p.virsh(ctx, "net-list", "--all", "--name")
-			if recheckErr != nil || !containsVirshName(recheck, p.config.NetworkName) {
+			recheckErr := callLibvirtRPC(ctx, func() (lookupErr error) {
+				p.network, lookupErr = p.client.NetworkLookupByName(p.config.NetworkName)
+				return lookupErr
+			})
+			if recheckErr != nil {
 				return errors.Join(fmt.Errorf("define libvirt network: %w", err), recheckErr)
 			}
 		}
 	}
 
-	networkXML, err := p.virsh(ctx, "net-dumpxml", p.config.NetworkName)
+	var networkXML string
+	err = callLibvirtRPC(ctx, func() (readErr error) {
+		networkXML, readErr = p.client.NetworkGetXMLDesc(p.network, 0)
+		return readErr
+	})
 	if err != nil {
 		return fmt.Errorf("read libvirt network XML: %w", err)
 	}
@@ -527,37 +588,40 @@ func (p *virshVMProvider) ensureNetwork(ctx context.Context) (err error) {
 		network.IP.DHCP.Range.Lease.Unit != "minutes" {
 		return fmt.Errorf("libvirt network %q must be a dedicated NAT network", p.config.NetworkName)
 	}
-	networkInfo, err := p.virsh(ctx, "net-info", p.config.NetworkName)
+	var active int32
+	err = callLibvirtRPC(ctx, func() (stateErr error) {
+		active, stateErr = p.client.NetworkIsActive(p.network)
+		return stateErr
+	})
 	if err != nil {
 		return fmt.Errorf("inspect libvirt network: %w", err)
 	}
-	if !virshInfoBoolean(networkInfo, "active") {
-		if _, err = p.virsh(ctx, "net-start", p.config.NetworkName); err != nil {
+	if active == 0 {
+		if err = callLibvirtRPC(ctx, func() error {
+			return p.client.NetworkCreate(p.network)
+		}); err != nil {
 			// Providers using different storage pools cannot share the pool-local
 			// lock file. Accept only the narrow race where another provider made
-			// this exact network active between net-info and net-start.
-			recheck, recheckErr := p.virsh(ctx, "net-info", p.config.NetworkName)
-			if recheckErr != nil || !virshInfoBoolean(recheck, "active") {
+			// this exact network active between the state check and create call.
+			var recheck int32
+			recheckErr := callLibvirtRPC(ctx, func() (stateErr error) {
+				recheck, stateErr = p.client.NetworkIsActive(p.network)
+				return stateErr
+			})
+			if recheckErr != nil || recheck == 0 {
 				return errors.Join(fmt.Errorf("start libvirt network: %w", err), recheckErr)
 			}
 		}
 	}
-	if _, err = p.virsh(ctx, "net-autostart", p.config.NetworkName); err != nil {
+	if err = callLibvirtRPC(ctx, func() error {
+		return p.client.NetworkSetAutostart(p.network, 1)
+	}); err != nil {
 		return fmt.Errorf("enable libvirt network autostart: %w", err)
 	}
 	return nil
 }
 
-func containsVirshName(output string, expected string) bool {
-	for _, name := range parseVirshNameLines(output) {
-		if name == expected {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *virshVMProvider) Create(ctx context.Context) (instance vmInstance, err error) {
+func (p *libvirtRPCProvider) Create(ctx context.Context) (instance vmInstance, err error) {
 	p.mu.Lock()
 	prepared := p.prepared
 	p.mu.Unlock()
@@ -607,25 +671,27 @@ func (p *virshVMProvider) Create(ctx context.Context) (instance vmInstance, err 
 		return instance, fmt.Errorf("write VM Ignition: %w", err)
 	}
 
-	if _, err = p.virsh(
-		ctx,
-		"vol-create-as",
-		"--pool", p.config.PoolName,
-		"--name", instance.VolumeName,
-		"--capacity", strconv.Itoa(p.config.DiskSizeGiB)+"G",
-		"--format", "qcow2",
-		"--backing-vol", p.config.BaseVolumeName,
-		"--backing-vol-format", "qcow2",
-	); err != nil {
+	volumeXML, err := renderLibvirtVolumeXML(
+		instance.VolumeName,
+		uint64(p.config.DiskSizeGiB)<<30,
+		p.basePath,
+	)
+	if err != nil {
+		return instance, err
+	}
+	var volume libvirt.StorageVol
+	err = callLibvirtRPC(ctx, func() (createErr error) {
+		volume, createErr = p.client.StorageVolCreateXML(p.pool, volumeXML, 0)
+		return createErr
+	})
+	if err != nil {
 		return instance, fmt.Errorf("create VM qcow2 overlay: %w", err)
 	}
-	diskPath, err := p.virsh(
-		ctx,
-		"vol-path",
-		instance.VolumeName,
-		"--pool",
-		p.config.PoolName,
-	)
+	var diskPath string
+	err = callLibvirtRPC(ctx, func() (pathErr error) {
+		diskPath, pathErr = p.client.StorageVolGetPath(volume)
+		return pathErr
+	})
 	if err != nil {
 		return instance, fmt.Errorf("resolve VM volume path: %w", err)
 	}
@@ -652,23 +718,17 @@ func (p *virshVMProvider) Create(ctx context.Context) (instance vmInstance, err 
 	if err != nil {
 		return instance, err
 	}
-	domainXMLPath, err := writeLibvirtTemporaryFile(
-		p.config.PoolPath,
-		"."+instance.Name+"-*.xml",
-		domainXML,
-		0o600,
-	)
+	var domain libvirt.Domain
+	err = callLibvirtRPC(ctx, func() (defineErr error) {
+		domain, defineErr = p.client.DomainDefineXML(string(domainXML))
+		return defineErr
+	})
 	if err != nil {
-		return instance, fmt.Errorf("write VM domain XML: %w", err)
-	}
-	if _, err = p.virsh(ctx, "define", domainXMLPath); err != nil {
-		_ = os.Remove(domainXMLPath)
 		return instance, fmt.Errorf("define KVM domain: %w", err)
 	}
-	if removeErr := os.Remove(domainXMLPath); removeErr != nil {
-		return instance, fmt.Errorf("remove temporary VM domain XML: %w", removeErr)
-	}
-	if _, err = p.virsh(ctx, "start", instance.Name); err != nil {
+	if err = callLibvirtRPC(ctx, func() error {
+		return p.client.DomainCreate(domain)
+	}); err != nil {
 		return instance, fmt.Errorf("start KVM domain: %w", err)
 	}
 	instance.Address, err = p.waitUntilReady(ctx, instance)
@@ -678,7 +738,7 @@ func (p *virshVMProvider) Create(ctx context.Context) (instance vmInstance, err 
 	return instance, nil
 }
 
-func (p *virshVMProvider) newInstanceIdentity(ctx context.Context) (vmInstance, error) {
+func (p *libvirtRPCProvider) newInstanceIdentity(ctx context.Context) (vmInstance, error) {
 	for range libvirtMaximumNameAttempts {
 		randomBytes := make([]byte, libvirtInstanceSuffixBytes)
 		if _, err := rand.Read(randomBytes); err != nil {
@@ -730,7 +790,7 @@ func (p *virshVMProvider) newInstanceIdentity(ctx context.Context) (vmInstance, 
 // concurrent Create calls. The reservation lives until Destroy confirms all
 // resources are gone, so neither a name nor a MAC can be handed to another VM
 // while rollback is still pending.
-func (p *virshVMProvider) reserveInstanceIdentity(instance vmInstance) bool {
+func (p *libvirtRPCProvider) reserveInstanceIdentity(instance vmInstance) bool {
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
 	if p.allocatedNames == nil {
@@ -751,7 +811,7 @@ func (p *virshVMProvider) reserveInstanceIdentity(instance vmInstance) bool {
 	return true
 }
 
-func (p *virshVMProvider) releaseInstanceIdentity(instance vmInstance) {
+func (p *libvirtRPCProvider) releaseInstanceIdentity(instance vmInstance) {
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
 	macAddress, exists := p.allocatedNames[instance.Name]
@@ -764,13 +824,21 @@ func (p *virshVMProvider) releaseInstanceIdentity(instance vmInstance) {
 	}
 }
 
-func (p *virshVMProvider) instanceNameAvailable(ctx context.Context, name string) (bool, error) {
-	if _, err := p.virsh(ctx, "dominfo", name); err == nil {
+func (p *libvirtRPCProvider) instanceNameAvailable(ctx context.Context, name string) (bool, error) {
+	err := callLibvirtRPC(ctx, func() (lookupErr error) {
+		_, lookupErr = p.client.DomainLookupByName(name)
+		return lookupErr
+	})
+	if err == nil {
 		return false, nil
 	} else if !libvirtResourceAbsent(err) {
 		return false, fmt.Errorf("check KVM domain identity collision: %w", err)
 	}
-	if _, err := p.virsh(ctx, "vol-info", name+".qcow2", "--pool", p.config.PoolName); err == nil {
+	err = callLibvirtRPC(ctx, func() (lookupErr error) {
+		_, lookupErr = p.client.StorageVolLookupByName(p.pool, name+".qcow2")
+		return lookupErr
+	})
+	if err == nil {
 		return false, nil
 	} else if !libvirtResourceAbsent(err) {
 		return false, fmt.Errorf("check VM volume identity collision: %w", err)
@@ -778,21 +846,36 @@ func (p *virshVMProvider) instanceNameAvailable(ctx context.Context, name string
 	return true, nil
 }
 
-func (p *virshVMProvider) macAddressAvailable(ctx context.Context, candidate string) (bool, error) {
-	domains, err := p.virsh(ctx, "list", "--all", "--name")
+func (p *libvirtRPCProvider) macAddressAvailable(ctx context.Context, candidate string) (bool, error) {
+	var domains []libvirt.Domain
+	err := callLibvirtRPC(ctx, func() (listErr error) {
+		domains, _, listErr = p.client.ConnectListAllDomains(
+			1,
+			libvirt.ConnectListDomainsActive|libvirt.ConnectListDomainsInactive,
+		)
+		return listErr
+	})
 	if err != nil {
 		return false, fmt.Errorf("list domains for MAC allocation: %w", err)
 	}
-	for _, name := range parseVirshNameLines(domains) {
-		interfaces, interfaceErr := p.virsh(ctx, "domiflist", name)
-		if interfaceErr != nil {
-			if libvirtResourceAbsent(interfaceErr) {
+	for _, domain := range domains {
+		var contents string
+		readErr := callLibvirtRPC(ctx, func() (readErr error) {
+			contents, readErr = p.client.DomainGetXMLDesc(domain, 0)
+			return readErr
+		})
+		if readErr != nil {
+			if libvirtResourceAbsent(readErr) {
 				continue
 			}
-			return false, fmt.Errorf("read domain %q interfaces: %w", name, interfaceErr)
+			return false, fmt.Errorf("read domain %q interfaces: %w", domain.Name, readErr)
 		}
-		for _, field := range strings.Fields(interfaces) {
-			if strings.EqualFold(strings.TrimSpace(field), candidate) {
+		var description libvirtOwnedDomainDescription
+		if err = xml.Unmarshal([]byte(contents), &description); err != nil {
+			return false, fmt.Errorf("parse domain %q interfaces: %w", domain.Name, err)
+		}
+		for _, domainInterface := range description.Devices.Interfaces {
+			if strings.EqualFold(domainInterface.MAC.Address, candidate) {
 				return false, nil
 			}
 		}
@@ -800,7 +883,7 @@ func (p *virshVMProvider) macAddressAvailable(ctx context.Context, candidate str
 	return true, nil
 }
 
-func (p *virshVMProvider) waitUntilReady(parent context.Context, instance vmInstance) (string, error) {
+func (p *libvirtRPCProvider) waitUntilReady(parent context.Context, instance vmInstance) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, p.config.ReadyTimeout)
 	defer cancel()
 	var lastErr error
@@ -828,16 +911,28 @@ func (p *virshVMProvider) waitUntilReady(parent context.Context, instance vmInst
 	}
 }
 
-func (p *virshVMProvider) CheckReady(ctx context.Context, instance vmInstance) error {
+func (p *libvirtRPCProvider) CheckReady(ctx context.Context, instance vmInstance) error {
 	if !p.ownsInstance(instance) || net.ParseIP(instance.Address) == nil {
 		return errors.New("refusing to check readiness of an unmanaged VM")
 	}
-	state, err := p.virsh(ctx, "domstate", instance.Name)
+	var domain libvirt.Domain
+	err := callLibvirtRPC(ctx, func() (lookupErr error) {
+		domain, lookupErr = p.client.DomainLookupByName(instance.Name)
+		return lookupErr
+	})
+	if err != nil {
+		return fmt.Errorf("look up KVM domain: %w", err)
+	}
+	var state int32
+	err = callLibvirtRPC(ctx, func() (stateErr error) {
+		state, _, stateErr = p.client.DomainGetState(domain, 0)
+		return stateErr
+	})
 	if err != nil {
 		return fmt.Errorf("read KVM domain state: %w", err)
 	}
-	if strings.ToLower(strings.TrimSpace(state)) != "running" {
-		return fmt.Errorf("KVM domain state is %q, not running", strings.TrimSpace(state))
+	if libvirt.DomainState(state) != libvirt.DomainRunning {
+		return fmt.Errorf("KVM domain state is %q, not running", libvirt.DomainState(state))
 	}
 	if err = p.verifyGuestReady(ctx, instance); err != nil {
 		return fmt.Errorf("verify guest SSH and Docker readiness: %w", err)
@@ -845,27 +940,46 @@ func (p *virshVMProvider) CheckReady(ctx context.Context, instance vmInstance) e
 	return nil
 }
 
-func (p *virshVMProvider) discoverAddress(ctx context.Context, instance vmInstance) (string, error) {
+func (p *libvirtRPCProvider) discoverAddress(ctx context.Context, instance vmInstance) (string, error) {
+	var domain libvirt.Domain
+	err := callLibvirtRPC(ctx, func() (lookupErr error) {
+		domain, lookupErr = p.client.DomainLookupByName(instance.Name)
+		return lookupErr
+	})
+	if err != nil {
+		return "", fmt.Errorf("look up KVM domain for address discovery: %w", err)
+	}
 	var errs []error
-	for _, source := range []string{"lease", "agent", "arp"} {
-		output, err := p.virsh(ctx, "domifaddr", instance.Name, "--source", source)
+	for _, source := range []libvirt.DomainInterfaceAddressesSource{
+		libvirt.DomainInterfaceAddressesSrcLease,
+		libvirt.DomainInterfaceAddressesSrcAgent,
+		libvirt.DomainInterfaceAddressesSrcArp,
+	} {
+		var interfaces []libvirt.DomainInterface
+		err = callLibvirtRPC(ctx, func() (addressErr error) {
+			interfaces, addressErr = p.client.DomainInterfaceAddresses(domain, uint32(source), 0)
+			return addressErr
+		})
 		if err == nil {
-			if address := parseLibvirtIPAddress(output); address != "" {
+			if address := libvirtInterfaceIPAddress(interfaces); address != "" {
 				return address, nil
 			}
 		} else {
 			errs = append(errs, err)
 		}
 	}
-	output, err := p.virsh(
-		ctx,
-		"net-dhcp-leases",
-		p.config.NetworkName,
-		"--mac",
-		instance.MACAddress,
-	)
+	var leases []libvirt.NetworkDhcpLease
+	err = callLibvirtRPC(ctx, func() (leaseErr error) {
+		leases, _, leaseErr = p.client.NetworkGetDhcpLeases(
+			p.network,
+			libvirt.OptString{instance.MACAddress},
+			1,
+			0,
+		)
+		return leaseErr
+	})
 	if err == nil {
-		if address := parseLibvirtIPAddress(output); address != "" {
+		if address := libvirtLeaseIPAddress(leases); address != "" {
 			return address, nil
 		}
 	} else {
@@ -874,17 +988,28 @@ func (p *virshVMProvider) discoverAddress(ctx context.Context, instance vmInstan
 	return "", errors.Join(append([]error{errors.New("VM has no discoverable IP address")}, errs...)...)
 }
 
-func parseLibvirtIPAddress(output string) string {
-	var fallback string
-	for _, field := range strings.Fields(output) {
-		field = strings.Trim(field, "[](),")
-		address := net.ParseIP(field)
-		if strings.Contains(field, "/") {
-			parsed, _, err := net.ParseCIDR(field)
-			if err == nil {
-				address = parsed
-			}
+func libvirtInterfaceIPAddress(interfaces []libvirt.DomainInterface) string {
+	var addresses []string
+	for _, domainInterface := range interfaces {
+		for _, address := range domainInterface.Addrs {
+			addresses = append(addresses, address.Addr)
 		}
+	}
+	return preferredLibvirtIPAddress(addresses)
+}
+
+func libvirtLeaseIPAddress(leases []libvirt.NetworkDhcpLease) string {
+	addresses := make([]string, 0, len(leases))
+	for _, lease := range leases {
+		addresses = append(addresses, lease.Ipaddr)
+	}
+	return preferredLibvirtIPAddress(addresses)
+}
+
+func preferredLibvirtIPAddress(fields []string) string {
+	var fallback string
+	for _, field := range fields {
+		address := net.ParseIP(strings.TrimSpace(field))
 		if address == nil || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() {
 			continue
 		}
@@ -898,7 +1023,7 @@ func parseLibvirtIPAddress(output string) string {
 	return fallback
 }
 
-func (p *virshVMProvider) cleanupFailedInstance(instance vmInstance) error {
+func (p *libvirtRPCProvider) cleanupFailedInstance(instance vmInstance) error {
 	timeout := p.config.CleanupTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -908,7 +1033,7 @@ func (p *virshVMProvider) cleanupFailedInstance(instance vmInstance) error {
 	return p.Destroy(ctx, instance)
 }
 
-func (p *virshVMProvider) Destroy(ctx context.Context, instance vmInstance) error {
+func (p *libvirtRPCProvider) Destroy(ctx context.Context, instance vmInstance) error {
 	if !p.ownsInstance(instance) {
 		return errors.New("refusing to destroy an unmanaged VM")
 	}
@@ -921,12 +1046,18 @@ func (p *virshVMProvider) Destroy(ctx context.Context, instance vmInstance) erro
 	var errs []error
 	domainExists := false
 	domainRemoved := false
-	if _, err := p.virsh(ctx, "dominfo", instance.Name); err == nil {
+	var domain libvirt.Domain
+	lookupErr := callLibvirtRPC(ctx, func() (err error) {
+		domain, err = p.client.DomainLookupByName(instance.Name)
+		return err
+	})
+	switch {
+	case lookupErr == nil:
 		domainExists = true
-	} else if libvirtResourceAbsent(err) {
+	case libvirtResourceAbsent(lookupErr):
 		domainRemoved = true
-	} else {
-		errs = append(errs, fmt.Errorf("inspect KVM domain before deletion: %w", err))
+	default:
+		errs = append(errs, fmt.Errorf("inspect KVM domain before deletion: %w", lookupErr))
 	}
 	if domainExists {
 		if ownershipErr := p.verifyDomainOwnership(ctx, instance); ownershipErr != nil {
@@ -934,28 +1065,29 @@ func (p *virshVMProvider) Destroy(ctx context.Context, instance vmInstance) erro
 			return errors.Join(errs...)
 		}
 		stopped := false
-		state, stateErr := p.virsh(ctx, "domstate", instance.Name)
+		var state int32
+		stateErr := callLibvirtRPC(ctx, func() (err error) {
+			state, _, err = p.client.DomainGetState(domain, 0)
+			return err
+		})
 		if stateErr != nil {
 			errs = append(errs, fmt.Errorf("read KVM domain state: %w", stateErr))
 		}
-		if stateErr == nil && strings.Contains(strings.ToLower(state), "shut off") {
+		if stateErr == nil && libvirt.DomainState(state) == libvirt.DomainShutoff {
 			stopped = true
 		} else {
-			if _, gracefulErr := p.virsh(
-				ctx,
-				"destroy",
-				instance.Name,
-				"--graceful",
-				"--remove-logs",
-			); gracefulErr != nil {
+			gracefulErr := callLibvirtRPC(ctx, func() error {
+				return p.client.DomainDestroyFlags(
+					domain,
+					libvirt.DomainDestroyGraceful|libvirt.DomainDestroyRemoveLogs,
+				)
+			})
+			if gracefulErr != nil {
 				if libvirtResourceAbsent(gracefulErr) {
 					stopped = true
-				} else if _, forceErr := p.virsh(
-					ctx,
-					"destroy",
-					instance.Name,
-					"--remove-logs",
-				); forceErr == nil || libvirtResourceAbsent(forceErr) {
+				} else if forceErr := callLibvirtRPC(ctx, func() error {
+					return p.client.DomainDestroyFlags(domain, libvirt.DomainDestroyRemoveLogs)
+				}); forceErr == nil || libvirtResourceAbsent(forceErr) {
 					stopped = true
 				} else {
 					errs = append(errs, errors.Join(
@@ -968,7 +1100,9 @@ func (p *virshVMProvider) Destroy(ctx context.Context, instance vmInstance) erro
 			}
 		}
 		if stopped {
-			if _, err := p.virsh(ctx, "undefine", instance.Name); err == nil || libvirtResourceAbsent(err) {
+			if err := callLibvirtRPC(ctx, func() error {
+				return p.client.DomainUndefineFlags(domain, 0)
+			}); err == nil || libvirtResourceAbsent(err) {
 				domainRemoved = true
 			} else {
 				errs = append(errs, fmt.Errorf("undefine KVM domain: %w", err))
@@ -982,13 +1116,20 @@ func (p *virshVMProvider) Destroy(ctx context.Context, instance vmInstance) erro
 		return errors.Join(errs...)
 	}
 	volumeExists := false
-	if _, err := p.virsh(ctx, "vol-info", instance.VolumeName, "--pool", p.config.PoolName); err == nil {
+	var volume libvirt.StorageVol
+	lookupErr = callLibvirtRPC(ctx, func() (err error) {
+		volume, err = p.client.StorageVolLookupByName(p.pool, instance.VolumeName)
+		return err
+	})
+	if lookupErr == nil {
 		volumeExists = true
-	} else if !libvirtResourceAbsent(err) {
-		errs = append(errs, fmt.Errorf("inspect VM volume before deletion: %w", err))
+	} else if !libvirtResourceAbsent(lookupErr) {
+		errs = append(errs, fmt.Errorf("inspect VM volume before deletion: %w", lookupErr))
 	}
 	if volumeExists {
-		if _, err := p.virsh(ctx, "vol-delete", instance.VolumeName, "--pool", p.config.PoolName); err != nil && !libvirtResourceAbsent(err) {
+		if err := callLibvirtRPC(ctx, func() error {
+			return p.client.StorageVolDelete(volume, 0)
+		}); err != nil && !libvirtResourceAbsent(err) {
 			errs = append(errs, fmt.Errorf("delete VM volume: %w", err))
 		}
 	}
@@ -1005,21 +1146,33 @@ func (p *virshVMProvider) Destroy(ctx context.Context, instance vmInstance) erro
 	return result
 }
 
-func (p *virshVMProvider) verifyDomainOwnership(ctx context.Context, instance vmInstance) error {
-	contents, err := p.virsh(ctx, "dumpxml", instance.Name)
+func (p *libvirtRPCProvider) verifyDomainOwnership(ctx context.Context, instance vmInstance) error {
+	var domain libvirt.Domain
+	err := callLibvirtRPC(ctx, func() (lookupErr error) {
+		domain, lookupErr = p.client.DomainLookupByName(instance.Name)
+		return lookupErr
+	})
+	if err != nil {
+		return fmt.Errorf("look up KVM domain ownership metadata: %w", err)
+	}
+	var contents string
+	err = callLibvirtRPC(ctx, func() (readErr error) {
+		contents, readErr = p.client.DomainGetXMLDesc(domain, 0)
+		return readErr
+	})
 	if err != nil {
 		return fmt.Errorf("read KVM domain ownership metadata: %w", err)
 	}
-	var domain libvirtOwnedDomainDescription
-	if err = xml.Unmarshal([]byte(contents), &domain); err != nil {
+	var description libvirtOwnedDomainDescription
+	if err = xml.Unmarshal([]byte(contents), &description); err != nil {
 		return fmt.Errorf("parse KVM domain ownership metadata: %w", err)
 	}
 	expectedDescription := "managed-by:gitone:" + p.ownerPrefix
-	if domain.Description != expectedDescription {
-		return fmt.Errorf("refusing to destroy KVM domain with ownership marker %q", domain.Description)
+	if description.Description != expectedDescription {
+		return fmt.Errorf("refusing to destroy KVM domain with ownership marker %q", description.Description)
 	}
 	expectedDiskPath := filepath.Join(p.config.PoolPath, instance.VolumeName)
-	for _, disk := range domain.Devices.Disks {
+	for _, disk := range description.Devices.Disks {
 		if disk.Device == "disk" && filepath.Clean(disk.Source.File) == filepath.Clean(expectedDiskPath) {
 			return nil
 		}
@@ -1027,7 +1180,7 @@ func (p *virshVMProvider) verifyDomainOwnership(ctx context.Context, instance vm
 	return fmt.Errorf("refusing to destroy KVM domain without owned disk %q", expectedDiskPath)
 }
 
-func (p *virshVMProvider) ownsInstance(instance vmInstance) bool {
+func (p *libvirtRPCProvider) ownsInstance(instance vmInstance) bool {
 	if !p.ownsName(instance.Name) {
 		return false
 	}
@@ -1037,7 +1190,7 @@ func (p *virshVMProvider) ownsInstance(instance vmInstance) bool {
 		(instance.IgnitionPath == "" || filepath.Clean(instance.IgnitionPath) == filepath.Clean(expectedIgnition))
 }
 
-func (p *virshVMProvider) ownsName(name string) bool {
+func (p *libvirtRPCProvider) ownsName(name string) bool {
 	tail, found := strings.CutPrefix(name, p.ownerPrefix+"-")
 	if !found || len(tail) != len("20060102150405-000000") {
 		return false
@@ -1052,46 +1205,22 @@ func (p *virshVMProvider) ownsName(name string) bool {
 	return err == nil
 }
 
-func libvirtResourceAbsent(err error) bool {
-	if err == nil {
-		return false
-	}
-	diagnostic := strings.TrimSpace(err.Error())
-	var commandErr *libvirtCommandError
-	if errors.As(err, &commandErr) {
-		switch {
-		case strings.TrimSpace(commandErr.Stderr) != "":
-			diagnostic = strings.TrimSpace(commandErr.Stderr)
-		case commandErr.Err != nil:
-			diagnostic = strings.TrimSpace(commandErr.Err.Error())
-		}
-	}
-	if libvirtMissingDomainErrorPattern.MatchString(diagnostic) {
-		return true
-	}
-	message := strings.ToLower(diagnostic)
-	for _, fragment := range []string{
-		"domain not found",
-		"no domain with matching name",
-		"storage volume not found",
-		"no storage vol",
-		"unknown storage volume",
-	} {
-		if strings.Contains(message, fragment) {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *virshVMProvider) cleanupOwnedResources(ctx context.Context) error {
+func (p *libvirtRPCProvider) cleanupOwnedResources(ctx context.Context) error {
 	var errs []error
 	protectedNames := make(map[string]struct{})
-	domains, err := p.virsh(ctx, "list", "--all", "--name")
+	var domains []libvirt.Domain
+	err := callLibvirtRPC(ctx, func() (listErr error) {
+		domains, _, listErr = p.client.ConnectListAllDomains(
+			1,
+			libvirt.ConnectListDomainsActive|libvirt.ConnectListDomainsInactive,
+		)
+		return listErr
+	})
 	if err != nil {
 		return fmt.Errorf("list KVM domains: %w", err)
 	}
-	for _, name := range parseVirshNameLines(domains) {
+	for _, domain := range domains {
+		name := domain.Name
 		if !p.ownsName(name) {
 			continue
 		}
@@ -1115,7 +1244,10 @@ func (p *virshVMProvider) cleanupOwnedResources(ctx context.Context) error {
 		if absent, known := knownAbsent[name]; known {
 			return absent
 		}
-		_, domainErr := p.virsh(ctx, "dominfo", name)
+		domainErr := callLibvirtRPC(ctx, func() (lookupErr error) {
+			_, lookupErr = p.client.DomainLookupByName(name)
+			return lookupErr
+		})
 		switch {
 		case domainErr == nil:
 			errs = append(errs, fmt.Errorf(
@@ -1136,16 +1268,23 @@ func (p *virshVMProvider) cleanupOwnedResources(ctx context.Context) error {
 		return knownAbsent[name]
 	}
 
-	volumes, err := p.virsh(ctx, "vol-list", p.config.PoolName)
+	var volumes []libvirt.StorageVol
+	err = callLibvirtRPC(ctx, func() (listErr error) {
+		volumes, _, listErr = p.client.StoragePoolListAllVolumes(p.pool, 1, 0)
+		return listErr
+	})
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list libvirt volumes: %w", err))
 	} else {
-		for _, volumeName := range parseVirshTableNames(volumes) {
+		for _, volume := range volumes {
+			volumeName := volume.Name
 			name, found := strings.CutSuffix(volumeName, ".qcow2")
 			if !found || !p.ownsName(name) || !safeToDeleteArtifacts(name) {
 				continue
 			}
-			if _, deleteErr := p.virsh(ctx, "vol-delete", volumeName, "--pool", p.config.PoolName); deleteErr != nil && !libvirtResourceAbsent(deleteErr) {
+			if deleteErr := callLibvirtRPC(ctx, func() error {
+				return p.client.StorageVolDelete(volume, 0)
+			}); deleteErr != nil && !libvirtResourceAbsent(deleteErr) {
 				errs = append(errs, fmt.Errorf("delete stale VM volume %q: %w", volumeName, deleteErr))
 			}
 		}
@@ -1187,32 +1326,7 @@ func (p *virshVMProvider) cleanupOwnedResources(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func parseVirshNameLines(output string) []string {
-	var names []string
-	for _, line := range strings.Split(output, "\n") {
-		if name := strings.TrimSpace(line); name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-func parseVirshTableNames(output string) []string {
-	var names []string
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(strings.ToLower(line), "name ") || strings.HasPrefix(line, "---") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) > 0 {
-			names = append(names, fields[0])
-		}
-	}
-	return names
-}
-
-func (p *virshVMProvider) Cleanup(ctx context.Context) error {
+func (p *libvirtRPCProvider) Cleanup(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.prepared && p.lockFile == nil {
@@ -1222,6 +1336,16 @@ func (p *virshVMProvider) Cleanup(ctx context.Context) error {
 	var errs []error
 	if err := p.cleanupOwnedResources(ctx); err != nil {
 		errs = append(errs, err)
+	}
+	if p.client != nil {
+		if err := p.client.Disconnect(); err != nil {
+			errs = append(errs, fmt.Errorf("disconnect from libvirt: %w", err))
+		}
+		p.client = nil
+		p.pool = libvirt.StoragePool{}
+		p.baseVolume = libvirt.StorageVol{}
+		p.basePath = ""
+		p.network = libvirt.Network{}
 	}
 	if err := p.releaseLock(); err != nil {
 		errs = append(errs, fmt.Errorf("release libvirt provider lock: %w", err))
