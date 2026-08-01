@@ -57,7 +57,7 @@ func TestRunnerSchedulesExactCommitAndPersistsResult(t *testing.T) {
 	commit := commitBuildConfig(t, store, repositoryPath, repoconfig.Config{
 		Description: "API",
 		Jobs: map[string]repoconfig.JobConfig{"test": {
-			Image:          "golang:1.25",
+			Image:          "golang:1.26.5",
 			Script:         []string{"go test ./..."},
 			Branches:       []string{"main"},
 			TimeoutSeconds: 10,
@@ -97,7 +97,7 @@ func TestRunnerSchedulesExactCommitAndPersistsResult(t *testing.T) {
 	defer executor.mu.Unlock()
 	if len(executor.requests) != 1 ||
 		executor.requests[0].Job.Commit != commit.String() ||
-		executor.requests[0].Config.Image != "golang:1.25" {
+		executor.requests[0].Config.Image != "golang:1.26.5" {
 		t.Fatalf("unexpected executor requests: %#v", executor.requests)
 	}
 }
@@ -379,7 +379,7 @@ func TestCoordinatorLeasesAndCompletesDurableBuild(t *testing.T) {
 	}
 	commit := commitBuildConfig(t, repositoryStore, repositoryPath, repoconfig.Config{
 		Jobs: map[string]repoconfig.JobConfig{"test": {
-			Image: "golang:1.25", Script: []string{"go test ./..."}, Branches: []string{"main"},
+			Image: "golang:1.26.5", Script: []string{"go test ./..."}, Branches: []string{"main"},
 		}},
 	})
 	state := NewStore(root)
@@ -406,7 +406,7 @@ func TestCoordinatorLeasesAndCompletesDurableBuild(t *testing.T) {
 		lease.Job.ID != job.ID ||
 		lease.Job.Status != StatusRunning ||
 		lease.Job.Attempt != 1 ||
-		lease.Config.Image != "golang:1.25" {
+		lease.Config.Image != "golang:1.26.5" {
 		t.Fatalf("lease = %#v", lease)
 	}
 	if another, claimErr := coordinator.Claim("runner-two"); claimErr != nil || another != nil {

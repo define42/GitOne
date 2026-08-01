@@ -30,7 +30,7 @@ func TestRepositoryBuildEndpoints(t *testing.T) {
 		Repository: repository.Full(),
 		Branch:     "main",
 		Commit:     commit,
-		Image:      "golang:1.25",
+		Image:      "golang:1.26.5",
 		Status:     runner.StatusSucceeded,
 		CreatedAt:  time.Now().UTC(),
 	}

@@ -76,6 +76,38 @@ func newNativeLibvirtSSH(user string, port int) (*nativeLibvirtSSH, error) {
 	}, nil
 }
 
+// approvedSSHConfig is intentionally explicit so dependency updates cannot add
+// a transport algorithm that falls outside the validated module's policy.
+func approvedSSHConfig() ssh.Config {
+	return ssh.Config{
+		KeyExchanges: []string{
+			ssh.KeyExchangeECDHP256,
+			ssh.KeyExchangeECDHP384,
+			ssh.KeyExchangeECDHP521,
+		},
+		Ciphers: []string{
+			ssh.CipherAES128CTR,
+			ssh.CipherAES192CTR,
+			ssh.CipherAES256CTR,
+		},
+		MACs: []string{
+			ssh.HMACSHA256,
+			ssh.HMACSHA512,
+		},
+	}
+}
+
+func approvedSSHHostKeyAlgorithms() []string {
+	return []string{
+		ssh.KeyAlgoED25519,
+		ssh.KeyAlgoECDSA256,
+		ssh.KeyAlgoECDSA384,
+		ssh.KeyAlgoECDSA521,
+		ssh.KeyAlgoRSASHA256,
+		ssh.KeyAlgoRSASHA512,
+	}
+}
+
 func (s *nativeLibvirtSSH) CreateIdentity(instanceName string) (string, error) {
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -236,9 +268,11 @@ func (s *nativeLibvirtSSH) dial(ctx context.Context, instance vmInstance) (*ssh.
 		connection,
 		address,
 		&ssh.ClientConfig{
-			User:            s.user,
-			Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-			HostKeyCallback: s.hostKeyCallback(instance.Name),
+			Config:            approvedSSHConfig(),
+			User:              s.user,
+			Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+			HostKeyAlgorithms: approvedSSHHostKeyAlgorithms(),
+			HostKeyCallback:   s.hostKeyCallback(instance.Name),
 		},
 	)
 	if err != nil {

@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/pbkdf2"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
@@ -12,24 +14,23 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
-	"golang.org/x/crypto/argon2"
 )
 
 const (
-	argonMemory       = 19 * 1024
-	argonIterations   = 2
-	argonParallelism  = 1
-	argonSaltBytes    = 16
-	argonKeyBytes     = 32
-	tokenSecretBytes  = 24
-	TokenSecretLength = 32
+	pbkdf2Iterations        = 100_000
+	minimumPBKDF2Iterations = 100_000
+	maximumPBKDF2Iterations = 2_000_000
+	pbkdf2SaltBytes         = 16
+	pbkdf2KeyBytes          = 32
+	tokenSecretBytes        = 24
+	TokenSecretLength       = 32
 )
 
 type Resolver struct {
 	Controls  ControlStore
 	Directory IdentityProvider
 	Attempts  *AttemptLimiter
-	argon2    *argon2Limiter
+	secretKDF *secretKDFLimiter
 }
 
 type ControlStore interface {
@@ -74,7 +75,7 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 				(token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt)) {
 				continue
 			}
-			matched, verifyErr := verifySecret(r.argon2Limiter(), token.Hash, secret)
+			matched, verifyErr := verifySecret(r.secretKDFLimiter(), token.Hash, secret)
 			if verifyErr != nil {
 				return Principal{}, verifyErr
 			}
@@ -151,11 +152,11 @@ func (r *Resolver) beginAttempt(
 	return r.Attempts.Begin(ctx, user)
 }
 
-func (r *Resolver) argon2Limiter() *argon2Limiter {
-	if r.argon2 != nil {
-		return r.argon2
+func (r *Resolver) secretKDFLimiter() *secretKDFLimiter {
+	if r.secretKDF != nil {
+		return r.secretKDF
 	}
-	return processArgon2Limiter
+	return processSecretKDFLimiter
 }
 
 func (r *Resolver) AuthorizeIdentity(
@@ -194,22 +195,22 @@ func HashSecret(secret string) (string, error) {
 	if secret == "" {
 		return "", errors.New("secret is required")
 	}
-	salt := make([]byte, argonSaltBytes)
+	salt := make([]byte, pbkdf2SaltBytes)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("generate salt: %w", err)
 	}
-	release, err := processArgon2Limiter.acquire()
+	release, err := processSecretKDFLimiter.acquire()
 	if err != nil {
 		return "", err
 	}
 	defer release()
-	hash := argon2.IDKey([]byte(secret), salt, argonIterations, argonMemory, argonParallelism, argonKeyBytes)
+	hash, err := pbkdf2.Key(sha256.New, secret, salt, pbkdf2Iterations, pbkdf2KeyBytes)
+	if err != nil {
+		return "", fmt.Errorf("derive token secret hash: %w", err)
+	}
 	return fmt.Sprintf(
-		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version,
-		argonMemory,
-		argonIterations,
-		argonParallelism,
+		"$pbkdf2-sha256$i=%d$%s$%s",
+		pbkdf2Iterations,
 		base64.RawStdEncoding.EncodeToString(salt),
 		base64.RawStdEncoding.EncodeToString(hash),
 	), nil
@@ -230,40 +231,25 @@ func GenerateTokenSecret() (string, error) {
 }
 
 func VerifySecret(encoded, secret string) bool {
-	matched, err := verifySecret(processArgon2Limiter, encoded, secret)
+	matched, err := verifySecret(processSecretKDFLimiter, encoded, secret)
 	return err == nil && matched
 }
 
-func verifySecret(limiter *argon2Limiter, encoded, secret string) (bool, error) {
+func verifySecret(limiter *secretKDFLimiter, encoded, secret string) (bool, error) {
 	parts := strings.Split(encoded, "$")
-	if len(parts) != 6 || parts[1] != "argon2id" {
+	if len(parts) != 5 || parts[1] != "pbkdf2-sha256" {
 		return false, nil
 	}
-	version, ok := parseValue(parts[2], "v")
-	if !ok || version != argon2.Version {
+	iterations, ok := parseValue(parts[2], "i")
+	if !ok || iterations < minimumPBKDF2Iterations || iterations > maximumPBKDF2Iterations {
 		return false, nil
 	}
-	var memory, iterations uint64
-	var parallelism uint64
-	parameters := strings.Split(parts[3], ",")
-	if len(parameters) != 3 {
-		return false, nil
-	}
-	if memory, ok = parseValue(parameters[0], "m"); !ok || memory < 8*1024 || memory > 256*1024 {
-		return false, nil
-	}
-	if iterations, ok = parseValue(parameters[1], "t"); !ok || iterations < 1 || iterations > 10 {
-		return false, nil
-	}
-	if parallelism, ok = parseValue(parameters[2], "p"); !ok || parallelism < 1 || parallelism > 16 {
-		return false, nil
-	}
-	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	salt, err := base64.RawStdEncoding.DecodeString(parts[3])
 	if err != nil || len(salt) < 16 || len(salt) > 64 {
 		return false, nil
 	}
-	expected, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil || len(expected) < 16 || len(expected) > 64 {
+	expected, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil || len(expected) != pbkdf2KeyBytes {
 		return false, nil
 	}
 	release, err := limiter.acquire()
@@ -271,14 +257,10 @@ func verifySecret(limiter *argon2Limiter, encoded, secret string) (bool, error) 
 		return false, err
 	}
 	defer release()
-	actual := argon2.IDKey(
-		[]byte(secret),
-		salt,
-		uint32(iterations),
-		uint32(memory),
-		uint8(parallelism),
-		uint32(len(expected)),
-	)
+	actual, err := pbkdf2.Key(sha256.New, secret, salt, int(iterations), len(expected))
+	if err != nil {
+		return false, fmt.Errorf("derive token secret hash: %w", err)
+	}
 	return subtle.ConstantTimeCompare(actual, expected) == 1, nil
 }
 

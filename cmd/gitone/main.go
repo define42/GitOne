@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/auth"
+	"github.com/define42/GitOne/internal/fipsmode"
 	"github.com/define42/GitOne/internal/runner"
 	app "github.com/define42/GitOne/internal/server"
 	"github.com/define42/GitOne/internal/storage"
 )
 
 func main() {
+	fipsmode.Must()
+
 	server, ephemeralSessions, err := newServer(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)

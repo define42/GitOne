@@ -165,7 +165,7 @@ func TestCoordinatorSchedulesAndClaimsMultipleNamedJobs(t *testing.T) {
 				Image: "alpine:3", Script: []string{"deploy"}, Manual: true,
 			},
 			"lint": {
-				Image: "golang:1.25", Script: []string{"go vet ./..."},
+				Image: "golang:1.26.5", Script: []string{"go vet ./..."},
 			},
 			"release": {
 				Image: "alpine:3", Script: []string{"release"}, Branches: []string{"release/*"},

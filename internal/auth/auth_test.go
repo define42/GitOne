@@ -50,7 +50,7 @@ func (d fakeDirectory) Authenticate(
 	return d.canonical, nil
 }
 
-func TestHashSecretUsesArgon2id(t *testing.T) {
+func TestHashSecretUsesFIPSApprovedPBKDF2(t *testing.T) {
 	if _, err := auth.HashSecret(""); err == nil {
 		t.Fatal("empty secret was hashed")
 	}
@@ -58,7 +58,7 @@ func TestHashSecretUsesArgon2id(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(hash, "$argon2id$") {
+	if !strings.HasPrefix(hash, "$pbkdf2-sha256$") {
 		t.Fatalf("unexpected hash format: %q", hash)
 	}
 	if !auth.VerifySecret(hash, "correct horse battery staple") {
@@ -72,13 +72,27 @@ func TestHashSecretUsesArgon2id(t *testing.T) {
 	}
 	parts := strings.Split(hash, "$")
 	malformed := []string{
-		strings.Join([]string{"", "argon2id", "v=16", parts[3], parts[4], parts[5]}, "$"),
-		strings.Join([]string{"", "argon2id", parts[2], "m=65536,t=3", parts[4], parts[5]}, "$"),
-		strings.Join([]string{"", "argon2id", parts[2], "m=1,t=3,p=2", parts[4], parts[5]}, "$"),
-		strings.Join([]string{"", "argon2id", parts[2], "m=65536,t=0,p=2", parts[4], parts[5]}, "$"),
-		strings.Join([]string{"", "argon2id", parts[2], "m=65536,t=3,p=0", parts[4], parts[5]}, "$"),
-		strings.Join([]string{"", "argon2id", parts[2], parts[3], "bad!", parts[5]}, "$"),
-		strings.Join([]string{"", "argon2id", parts[2], parts[3], parts[4], "bad!"}, "$"),
+		"$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA",
+		strings.Join([]string{"", "pbkdf2-sha512", parts[2], parts[3], parts[4]}, "$"),
+		strings.Join([]string{"", "pbkdf2-sha256", "i=99999", parts[3], parts[4]}, "$"),
+		strings.Join([]string{"", "pbkdf2-sha256", "i=2000001", parts[3], parts[4]}, "$"),
+		strings.Join([]string{"", "pbkdf2-sha256", "i=bad", parts[3], parts[4]}, "$"),
+		strings.Join([]string{"", "pbkdf2-sha256", parts[2], "bad!", parts[4]}, "$"),
+		strings.Join([]string{
+			"",
+			"pbkdf2-sha256",
+			parts[2],
+			base64.RawStdEncoding.EncodeToString(make([]byte, 8)),
+			parts[4],
+		}, "$"),
+		strings.Join([]string{"", "pbkdf2-sha256", parts[2], parts[3], "bad!"}, "$"),
+		strings.Join([]string{
+			"",
+			"pbkdf2-sha256",
+			parts[2],
+			parts[3],
+			base64.RawStdEncoding.EncodeToString(make([]byte, 16)),
+		}, "$"),
 	}
 	for _, encoded := range malformed {
 		if auth.VerifySecret(encoded, "correct horse battery staple") {

@@ -1,8 +1,10 @@
 GO ?= go
 NPM ?= npm
 RUN_ARGS ?=
+FIPS_MODULE ?= certified
+export GOFIPS140 := $(FIPS_MODULE)
 
-.PHONY: ui test test-libvirt run run-runner build build-runner docker lint
+.PHONY: ui test test-libvirt run run-runner build build-runner verify-fips docker lint
 
 ui:
 	$(NPM) --prefix web ci --no-audit --no-fund
@@ -25,6 +27,11 @@ build: ui
 
 build-runner:
 	$(GO) build ./cmd/gitone-runner
+
+verify-fips: build build-runner
+	$(GO) test ./internal/fipsmode
+	$(GO) version -m ./gitone
+	$(GO) version -m ./gitone-runner
 
 docker:
 	docker compose --profile libvirt-runner stop

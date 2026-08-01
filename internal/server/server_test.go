@@ -1513,7 +1513,7 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 		updated.Inherit ||
 		updated.Members["bob"] != control.RoleRead ||
 		len(updated.Tokens) != 1 ||
-		!strings.HasPrefix(updated.Tokens[0].Hash, "$argon2id$") ||
+		!strings.HasPrefix(updated.Tokens[0].Hash, "$pbkdf2-sha256$") ||
 		!auth.VerifySecret(updated.Tokens[0].Hash, updateResult.GeneratedSecrets[0].Secret) ||
 		updated.Visibility != "internal" ||
 		!updated.LFS.Enabled ||

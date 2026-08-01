@@ -14,7 +14,7 @@ import (
 
 func TestJobConfigValidationAndDefaults(t *testing.T) {
 	config := JobConfig{
-		Image:    "golang:1.25",
+		Image:    "golang:1.26.5",
 		Script:   []string{"go test ./...", "go build ./..."},
 		Branches: []string{"main", "release/*"},
 		Environment: map[string]string{
@@ -43,7 +43,7 @@ func TestJobConfigValidationAndDefaults(t *testing.T) {
 	}
 	if err := (Config{Jobs: map[string]JobConfig{
 		"test":  config,
-		"build": {Image: "golang:1.25", Script: []string{"go build ./..."}, Needs: []string{"test"}},
+		"build": {Image: "golang:1.26.5", Script: []string{"go build ./..."}, Needs: []string{"test"}},
 	}}).Validate(); err != nil {
 		t.Fatalf("valid dependency: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestReadUsesOnlyGitOneYAML(t *testing.T) {
 	contents := `description: Backend API
 jobs:
   test:
-    image: golang:1.25
+    image: golang:1.26.5
     script:
       - go test ./...
     branches:
@@ -200,7 +200,7 @@ jobs:
     environment:
       CGO_ENABLED: "0"
   release:
-    image: golang:1.25
+    image: golang:1.26.5
     script:
       - go build ./...
     needs:
@@ -231,7 +231,7 @@ jobs:
 		t.Fatal(err)
 	}
 	if !found || config.Description != "Backend API" || len(config.Jobs) != 2 ||
-		config.Jobs["test"].Image != "golang:1.25" ||
+		config.Jobs["test"].Image != "golang:1.26.5" ||
 		len(config.Jobs["test"].Script) != 1 ||
 		config.Jobs["test"].Environment["CGO_ENABLED"] != "0" ||
 		!config.Jobs["release"].Manual ||

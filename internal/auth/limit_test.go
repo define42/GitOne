@@ -108,12 +108,12 @@ func TestAttemptLimiterBoundsConcurrentFirstAttempts(t *testing.T) {
 	finish(true)
 }
 
-func TestArgon2LimiterRejectsExcessWork(t *testing.T) {
+func TestSecretKDFLimiterRejectsExcessWork(t *testing.T) {
 	hash, err := HashSecret("correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
-	limiter := newArgon2Limiter(1)
+	limiter := newSecretKDFLimiter(1)
 	release, err := limiter.acquire()
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestArgon2LimiterRejectsExcessWork(t *testing.T) {
 		err,
 		ErrRateLimited,
 	) {
-		t.Fatalf("Argon2 excess error = %v, want %v", err, ErrRateLimited)
+		t.Fatalf("token KDF excess error = %v, want %v", err, ErrRateLimited)
 	}
 	release()
 
@@ -131,16 +131,16 @@ func TestArgon2LimiterRejectsExcessWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !matched {
-		t.Fatal("secret did not verify after the Argon2 slot was released")
+		t.Fatal("secret did not verify after the token KDF slot was released")
 	}
 }
 
-func TestResolverDoesNotBindLDAPWhenArgon2IsBusy(t *testing.T) {
+func TestResolverDoesNotBindLDAPWhenSecretKDFIsBusy(t *testing.T) {
 	hash, err := HashSecret("actual-token-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
-	limiter := newArgon2Limiter(1)
+	limiter := newSecretKDFLimiter(1)
 	release, err := limiter.acquire()
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestResolverDoesNotBindLDAPWhenArgon2IsBusy(t *testing.T) {
 			}},
 		}},
 		Directory: directory,
-		argon2:    limiter,
+		secretKDF: limiter,
 	}
 
 	_, err = resolver.Authenticate(
@@ -166,9 +166,9 @@ func TestResolverDoesNotBindLDAPWhenArgon2IsBusy(t *testing.T) {
 		"wrong",
 	)
 	if !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("busy Argon2 error = %v, want %v", err, ErrRateLimited)
+		t.Fatalf("busy token KDF error = %v, want %v", err, ErrRateLimited)
 	}
 	if directory.calls != 0 {
-		t.Fatalf("LDAP calls after busy Argon2 = %d, want 0", directory.calls)
+		t.Fatalf("LDAP calls after busy token KDF = %d, want 0", directory.calls)
 	}
 }

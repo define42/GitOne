@@ -6,13 +6,16 @@ COPY web ./web
 COPY internal/webui/dist ./internal/webui/dist
 RUN npm --prefix web run build
 
-FROM golang:1.25 AS build
+FROM golang:1.26.5 AS build
 WORKDIR /src
+ENV GOFIPS140=certified
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=ui /src/internal/webui/dist/ ./internal/webui/dist/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /gitone ./cmd/gitone
+RUN go test ./internal/fipsmode && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /gitone ./cmd/gitone && \
+    go version -m /gitone
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates

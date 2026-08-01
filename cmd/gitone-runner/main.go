@@ -12,10 +12,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/define42/GitOne/internal/fipsmode"
 	"github.com/define42/GitOne/internal/runner"
 )
 
 func main() {
+	fipsmode.Must()
+
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,

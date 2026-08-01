@@ -16,12 +16,12 @@ const (
 	defaultMaximumBackoff            = time.Minute
 	defaultAttemptRetention          = 15 * time.Minute
 	defaultMaximumAttemptStates      = 100_000
-	defaultArgon2Concurrency         = 4
+	defaultSecretKDFConcurrency      = 4
 	overflowAttemptState             = "overflow"
 )
 
 // ErrRateLimited indicates that authentication work was rejected before an
-// LDAP bind or Argon2id operation could start.
+// LDAP bind or token KDF operation could start.
 var ErrRateLimited = errors.New("authentication rate limit exceeded")
 
 type rateLimitError struct {
@@ -292,18 +292,18 @@ func RequestRateLimit(ctx context.Context) (time.Duration, bool) {
 	return info.retry, info.retry > 0
 }
 
-type argon2Limiter struct {
+type secretKDFLimiter struct {
 	slots chan struct{}
 }
 
-func newArgon2Limiter(maximumConcurrent int) *argon2Limiter {
+func newSecretKDFLimiter(maximumConcurrent int) *secretKDFLimiter {
 	if maximumConcurrent <= 0 {
 		maximumConcurrent = 1
 	}
-	return &argon2Limiter{slots: make(chan struct{}, maximumConcurrent)}
+	return &secretKDFLimiter{slots: make(chan struct{}, maximumConcurrent)}
 }
 
-func (l *argon2Limiter) acquire() (func(), error) {
+func (l *secretKDFLimiter) acquire() (func(), error) {
 	select {
 	case l.slots <- struct{}{}:
 		var once sync.Once
@@ -317,8 +317,8 @@ func (l *argon2Limiter) acquire() (func(), error) {
 	}
 }
 
-// The process-wide pool bounds Argon2id's aggregate memory use even when
+// The process-wide pool bounds aggregate token KDF CPU use even when
 // independent HTTP server handlers are constructed in the same process.
 //
 //nolint:gochecknoglobals
-var processArgon2Limiter = newArgon2Limiter(defaultArgon2Concurrency)
+var processSecretKDFLimiter = newSecretKDFLimiter(defaultSecretKDFConcurrency)

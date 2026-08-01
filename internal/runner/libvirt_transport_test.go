@@ -185,6 +185,37 @@ func TestNativeLibvirtSSHGeneratesFreshInMemoryEd25519Identity(t *testing.T) {
 	}
 }
 
+func TestNativeLibvirtSSHRestrictsAlgorithmsToApprovedSet(t *testing.T) {
+	config := approvedSSHConfig()
+	if !reflect.DeepEqual(config.KeyExchanges, []string{
+		ssh.KeyExchangeECDHP256,
+		ssh.KeyExchangeECDHP384,
+		ssh.KeyExchangeECDHP521,
+	}) {
+		t.Fatalf("SSH key exchanges = %v", config.KeyExchanges)
+	}
+	if !reflect.DeepEqual(config.Ciphers, []string{
+		ssh.CipherAES128CTR,
+		ssh.CipherAES192CTR,
+		ssh.CipherAES256CTR,
+	}) {
+		t.Fatalf("SSH ciphers = %v", config.Ciphers)
+	}
+	if !reflect.DeepEqual(config.MACs, []string{ssh.HMACSHA256, ssh.HMACSHA512}) {
+		t.Fatalf("SSH MACs = %v", config.MACs)
+	}
+	if !reflect.DeepEqual(approvedSSHHostKeyAlgorithms(), []string{
+		ssh.KeyAlgoED25519,
+		ssh.KeyAlgoECDSA256,
+		ssh.KeyAlgoECDSA384,
+		ssh.KeyAlgoECDSA521,
+		ssh.KeyAlgoRSASHA256,
+		ssh.KeyAlgoRSASHA512,
+	}) {
+		t.Fatalf("SSH host key algorithms = %v", approvedSSHHostKeyAlgorithms())
+	}
+}
+
 func createNativeSSHIdentity(
 	t *testing.T,
 	transport *nativeLibvirtSSH,

@@ -33,6 +33,45 @@ The included development directory uses a self-signed certificate, so its compos
 
 The session keys encrypt and authenticate browser cookies and can be generated with `openssl rand -base64 64` and `openssl rand -base64 32`. When they are omitted, GitOne generates ephemeral keys and existing browser sessions end on restart. Sessions last 12 hours by default; configure `GITONE_SESSION_MAX_AGE` with a Go duration such as `8h`. Cookie `Secure` mode follows an HTTPS public URL and can be overridden with `GITONE_SESSION_SECURE`.
 
+## FIPS 140-3
+
+GitOne's Makefile, CI workflow, and container builds select the latest
+CMVP-validated Go Cryptographic Module with `GOFIPS140=certified`. Both the
+server and runner fail at startup unless FIPS 140-3 mode is active and the
+embedded module version is covered by
+[CMVP certificate #5247](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/5247).
+
+Use the Makefile for local builds and tests:
+
+```bash
+make test
+make build build-runner
+make verify-fips
+```
+
+For direct Go commands, set the build variable explicitly:
+
+```bash
+GOFIPS140=certified go test ./...
+GOFIPS140=certified go build -o gitone ./cmd/gitone
+go version -m ./gitone
+```
+
+The deployed operating system, hardware, cryptographic services, and key
+strengths must also satisfy the
+[module Security Policy](https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp5247.pdf);
+enabling the validated module alone is not a certification of the complete
+deployment.
+
+Group token hashes created before the FIPS migration used Argon2id and are not
+accepted by the FIPS-enabled server. Regenerate those tokens through the group
+settings API after upgrading.
+
+The native libvirt SSH transport is restricted to NIST-curve ECDH, AES-CTR,
+HMAC-SHA-2, and approved EdDSA, ECDSA, or RSA host-key signatures. CI runs the
+complete Go test suite in both normal FIPS mode and the diagnostic
+`GODEBUG=fips140=only` mode.
+
 Remote HTTP(S) repository imports block loopback, private, link-local, metadata, shared, multicast, documentation, and reserved address ranges by default. DNS is checked again when connecting, the validated numeric address is dialed directly, and every redirect is subject to the same policy. Administrators can set `GITONE_IMPORT_ALLOWLIST` or `-import-allowlist` to a comma-separated list of exact hostnames, IP addresses, or CIDR prefixes, such as `git.internal.example,10.20.0.0/16`. Allowlist entries explicitly permit otherwise blocked destinations.
 
 ## HTTPS with ACME
@@ -130,7 +169,7 @@ canceled result.
 description: Backend API
 jobs:
   test:
-    image: golang:1.25
+    image: golang:1.26.5
     script:
       - go test ./...
     branches:
@@ -140,7 +179,7 @@ jobs:
       CGO_ENABLED: "0"
     timeoutSeconds: 1200
   release:
-    image: golang:1.25
+    image: golang:1.26.5
     script:
       - go build ./...
     needs:
@@ -564,7 +603,7 @@ curl -u 'alice@example.com:directory-password' \
     {
       "name": "CI deploy",
       "key": "ci",
-      "hash": "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>",
+      "hash": "$pbkdf2-sha256$i=100000$<salt>$<hash>",
       "role": "developer"
     }
   ]
@@ -573,7 +612,7 @@ curl -u 'alice@example.com:directory-password' \
 
 Member entries contain canonical LDAP identities and roles. GitOne requires the submitted login to include `LDAP_USER_DOMAIN`, binds and searches with its normalized full-domain form, then reads the unique `LDAP_CANONICAL_ATTRIBUTE` value from the matched entry. Only that directory-supplied value is used for member authorization, sessions, merge-request identity, and audit authorship; member passwords are never stored in `control.json`.
 
-Group tokens are available for automation and use salted Argon2id hashes. GitOne generates every token secret from cryptographically secure randomness as exactly 32 URL-safe characters, returns it only in the successful create or regeneration response, and never accepts a user-chosen secret. Set `regenerate` to `true` on an existing token to rotate it. Direct `control.git` pushes may preserve or delete existing token hashes, but cannot add or replace one; token creation and rotation must use the settings API. A token's `key` is its HTTP Basic username, while `name` is only its display label. Its role applies to the whole group and follows the same `inherit` boundary as member access for subgroups.
+Group tokens are available for automation and use the validated Go Cryptographic Module's PBKDF2-HMAC-SHA-256 service with a random 128-bit salt. GitOne generates every token secret from cryptographically secure randomness as exactly 32 URL-safe characters, returns it only in the successful create or regeneration response, and never accepts a user-chosen secret. Set `regenerate` to `true` on an existing token to rotate it. Legacy Argon2id hashes are deliberately rejected and their tokens must be regenerated. Direct `control.git` pushes may preserve or delete existing token hashes, but cannot add or replace one; token creation and rotation must use the settings API. A token's `key` is its HTTP Basic username, while `name` is only its display label. Its role applies to the whole group and follows the same `inherit` boundary as member access for subgroups.
 
 ### Role permissions
 
