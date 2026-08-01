@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -541,6 +542,187 @@ func TestRunLibvirtCommandDoesNotCaptureStreamedStderr(t *testing.T) {
 	if len(err.Error()) > 256 || strings.Contains(err.Error(), strings.Repeat("x", 32)) {
 		t.Fatalf("command error retained streamed stderr: length=%d", len(err.Error()))
 	}
+}
+
+func TestRunLibvirtCommandDefaultsOutputAndSucceeds(t *testing.T) {
+	runner := &recordingLibvirtCommandRunner{}
+	if err := runLibvirtCommand(
+		context.Background(),
+		runner,
+		"virsh",
+		[]string{"list"},
+		"virsh list",
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSystemLibvirtCommandRunnerExecutesProcess(t *testing.T) {
+	runner := systemLibvirtCommandRunner{}
+	command, err := runner.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err = runner.Run(
+		context.Background(),
+		command,
+		[]string{"-c", "read value; printf 'out:%s' \"$value\"; printf 'err' >&2"},
+		strings.NewReader("payload\n"),
+		&stdout,
+		&stderr,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "out:payload" || stderr.String() != "err" {
+		t.Fatalf("process output = %q, %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestLibvirtTransportErrorHelpers(t *testing.T) {
+	cause := errors.New("failed")
+	commandErr := &libvirtCommandError{Command: "virsh list", Err: cause}
+	if !errors.Is(commandErr, cause) || commandErr.Error() != "virsh list: failed" {
+		t.Fatalf("command error = %v", commandErr)
+	}
+	transportErr := &libvirtSSHTransportError{message: "safe diagnostic"}
+	if transportErr.Error() != "safe diagnostic" {
+		t.Fatalf("transport error = %q", transportErr.Error())
+	}
+	if summary := commandSummary("/usr/bin/tool", []string{"--password=secret", "safe"}); summary != "tool <redacted> safe" {
+		t.Fatalf("command summary = %q", summary)
+	}
+}
+
+type timeoutTestError struct{}
+
+func (timeoutTestError) Error() string { return "timeout" }
+func (timeoutTestError) Timeout() bool { return true }
+
+func TestSafeLibvirtSSHDialErrors(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{err: syscall.ECONNREFUSED, want: "VM SSH connection refused"},
+		{err: syscall.ENETUNREACH, want: "VM SSH endpoint is unreachable"},
+		{err: syscall.EHOSTUNREACH, want: "VM SSH endpoint is unreachable"},
+		{err: timeoutTestError{}, want: "VM SSH connection timed out"},
+		{err: errors.New("other"), want: "VM SSH connection failed"},
+	} {
+		if got := safeLibvirtSSHDialError(test.err); got != test.want {
+			t.Errorf("safe dial error for %v = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
+
+func TestVirshProviderExecuteLifecycle(t *testing.T) {
+	newRequest := func(directory string) ExecuteRequest {
+		return ExecuteRequest{
+			Job: Job{
+				ID:         "build-7",
+				Name:       "test",
+				Repository: "group/repository",
+				Branch:     "main",
+				Commit:     strings.Repeat("7", 40),
+			},
+			Directory: directory,
+			Config: repoconfig.JobConfig{
+				Image:  "alpine:latest",
+				Script: []string{"go test ./..."},
+			},
+		}
+	}
+	instance := vmInstance{
+		Name:    "gitone-test-20260801120000-abcdef",
+		Address: "192.0.2.20",
+	}
+
+	t.Run("success", func(t *testing.T) {
+		var output bytes.Buffer
+		guest := &recordingLibvirtGuestSSH{
+			run: func(_ context.Context, input io.Reader, output io.Writer, _ io.Writer, command string) error {
+				if input != nil {
+					if _, err := io.Copy(io.Discard, input); err != nil {
+						return err
+					}
+				}
+				if strings.Contains(command, "'docker' 'run'") {
+					_, _ = io.WriteString(output, "build output")
+				}
+				return nil
+			},
+		}
+		provider := &virshVMProvider{
+			config:      LibvirtConfig{DockerCommand: "docker", CleanupTimeout: time.Second},
+			ownerPrefix: "gitone-test",
+			guestSSH:    guest,
+		}
+		err := provider.Execute(context.Background(), instance, newRequest(t.TempDir()), &output)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if output.String() != "build output" || len(guest.commands) != 3 {
+			t.Fatalf("execute output = %q, commands = %#v", output.String(), guest.commands)
+		}
+	})
+
+	t.Run("upload failure is cleaned up", func(t *testing.T) {
+		calls := 0
+		guest := &recordingLibvirtGuestSSH{
+			run: func(_ context.Context, input io.Reader, _ io.Writer, _ io.Writer, _ string) error {
+				calls++
+				if input != nil {
+					_, _ = io.Copy(io.Discard, input)
+					return errors.New("upload rejected")
+				}
+				return nil
+			},
+		}
+		provider := &virshVMProvider{
+			config:      LibvirtConfig{DockerCommand: "docker", CleanupTimeout: time.Second},
+			ownerPrefix: "gitone-test",
+			guestSSH:    guest,
+		}
+		err := provider.Execute(context.Background(), instance, newRequest(t.TempDir()), nil)
+		if err == nil || !strings.Contains(err.Error(), "upload build context") || calls != 2 {
+			t.Fatalf("upload failure = %v, calls = %d", err, calls)
+		}
+	})
+
+	t.Run("validates inputs", func(t *testing.T) {
+		provider := &virshVMProvider{ownerPrefix: "gitone-test"}
+		request := newRequest(t.TempDir())
+		if err := provider.Execute(context.Background(), vmInstance{Name: "unmanaged"}, request, nil); err == nil {
+			t.Fatal("unmanaged instance was accepted")
+		}
+		request.Job.ID = "../invalid"
+		if err := provider.Execute(context.Background(), instance, request, nil); err == nil {
+			t.Fatal("invalid build ID was accepted")
+		}
+		request = newRequest(t.TempDir())
+		request.Config.Image = ""
+		if err := provider.Execute(context.Background(), instance, request, nil); err == nil {
+			t.Fatal("invalid build config was accepted")
+		}
+		request = newRequest(filepath.Join(t.TempDir(), "missing"))
+		if err := provider.Execute(context.Background(), instance, request, nil); err == nil {
+			t.Fatal("missing build directory was accepted")
+		}
+		file := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(file, []byte("not a directory"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		request = newRequest(file)
+		if err := provider.Execute(context.Background(), instance, request, nil); err == nil {
+			t.Fatal("regular build file was accepted")
+		}
+	})
 }
 
 func TestDockerRunArgumentsMatchContainerIsolationContract(t *testing.T) {

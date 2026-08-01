@@ -47,6 +47,18 @@ jobs:
       - name: Show coverage in job summary
         run: |
           go tool cover -func=coverage.out | tee coverage.txt
+          awk '
+            /^total:/ {
+              gsub(/%/, "", $3)
+              coverage = $3 + 0
+            }
+            END {
+              if (coverage < 85) {
+                printf "coverage %.1f%% is below the required 85.0%%\n", coverage > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' coverage.txt
           echo "## Go Test Coverage" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat coverage.txt >> $GITHUB_STEP_SUMMARY

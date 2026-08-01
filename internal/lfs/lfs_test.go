@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -543,6 +544,119 @@ func TestBatchRejectsSizeExceedingStorageQuota(t *testing.T) {
 	}
 }
 
+func TestBatchReportsProtocolAndObjectOutcomes(t *testing.T) {
+	root := t.TempDir()
+	objectsRoot := filepath.Join(root, "g", "r.lfs", "objects")
+	if err := os.MkdirAll(objectsRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	allowed := Handler{
+		Storage:   storage.Store{Root: root},
+		PublicURL: "https://git.example/",
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+	}
+	request := func(handler Handler, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(
+			response,
+			httptest.NewRequest(
+				http.MethodPost,
+				"/g/r.git/info/lfs/objects/batch",
+				strings.NewReader(body),
+			),
+		)
+		return response
+	}
+
+	for _, body := range []string{"{", `{"operation":"download","objects":[]} {}`} {
+		if response := request(allowed, body); response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid batch %q returned %d: %s", body, response.Code, response.Body.String())
+		}
+	}
+	if response := request(allowed, `{"operation":"delete","objects":[]}`); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unsupported operation returned %d: %s", response.Code, response.Body.String())
+	}
+
+	existingData := []byte("data")
+	existingSum := sha256.Sum256(existingData)
+	existingOID := hex.EncodeToString(existingSum[:])
+	existingPath, err := allowed.objectPath(
+		repopath.Repository{Groups: []string{"g"}, Name: "r"},
+		existingOID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Dir(existingPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(existingPath, existingData, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	missingOID := strings.Repeat("0", 64)
+	downloadBody := fmt.Sprintf(
+		`{"operation":"download","objects":[`+
+			`{"oid":%q,"size":4},`+
+			`{"oid":%q,"size":1},`+
+			`{"oid":"invalid","size":1},`+
+			`{"oid":%q,"size":3}]}`,
+		existingOID,
+		missingOID,
+		existingOID,
+	)
+	response := request(allowed, downloadBody)
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"download"`) ||
+		!strings.Contains(response.Body.String(), `"code":404`) ||
+		!strings.Contains(response.Body.String(), `"code":422`) {
+		t.Fatalf("download batch returned %d: %s", response.Code, response.Body.String())
+	}
+
+	limited := allowed
+	limited.Policy = func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+		return control.LFSPolicy{
+			Enabled:             true,
+			MaximumObjectBytes:  4,
+			MaximumStorageBytes: 10,
+		}, nil
+	}
+	firstOID := strings.Repeat("1", 64)
+	secondOID := strings.Repeat("2", 64)
+	uploadBody := fmt.Sprintf(
+		`{"operation":"upload","objects":[`+
+			`{"oid":%q,"size":5},`+
+			`{"oid":%q,"size":4},`+
+			`{"oid":%q,"size":4},`+
+			`{"oid":%q,"size":3}]}`,
+		firstOID,
+		secondOID,
+		secondOID,
+		strings.Repeat("3", 64),
+	)
+	response = request(limited, uploadBody)
+	if response.Code != http.StatusOK ||
+		strings.Count(response.Body.String(), `"upload"`) != 2 ||
+		!strings.Contains(response.Body.String(), "object exceeds the group LFS object limit") ||
+		!strings.Contains(response.Body.String(), "object exceeds the group LFS storage limit") {
+		t.Fatalf("limited upload batch returned %d: %s", response.Code, response.Body.String())
+	}
+
+	storageOnly := allowed
+	storageOnly.Policy = func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+		return control.LFSPolicy{Enabled: true, MaximumStorageBytes: 6}, nil
+	}
+	response = request(storageOnly, fmt.Sprintf(
+		`{"operation":"upload","objects":[{"oid":%q,"size":7}]}`,
+		strings.Repeat("4", 64),
+	))
+	if !strings.Contains(response.Body.String(), "object exceeds the group LFS storage limit") {
+		t.Fatalf("single-object storage limit response: %s", response.Body.String())
+	}
+}
+
 func TestUploadEnforcesStorageLimitAcrossGroupRepositories(t *testing.T) {
 	root := t.TempDir()
 	initializeLFSRepository(t, root)
@@ -842,6 +956,163 @@ func TestProtocolRoutesAndFailures(t *testing.T) {
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("failed policy returned %d: %s", response.Code, response.Body.String())
 	}
+}
+
+func TestMetadataStreamingLimits(t *testing.T) {
+	oid := strings.Repeat("0", 64)
+	largeString := strings.Repeat("x", int(maximumMetadataBytes))
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "batch body",
+			path: "/g/r.git/info/lfs/objects/batch",
+			body: `{"operation":"download","padding":"` + largeString + `","objects":[]}`,
+		},
+		{
+			name: "batch trailing body",
+			path: "/g/r.git/info/lfs/objects/batch",
+			body: `{"operation":"download","objects":[]} "` + largeString + `"`,
+		},
+		{
+			name: "verify body",
+			path: "/g/r.git/info/lfs/objects/verify",
+			body: `{"oid":"` + oid + `","size":0,"padding":"` + largeString + `"}`,
+		},
+		{
+			name: "verify trailing body",
+			path: "/g/r.git/info/lfs/objects/verify",
+			body: `{"oid":"` + oid + `","size":0} "` + largeString + `"`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.ContentLength = -1
+			response := httptest.NewRecorder()
+			(Handler{}).ServeHTTP(response, request)
+			if response.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestUploadRechecksPolicyAndAuthorization(t *testing.T) {
+	data := []byte("payload")
+	sum := sha256.Sum256(data)
+	oid := hex.EncodeToString(sum[:])
+	target := "/g/r.git/info/lfs/objects/" + oid
+	request := func(handler Handler) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(
+			response,
+			httptest.NewRequest(http.MethodPut, target, bytes.NewReader(data)),
+		)
+		return response
+	}
+	allow := func(*http.Request, repopath.Repository, bool) (bool, bool) { return true, true }
+
+	for _, test := range []struct {
+		name   string
+		policy control.LFSPolicy
+	}{
+		{
+			name:   "declared object limit",
+			policy: control.LFSPolicy{Enabled: true, MaximumObjectBytes: 3},
+		},
+		{
+			name:   "declared storage limit",
+			policy: control.LFSPolicy{Enabled: true, MaximumStorageBytes: 3},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := Handler{
+				Storage:   storage.Store{Root: t.TempDir()},
+				Authorize: allow,
+				Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+					return test.policy, nil
+				},
+			}
+			if response := request(handler); response.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	t.Run("policy tightens before staging", func(t *testing.T) {
+		calls := 0
+		handler := Handler{
+			Storage:   storage.Store{Root: t.TempDir()},
+			Authorize: allow,
+			Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+				calls++
+				policy := control.LFSPolicy{Enabled: true}
+				if calls >= 3 {
+					policy.MaximumObjectBytes = 3
+				}
+				return policy, nil
+			},
+		}
+		if response := request(handler); response.Code != http.StatusUnprocessableEntity || calls != 3 {
+			t.Fatalf("status = %d, policy calls = %d: %s", response.Code, calls, response.Body.String())
+		}
+	})
+
+	t.Run("authorization revoked after staging", func(t *testing.T) {
+		calls := 0
+		handler := Handler{
+			Storage: storage.Store{Root: t.TempDir()},
+			Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+				calls++
+				return calls == 1, calls == 1
+			},
+		}
+		if response := request(handler); response.Code != http.StatusUnauthorized || calls != 2 {
+			t.Fatalf("status = %d, authorization calls = %d: %s", response.Code, calls, response.Body.String())
+		}
+	})
+
+	t.Run("policy disabled after staging", func(t *testing.T) {
+		calls := 0
+		handler := Handler{
+			Storage:   storage.Store{Root: t.TempDir()},
+			Authorize: allow,
+			Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+				calls++
+				return control.LFSPolicy{Enabled: calls < 4}, nil
+			},
+		}
+		if response := request(handler); response.Code != http.StatusForbidden || calls != 4 {
+			t.Fatalf("status = %d, policy calls = %d: %s", response.Code, calls, response.Body.String())
+		}
+	})
+
+	t.Run("repository missing after staging", func(t *testing.T) {
+		handler := Handler{
+			Storage:   storage.Store{Root: t.TempDir()},
+			Authorize: allow,
+		}
+		if response := request(handler); response.Code != http.StatusNotFound {
+			t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+		}
+	})
+
+	t.Run("storage inspection fails", func(t *testing.T) {
+		handler := Handler{
+			Storage:   storage.Store{Root: t.TempDir()},
+			Authorize: allow,
+			Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+				return control.LFSPolicy{Enabled: true, MaximumStorageBytes: 100}, nil
+			},
+		}
+		if response := request(handler); response.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+		}
+	})
 }
 
 func TestVerifyEndpointChecksStoredObject(t *testing.T) {
