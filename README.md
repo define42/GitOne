@@ -42,7 +42,7 @@ docker compose up --build
 ```
 
 The KVM runner is an opt-in Compose profile because it needs a prepared
-libvirt host. Its ephemeral in-memory SSH identity and pinned Flatcar base
+libvirt host. Its per-VM in-memory SSH identities and pinned Flatcar base
 image are provisioned automatically. See Repository builds below; `make docker`
 enables the profile.
 
@@ -182,13 +182,14 @@ isolation and is appropriate only for this privileged controller on a dedicated
 runner host; deployments that prohibit it need a site-specific SELinux policy.
 
 Run the controller as a user allowed to connect to the local `qemu:///system`
-socket and write the trusted configured pool path. Each runner process creates
-a fresh Ed25519 identity with Go. The private key never leaves process memory;
-only its public key is placed in each disposable VM through Ignition. Guest
-host keys are pinned per VM in memory and forgotten only after teardown
-completes. Libvirt `+ssh` URIs are rejected to keep hypervisor management on the
-dedicated local socket and avoid a second host-transport trust boundary; expose
-a local libvirt socket to the controller instead.
+socket and write the trusted configured pool path. The runner creates a fresh
+Ed25519 client identity for every VM with Go. Each private key remains in
+process memory and is used only for its assigned VM; only the matching public
+key is placed in that disposable VM through Ignition. Client identities and
+guest host-key pins are forgotten only after teardown completes. Libvirt
+`+ssh` URIs are rejected to keep hypervisor management on the dedicated local
+socket and avoid a second host-transport trust boundary; expose a local libvirt
+socket to the controller instead.
 The GitOne server and runner use the same API token:
 
 ```bash
@@ -298,7 +299,8 @@ Run that target only on a dedicated runner host; normal CI deliberately does
 not assume nested KVM, a privileged network, or permission to populate a
 libvirt pool. The target disables Go's test-result cache and should run as the
 service account that can write the pool and use `qemu:///system` (`sudo` in the
-example above). Its SSH identity is generated in memory for that test process.
+example above). Each VM's SSH client identity is generated in memory for that
+test process.
 
 The runner makes outbound HTTP(S) requests to GitOne and SSH connections to its
 private guests; it never mounts GitOne's `/data`. Libvirt job concurrency is

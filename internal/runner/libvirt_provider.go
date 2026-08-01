@@ -46,11 +46,10 @@ type libvirtRPCProvider struct {
 	httpClient  *http.Client
 	ownerPrefix string
 
-	mu        sync.Mutex
-	prepared  bool
-	publicKey string
-	lockFile  *os.File
-	guestSSH  libvirtGuestSSH
+	mu       sync.Mutex
+	prepared bool
+	lockFile *os.File
+	guestSSH libvirtGuestSSH
 
 	identityMu            sync.Mutex
 	allocatedNames        map[string]string
@@ -132,7 +131,6 @@ func (p *libvirtRPCProvider) Prepare(ctx context.Context) error {
 			return err
 		}
 	}
-	p.publicKey = p.guestSSH.AuthorizedKey()
 
 	if err = p.acquireLock(); err != nil {
 		return err
@@ -639,12 +637,17 @@ func (p *libvirtRPCProvider) Create(ctx context.Context) (instance vmInstance, e
 	}
 	cleanupTarget := instance
 	cleanup := false
+	identityCreated := false
 	defer func() {
 		if err == nil {
 			return
 		}
 		if !cleanup {
+			if identityCreated {
+				p.guestSSH.ForgetVM(cleanupTarget.Name)
+			}
 			p.releaseInstanceIdentity(cleanupTarget)
+			instance = vmInstance{}
 			return
 		}
 		cleanupErr := p.cleanupFailedInstance(cleanupTarget)
@@ -657,10 +660,15 @@ func (p *libvirtRPCProvider) Create(ctx context.Context) (instance vmInstance, e
 		}
 	}()
 
+	publicKey, err := p.guestSSH.CreateIdentity(instance.Name)
+	if err != nil {
+		return instance, fmt.Errorf("create VM SSH identity: %w", err)
+	}
+	identityCreated = true
 	ignition, err := renderFlatcarIgnition(
 		instance.Name,
 		p.config.SSHUser,
-		p.publicKey,
+		publicKey,
 		p.config.RegistryMirrors,
 		p.config.InsecureRegistries,
 	)
@@ -1310,7 +1318,7 @@ func (p *libvirtRPCProvider) Destroy(ctx context.Context, instance vmInstance) e
 	result := errors.Join(errs...)
 	if result == nil {
 		if p.guestSSH != nil {
-			p.guestSSH.ForgetHost(instance.Name)
+			p.guestSSH.ForgetVM(instance.Name)
 		}
 		p.releaseInstanceIdentity(instance)
 	}

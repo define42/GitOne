@@ -479,8 +479,8 @@ type readinessGuestSSH struct {
 	calls int
 }
 
-func (*readinessGuestSSH) AuthorizedKey() string {
-	return "ssh-ed25519 AAAATEST readiness@test"
+func (*readinessGuestSSH) CreateIdentity(string) (string, error) {
+	return "ssh-ed25519 AAAATEST readiness@test", nil
 }
 
 func (s *readinessGuestSSH) Run(
@@ -495,4 +495,4 @@ func (s *readinessGuestSSH) Run(
 	return s.err
 }
 
-func (*readinessGuestSSH) ForgetHost(string) {}
+func (*readinessGuestSSH) ForgetVM(string) {}

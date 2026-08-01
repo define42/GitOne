@@ -37,9 +37,9 @@ func (e *libvirtGuestCommandError) Unwrap() error {
 }
 
 type libvirtGuestSSH interface {
-	AuthorizedKey() string
+	CreateIdentity(string) (string, error)
 	Run(context.Context, vmInstance, io.Reader, io.Writer, io.Writer, string) error
-	ForgetHost(string)
+	ForgetVM(string)
 }
 
 var errLibvirtSSHHostKeyChanged = errors.New("libvirt SSH host key changed")
@@ -55,37 +55,43 @@ func (e *libvirtSSHTransportError) Error() string {
 type nativeLibvirtSSH struct {
 	user              string
 	port              int
-	signer            ssh.Signer
 	connectTimeout    time.Duration
 	keepAliveInterval time.Duration
 	keepAliveCountMax int
 
-	hostKeysMu sync.Mutex
-	hostKeys   map[string][]byte
+	identitiesMu sync.Mutex
+	signers      map[string]ssh.Signer
+	hostKeys     map[string][]byte
 }
 
 func newNativeLibvirtSSH(user string, port int) (*nativeLibvirtSSH, error) {
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("generate in-memory libvirt SSH identity: %w", err)
-	}
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("create in-memory libvirt SSH signer: %w", err)
-	}
 	return &nativeLibvirtSSH{
 		user:              user,
 		port:              port,
-		signer:            signer,
 		connectTimeout:    5 * time.Second,
 		keepAliveInterval: 15 * time.Second,
 		keepAliveCountMax: 3,
+		signers:           make(map[string]ssh.Signer),
 		hostKeys:          make(map[string][]byte),
 	}, nil
 }
 
-func (s *nativeLibvirtSSH) AuthorizedKey() string {
-	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.signer.PublicKey())))
+func (s *nativeLibvirtSSH) CreateIdentity(instanceName string) (string, error) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", fmt.Errorf("generate in-memory libvirt SSH identity: %w", err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		return "", fmt.Errorf("create in-memory libvirt SSH signer: %w", err)
+	}
+	s.identitiesMu.Lock()
+	defer s.identitiesMu.Unlock()
+	if _, exists := s.signers[instanceName]; exists {
+		return "", fmt.Errorf("libvirt SSH identity already exists for VM %q", instanceName)
+	}
+	s.signers[instanceName] = signer
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))), nil
 }
 
 func (s *nativeLibvirtSSH) Run(
@@ -193,6 +199,12 @@ func (s *nativeLibvirtSSH) keepAlive(ctx context.Context, client *ssh.Client) {
 }
 
 func (s *nativeLibvirtSSH) dial(ctx context.Context, instance vmInstance) (*ssh.Client, error) {
+	s.identitiesMu.Lock()
+	signer, exists := s.signers[instance.Name]
+	s.identitiesMu.Unlock()
+	if !exists {
+		return nil, &libvirtSSHTransportError{message: "VM SSH client identity is unavailable"}
+	}
 	address := net.JoinHostPort(instance.Address, strconv.Itoa(s.port))
 	connectDeadline := time.Now().Add(s.connectTimeout)
 	if deadline, ok := ctx.Deadline(); ok && deadline.Before(connectDeadline) {
@@ -225,7 +237,7 @@ func (s *nativeLibvirtSSH) dial(ctx context.Context, instance vmInstance) (*ssh.
 		address,
 		&ssh.ClientConfig{
 			User:            s.user,
-			Auth:            []ssh.AuthMethod{ssh.PublicKeys(s.signer)},
+			Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 			HostKeyCallback: s.hostKeyCallback(instance.Name),
 		},
 	)
@@ -277,8 +289,8 @@ func isTimeoutError(err error) bool {
 func (s *nativeLibvirtSSH) hostKeyCallback(instanceName string) ssh.HostKeyCallback {
 	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
 		presented := key.Marshal()
-		s.hostKeysMu.Lock()
-		defer s.hostKeysMu.Unlock()
+		s.identitiesMu.Lock()
+		defer s.identitiesMu.Unlock()
 		known, exists := s.hostKeys[instanceName]
 		if !exists {
 			s.hostKeys[instanceName] = bytes.Clone(presented)
@@ -291,10 +303,11 @@ func (s *nativeLibvirtSSH) hostKeyCallback(instanceName string) ssh.HostKeyCallb
 	}
 }
 
-func (s *nativeLibvirtSSH) ForgetHost(instanceName string) {
-	s.hostKeysMu.Lock()
+func (s *nativeLibvirtSSH) ForgetVM(instanceName string) {
+	s.identitiesMu.Lock()
+	delete(s.signers, instanceName)
 	delete(s.hostKeys, instanceName)
-	s.hostKeysMu.Unlock()
+	s.identitiesMu.Unlock()
 }
 
 func (p *libvirtRPCProvider) runSSH(

@@ -29,15 +29,30 @@ type recordingLibvirtGuestSSH struct {
 	mu            sync.Mutex
 	commands      []string
 	forgotten     []string
+	identities    map[string]string
 	run           func(context.Context, io.Reader, io.Writer, io.Writer, string) error
 	authorizedKey string
+	identityErr   error
 }
 
-func (s *recordingLibvirtGuestSSH) AuthorizedKey() string {
-	if s.authorizedKey != "" {
-		return s.authorizedKey
+func (s *recordingLibvirtGuestSSH) CreateIdentity(name string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.identityErr != nil {
+		return "", s.identityErr
 	}
-	return "ssh-ed25519 AAAATEST gitone-test"
+	if s.identities == nil {
+		s.identities = make(map[string]string)
+	}
+	if _, exists := s.identities[name]; exists {
+		return "", fmt.Errorf("identity already exists for %q", name)
+	}
+	key := s.authorizedKey
+	if key == "" {
+		key = "ssh-ed25519 AAAATEST gitone-test-" + name
+	}
+	s.identities[name] = key
+	return key, nil
 }
 
 func (s *recordingLibvirtGuestSSH) Run(
@@ -58,10 +73,24 @@ func (s *recordingLibvirtGuestSSH) Run(
 	return run(ctx, input, output, errorOutput, command)
 }
 
-func (s *recordingLibvirtGuestSSH) ForgetHost(name string) {
+func (s *recordingLibvirtGuestSSH) ForgetVM(name string) {
 	s.mu.Lock()
+	delete(s.identities, name)
 	s.forgotten = append(s.forgotten, name)
 	s.mu.Unlock()
+}
+
+func (s *recordingLibvirtGuestSSH) hasIdentity(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, exists := s.identities[name]
+	return exists
+}
+
+func (s *recordingLibvirtGuestSSH) identityCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.identities)
 }
 
 func (s *recordingLibvirtGuestSSH) lastCommand() string {
@@ -121,23 +150,126 @@ func TestRunSSHPreservesControlledTransportDiagnostic(t *testing.T) {
 }
 
 func TestNativeLibvirtSSHGeneratesFreshInMemoryEd25519Identity(t *testing.T) {
-	first, err := newNativeLibvirtSSH("core", 22)
+	transport, err := newNativeLibvirtSSH("core", 22)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := newNativeLibvirtSSH("core", 22)
+	firstKey, err := transport.CreateIdentity("warm-vm-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(first.AuthorizedKey()))
+	secondKey, err := transport.CreateIdentity("warm-vm-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(firstKey))
 	if err != nil {
 		t.Fatalf("parse generated authorized key: %v", err)
 	}
 	if publicKey.Type() != ssh.KeyAlgoED25519 {
 		t.Fatalf("generated key type = %q, want %q", publicKey.Type(), ssh.KeyAlgoED25519)
 	}
-	if first.AuthorizedKey() == second.AuthorizedKey() {
-		t.Fatal("two runner SSH transports reused an identity")
+	if firstKey == secondKey {
+		t.Fatal("two VMs reused a runner SSH identity")
+	}
+	if _, err = transport.CreateIdentity("warm-vm-1"); err == nil {
+		t.Fatal("duplicate VM SSH identity was accepted")
+	}
+	transport.ForgetVM("warm-vm-1")
+	replacementKey, err := transport.CreateIdentity("warm-vm-1")
+	if err != nil {
+		t.Fatalf("recreate forgotten VM identity: %v", err)
+	}
+	if replacementKey == firstKey {
+		t.Fatal("recreated VM identity reused its previous key")
+	}
+}
+
+func createNativeSSHIdentity(
+	t *testing.T,
+	transport *nativeLibvirtSSH,
+	instanceName string,
+) ssh.PublicKey {
+	t.Helper()
+	authorizedKey, err := transport.CreateIdentity(instanceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedKey))
+	if err != nil {
+		t.Fatalf("parse generated authorized key: %v", err)
+	}
+	return publicKey
+}
+
+func TestNativeLibvirtSSHConcurrentIdentityCreationHasSingleWinner(t *testing.T) {
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const contenders = 32
+	start := make(chan struct{})
+	results := make(chan error, contenders)
+	var wait sync.WaitGroup
+	for range contenders {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, createErr := transport.CreateIdentity("warm-vm-1")
+			results <- createErr
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	winners := 0
+	for createErr := range results {
+		if createErr == nil {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("concurrent VM identity winners = %d, want 1", winners)
+	}
+}
+
+func TestNativeLibvirtSSHUsesOnlyTheAssignedVMIdentity(t *testing.T) {
+	transport, err := newNativeLibvirtSSH("core", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPublicKey := createNativeSSHIdentity(t, transport, "warm-vm-1")
+	_ = createNativeSSHIdentity(t, transport, "warm-vm-2")
+	server := newTestSSHServer(t, firstPublicKey, func(_ string, _ ssh.Channel) {})
+	defer server.Close()
+	host, portText, err := net.SplitHostPort(server.Address())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.port, err = strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = transport.Run(
+		context.Background(),
+		vmInstance{Name: "warm-vm-2", Address: host},
+		nil,
+		io.Discard,
+		io.Discard,
+		"wrong-identity",
+	); err == nil {
+		t.Fatal("VM 2 authenticated to a server that accepts only VM 1's runner key")
+	}
+	if err = transport.Run(
+		context.Background(),
+		vmInstance{Name: "warm-vm-1", Address: host},
+		nil,
+		io.Discard,
+		io.Discard,
+		"right-identity",
+	); err != nil {
+		t.Fatalf("VM 1 did not use its assigned runner key: %v", err)
 	}
 }
 
@@ -159,7 +291,7 @@ func TestNativeLibvirtSSHPinsHostKeyInMemoryPerVM(t *testing.T) {
 		!strings.Contains(err.Error(), "host key changed") {
 		t.Fatalf("changed host-key error = %v", err)
 	}
-	transport.ForgetHost("warm-vm-1")
+	transport.ForgetVM("warm-vm-1")
 	if err = callback("ignored", nil, secondHostKey); err != nil {
 		t.Fatalf("accept host key after VM destruction: %v", err)
 	}
@@ -202,7 +334,8 @@ func TestNativeLibvirtSSHStreamsCommandWithoutOpenSSHProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := newTestSSHServer(t, transport.signer.PublicKey(), func(command string, channel ssh.Channel) {
+	publicKey := createNativeSSHIdentity(t, transport, "warm-vm-1")
+	server := newTestSSHServer(t, publicKey, func(command string, channel ssh.Channel) {
 		contents, readErr := io.ReadAll(channel)
 		if readErr != nil {
 			return
@@ -243,7 +376,8 @@ func TestNativeLibvirtSSHSerializesStdoutAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := newTestSSHServer(t, transport.signer.PublicKey(), func(_ string, channel ssh.Channel) {
+	publicKey := createNativeSSHIdentity(t, transport, "warm-vm-1")
+	server := newTestSSHServer(t, publicKey, func(_ string, channel ssh.Channel) {
 		var writers sync.WaitGroup
 		writers.Add(2)
 		go func() {
@@ -306,6 +440,7 @@ func TestNativeLibvirtSSHCancelsSilentHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = createNativeSSHIdentity(t, transport, "warm-vm-1")
 	host, portText, err := net.SplitHostPort(listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -344,9 +479,10 @@ func TestNativeLibvirtSSHCancelsHungCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	publicKey := createNativeSSHIdentity(t, transport, "warm-vm-1")
 	started := make(chan struct{})
 	release := make(chan struct{})
-	server := newTestSSHServer(t, transport.signer.PublicKey(), func(_ string, _ ssh.Channel) {
+	server := newTestSSHServer(t, publicKey, func(_ string, _ ssh.Channel) {
 		close(started)
 		<-release
 	})
@@ -389,11 +525,12 @@ func TestNativeLibvirtSSHClosesConnectionWhenKeepAliveIsUnanswered(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	publicKey := createNativeSSHIdentity(t, transport, "warm-vm-1")
 	transport.keepAliveInterval = 10 * time.Millisecond
 	transport.keepAliveCountMax = 2
 	started := make(chan struct{})
 	release := make(chan struct{})
-	server := newTestSSHServer(t, transport.signer.PublicKey(), func(_ string, _ ssh.Channel) {
+	server := newTestSSHServer(t, publicKey, func(_ string, _ ssh.Channel) {
 		close(started)
 		<-release
 	})
@@ -436,7 +573,8 @@ func TestRunSSHSanitizesRealServerExitSignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := newTestSSHServer(t, transport.signer.PublicKey(), func(_ string, channel ssh.Channel) {
+	publicKey := createNativeSSHIdentity(t, transport, "warm-vm-1")
+	server := newTestSSHServer(t, publicKey, func(_ string, channel ssh.Channel) {
 		_, _ = channel.SendRequest("exit-signal", false, ssh.Marshal(struct {
 			SignalName   string
 			CoreDumped   bool

@@ -99,8 +99,15 @@ func TestPrepareValidatesStorageAndCreatesPersistentNetwork(t *testing.T) {
 		!runner.networkDefined || !runner.networkActive || !runner.autostarted {
 		t.Fatalf("prepared provider = %#v, runner = %#v", provider, runner)
 	}
-	if !strings.HasPrefix(provider.publicKey, "ssh-ed25519 ") {
-		t.Fatalf("derived SSH public key = %q", provider.publicKey)
+	transport, ok := provider.guestSSH.(*nativeLibvirtSSH)
+	if !ok {
+		t.Fatalf("prepared SSH transport = %T, want native transport", provider.guestSSH)
+	}
+	transport.identitiesMu.Lock()
+	identityCount := len(transport.signers)
+	transport.identitiesMu.Unlock()
+	if identityCount != 0 {
+		t.Fatalf("Prepare generated %d VM identities before VM creation", identityCount)
 	}
 	for _, verb := range []string{
 		"domcapabilities", "pool-info", "pool-start", "pool-dumpxml", "pool-refresh", "vol-dumpxml",
@@ -273,7 +280,6 @@ func newLifecycleTestProvider(poolPath string, client libvirtRPCClient) *libvirt
 		basePath:    filepath.Join(poolPath, "flatcar-base.qcow2"),
 		network:     libvirt.Network{Name: "gitone-test"},
 		ownerPrefix: libvirtOwnerPrefix("test:///system", "test-pool", runnerID),
-		publicKey:   "ssh-ed25519 AAAATEST rollback@test",
 		guestSSH:    &recordingLibvirtGuestSSH{},
 		prepared:    true,
 	}
@@ -296,6 +302,7 @@ func TestCreateRollsBackEveryProvisioningStage(t *testing.T) {
 			poolPath := t.TempDir()
 			runner := &lifecycleLibvirtRPC{poolPath: poolPath, failVerb: test.failVerb}
 			provider := newLifecycleTestProvider(poolPath, runner)
+			guestSSH := provider.guestSSH.(*recordingLibvirtGuestSSH)
 			instance, err := provider.Create(context.Background())
 			if err == nil || !strings.Contains(err.Error(), test.wantText) {
 				t.Fatalf("Create error = %v, want containing %q", err, test.wantText)
@@ -312,6 +319,9 @@ func TestCreateRollsBackEveryProvisioningStage(t *testing.T) {
 			if !containsString(runner.verbs, "dominfo") || !containsString(runner.verbs, "vol-info") {
 				t.Fatalf("rollback verbs = %#v", runner.verbs)
 			}
+			if guestSSH.identityCount() != 0 {
+				t.Fatalf("creation rollback retained %d VM SSH identities", guestSSH.identityCount())
+			}
 		})
 	}
 }
@@ -324,6 +334,7 @@ func TestCreateReturnsPartialInstanceWhenRollbackMustBeRetried(t *testing.T) {
 		failDelete: true,
 	}
 	provider := newLifecycleTestProvider(poolPath, runner)
+	guestSSH := provider.guestSSH.(*recordingLibvirtGuestSSH)
 	instance, err := provider.Create(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "injected volume deletion failure") {
 		t.Fatalf("Create error = %v", err)
@@ -331,12 +342,43 @@ func TestCreateReturnsPartialInstanceWhenRollbackMustBeRetried(t *testing.T) {
 	if instance.Name == "" || !runner.volumeExists {
 		t.Fatalf("partial instance/resource was not retained: %#v, runner=%#v", instance, runner)
 	}
+	if !guestSSH.hasIdentity(instance.Name) {
+		t.Fatal("retryable creation rollback discarded the VM SSH identity")
+	}
 	runner.failDelete = false
 	if err = provider.Destroy(context.Background(), instance); err != nil {
 		t.Fatalf("retry Destroy: %v", err)
 	}
 	if runner.volumeExists {
 		t.Fatal("retry Destroy left the volume behind")
+	}
+	if guestSSH.hasIdentity(instance.Name) {
+		t.Fatal("successful retry Destroy retained the VM SSH identity")
+	}
+}
+
+func TestCreateIdentityFailureReleasesReservedVMIdentity(t *testing.T) {
+	poolPath := t.TempDir()
+	runner := &lifecycleLibvirtRPC{poolPath: poolPath}
+	provider := newLifecycleTestProvider(poolPath, runner)
+	guestSSH := &recordingLibvirtGuestSSH{identityErr: errors.New("key generation failed")}
+	provider.guestSSH = guestSSH
+	instance, err := provider.Create(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "create VM SSH identity") {
+		t.Fatalf("Create identity error = %v", err)
+	}
+	if instance != (vmInstance{}) {
+		t.Fatalf("identity failure returned a partial VM: %#v", instance)
+	}
+	provider.identityMu.Lock()
+	allocatedNames := len(provider.allocatedNames)
+	allocatedMACs := len(provider.allocatedMACAddresses)
+	provider.identityMu.Unlock()
+	if allocatedNames != 0 || allocatedMACs != 0 {
+		t.Fatalf("identity failure retained reservations: names=%d MACs=%d", allocatedNames, allocatedMACs)
+	}
+	if runner.domainExists || runner.volumeExists || guestSSH.identityCount() != 0 {
+		t.Fatalf("identity failure created resources: runner=%#v identities=%d", runner, guestSSH.identityCount())
 	}
 }
 
@@ -528,6 +570,10 @@ func TestDestroyIsStrictlyOwnedAndIdempotent(t *testing.T) {
 	if !provider.reserveInstanceIdentity(instance) {
 		t.Fatal("could not reserve test VM identity")
 	}
+	guestSSH := provider.guestSSH.(*recordingLibvirtGuestSSH)
+	if _, err := guestSSH.CreateIdentity(instance.Name); err != nil {
+		t.Fatal(err)
+	}
 	runner.domainName = name
 	runner.domainExists = true
 	runner.domainRunning = true
@@ -552,9 +598,8 @@ func TestDestroyIsStrictlyOwnedAndIdempotent(t *testing.T) {
 	if _, err := os.Stat(instance.IgnitionPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Destroy left Ignition: %v", err)
 	}
-	guestSSH, ok := provider.guestSSH.(*recordingLibvirtGuestSSH)
-	if !ok || !containsString(guestSSH.forgotten, instance.Name) {
-		t.Fatalf("Destroy did not forget the in-memory SSH host key: %#v", provider.guestSSH)
+	if !containsString(guestSSH.forgotten, instance.Name) || guestSSH.hasIdentity(instance.Name) {
+		t.Fatalf("Destroy did not forget the in-memory VM SSH identity and host-key pin: %#v", provider.guestSSH)
 	}
 	if !provider.reserveInstanceIdentity(instance) {
 		t.Fatal("successful Destroy did not release the VM identity")
