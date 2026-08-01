@@ -1091,9 +1091,14 @@ func textLineEdits(base, version string) []lineEdit {
 			if pending == nil {
 				pending = &lineEdit{start: position, end: position}
 			}
-			for _, value := range runes {
-				pending.replacement = append(pending.replacement, lineArray[int(value)])
-			}
+			// DiffLinesToRunes does not encode line indexes as their raw rune
+			// values once an index reaches the UTF-16 surrogate range. Use the
+			// paired decoder instead of indexing lineArray with the encoded runes.
+			decoded := dmp.DiffCharsToLines([]diffmatchpatch.Diff{diff}, lineArray)
+			pending.replacement = append(
+				pending.replacement,
+				splitTextLines(decoded[0].Text)...,
+			)
 		}
 	}
 	flush()

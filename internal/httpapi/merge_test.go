@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -340,6 +341,50 @@ func TestMergeTextLinesAcceptsIdenticalChange(t *testing.T) {
 	if !clean || merged != version {
 		t.Fatalf("identical changes did not merge cleanly: clean=%v merged=%q", clean, merged)
 	}
+}
+
+func TestMergeTextLinesDecodesLargeUniqueLineInsertion(t *testing.T) {
+	base := numberedTextLines(56_000)
+	target := strings.TrimPrefix(base, "line-0\n")
+	source := base + "source\n"
+
+	merged, clean := mergeTextLines(base, target, source)
+	expected := target + "source\n"
+	if !clean || merged != expected {
+		t.Fatalf(
+			"large unique-line insertion did not merge correctly: clean=%v length=%d want=%d",
+			clean,
+			len(merged),
+			len(expected),
+		)
+	}
+}
+
+func TestMergeTextLinesDecodesLargeExistingLineInsertion(t *testing.T) {
+	base := numberedTextLines(60_000)
+	target := base + "line-55295\n"
+	source := strings.TrimPrefix(base, "line-0\n")
+
+	merged, clean := mergeTextLines(base, target, source)
+	expected := source + "line-55295\n"
+	if !clean || merged != expected {
+		t.Fatalf(
+			"large existing-line insertion did not merge correctly: clean=%v length=%d want=%d",
+			clean,
+			len(merged),
+			len(expected),
+		)
+	}
+}
+
+func numberedTextLines(count int) string {
+	var text strings.Builder
+	for index := 0; index < count; index++ {
+		text.WriteString("line-")
+		text.WriteString(strconv.Itoa(index))
+		text.WriteByte('\n')
+	}
+	return text.String()
 }
 
 func TestMergeFileMode(t *testing.T) {
