@@ -58,6 +58,38 @@ func newPrepareTestProvider(t *testing.T) (*libvirtRPCProvider, *prepareLibvirtR
 	return provider, runner
 }
 
+func TestLibvirtRuntimeConfigRejectsUnsafeValues(t *testing.T) {
+	provider, _ := newPrepareTestProvider(t)
+	tests := []struct {
+		name   string
+		mutate func(*LibvirtConfig)
+		want   string
+	}{
+		{"runner ID", func(config *LibvirtConfig) { config.RunnerID = "bad runner" }, "runner ID"},
+		{"pool name", func(config *LibvirtConfig) { config.PoolName = "bad pool" }, "pool name"},
+		{"base volume", func(config *LibvirtConfig) { config.BaseVolumeName = "bad volume" }, "base volume"},
+		{"network name", func(config *LibvirtConfig) { config.NetworkName = "bad network" }, "network name"},
+		{"SSH user", func(config *LibvirtConfig) { config.SSHUser = "Root" }, "SSH user"},
+		{"Docker command", func(config *LibvirtConfig) { config.DockerCommand = "../docker" }, "Docker command"},
+		{"blank URI", func(config *LibvirtConfig) { config.URI = " " }, "URI"},
+		{"SSH URI", func(config *LibvirtConfig) {
+			config.URI = "qemu+ssh://hypervisor/system"
+		}, "+ssh transport"},
+		{"relative pool path", func(config *LibvirtConfig) { config.PoolPath = "images" }, "absolute"},
+		{"unsafe pool path", func(config *LibvirtConfig) { config.PoolPath = "/tmp/bad,path" }, "unsupported"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := provider.config
+			test.mutate(&config)
+			candidate := &libvirtRPCProvider{config: config}
+			if err := candidate.validateRuntimeConfig(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("runtime validation error = %v, want message containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestPrepareValidatesStorageAndCreatesPersistentNetwork(t *testing.T) {
 	provider, runner := newPrepareTestProvider(t)
 	if err := provider.Prepare(context.Background()); err != nil {

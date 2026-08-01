@@ -299,9 +299,7 @@ The runner makes outbound HTTP(S) requests to GitOne and SSH connections to its
 private guests; it never mounts GitOne's `/data`. Libvirt job concurrency is
 derived from `-libvirt-max-instances`; there is no separate worker setting.
 `-runner-command` selects the Docker-compatible command inside each guest. The
-old host-Docker executor is available only as the explicit migration option
-`-runner-executor docker`, where `-docker-workers` controls concurrency and
-defaults to one.
+standalone runner supports only the libvirt executor.
 The web image is built from `Dockerfile`; the controller image is built from
 `Dockerfile.runner`. The compiled runner speaks libvirt's RPC protocol directly
 over the mounted Unix socket using `digitalocean/go-libvirt`, so the image

@@ -62,11 +62,12 @@ func TestNewRemoteRunnerRejectsInvalidConfiguration(t *testing.T) {
 	}{
 		{name: "missing token", message: "token"},
 		{
-			name: "invalid Docker workers", token: "test-token",
-			args: []string{
-				"-runner-executor", "docker", "-docker-workers", "-1",
-			},
-			message: "workers",
+			name: "removed executor flag", token: "test-token",
+			args: []string{"-runner-executor", "docker"}, message: "flag provided but not defined",
+		},
+		{
+			name: "removed Docker workers flag", token: "test-token",
+			args: []string{"-docker-workers", "2"}, message: "flag provided but not defined",
 		},
 		{
 			name: "removed runner workers flag", token: "test-token",
@@ -75,10 +76,6 @@ func TestNewRemoteRunnerRejectsInvalidConfiguration(t *testing.T) {
 		{
 			name: "unexpected argument", token: "test-token",
 			args: []string{"worker"}, message: "unexpected arguments",
-		},
-		{
-			name: "unknown executor", token: "test-token",
-			args: []string{"-runner-executor", "shell"}, message: "executor",
 		},
 		{
 			name: "invalid libvirt memory", token: "test-token",

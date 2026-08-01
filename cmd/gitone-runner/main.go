@@ -77,20 +77,10 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 		"shared remote runner token",
 	)
 	runnerID := flags.String("runner-id", "gitone-runner", "unique runner ID")
-	executorName := flags.String(
-		"runner-executor",
-		"libvirt",
-		"build executor: libvirt or docker (legacy)",
-	)
 	command := flags.String(
 		"runner-command",
 		"docker",
-		"Docker-compatible command inside the VM (or host for legacy executor)",
-	)
-	dockerWorkers := flags.Int(
-		"docker-workers",
-		1,
-		"number of concurrent builds for the legacy Docker executor",
+		"Docker-compatible command inside each libvirt VM",
 	)
 	workRoot := flags.String(
 		"runner-work-root",
@@ -171,65 +161,45 @@ func newRemoteRunner(args []string) (*runner.Remote, string, string, error) {
 	if flags.NArg() != 0 {
 		return nil, "", "", fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
-	var (
-		executor runner.Executor
-		err      error
-		workers  int
-	)
-	switch strings.ToLower(strings.TrimSpace(*executorName)) {
-	case "libvirt":
-		idleCount := *libvirtIdleCount
-		if idleCount == 0 {
-			idleCount = runner.DefaultLibvirtIdleCount
-		}
-		maxInstances := *libvirtMaxInstances
-		if maxInstances == 0 {
-			maxInstances = runner.DefaultLibvirtMaxInstances
-		}
-		executor, err = runner.NewLibvirtExecutor(runner.LibvirtConfig{
-			RunnerID:           *runnerID,
-			URI:                *libvirtURI,
-			PoolName:           *libvirtPoolName,
-			PoolPath:           *libvirtPoolPath,
-			BaseVolumeName:     *libvirtBaseVolume,
-			BaseImageURL:       *libvirtBaseImageURL,
-			BaseImageSHA512:    *libvirtBaseImageSHA512,
-			NetworkName:        *libvirtNetwork,
-			NetworkCIDR:        *libvirtNetworkCIDR,
-			SSHUser:            *libvirtSSHUser,
-			SSHPort:            *libvirtSSHPort,
-			VCPUs:              *libvirtVCPUs,
-			MemoryMiB:          *libvirtMemoryMiB,
-			DiskSizeGiB:        *libvirtDiskSizeGiB,
-			IdleCount:          idleCount,
-			MaxInstances:       maxInstances,
-			ReadyTimeout:       *libvirtReadyTimeout,
-			CleanupTimeout:     *libvirtCleanupTimeout,
-			RegistryMirrors:    commaSeparatedValues(*libvirtRegistryMirrors),
-			InsecureRegistries: commaSeparatedValues(*libvirtInsecureRegistries),
-			DockerCommand:      *command,
-		})
-		if err != nil {
-			return nil, "", "", err
-		}
-	case "docker":
-		if *dockerWorkers < 1 || *dockerWorkers > 32 {
-			return nil, "", "", errors.New("docker workers must be between 1 and 32")
-		}
-		executor = runner.ContainerExecutor{Command: *command}
-		workers = *dockerWorkers
-	default:
-		return nil, "", "", fmt.Errorf(
-			"runner executor must be libvirt or docker, got %q",
-			*executorName,
-		)
+	idleCount := *libvirtIdleCount
+	if idleCount == 0 {
+		idleCount = runner.DefaultLibvirtIdleCount
+	}
+	maxInstances := *libvirtMaxInstances
+	if maxInstances == 0 {
+		maxInstances = runner.DefaultLibvirtMaxInstances
+	}
+	executor, err := runner.NewLibvirtExecutor(runner.LibvirtConfig{
+		RunnerID:           *runnerID,
+		URI:                *libvirtURI,
+		PoolName:           *libvirtPoolName,
+		PoolPath:           *libvirtPoolPath,
+		BaseVolumeName:     *libvirtBaseVolume,
+		BaseImageURL:       *libvirtBaseImageURL,
+		BaseImageSHA512:    *libvirtBaseImageSHA512,
+		NetworkName:        *libvirtNetwork,
+		NetworkCIDR:        *libvirtNetworkCIDR,
+		SSHUser:            *libvirtSSHUser,
+		SSHPort:            *libvirtSSHPort,
+		VCPUs:              *libvirtVCPUs,
+		MemoryMiB:          *libvirtMemoryMiB,
+		DiskSizeGiB:        *libvirtDiskSizeGiB,
+		IdleCount:          idleCount,
+		MaxInstances:       maxInstances,
+		ReadyTimeout:       *libvirtReadyTimeout,
+		CleanupTimeout:     *libvirtCleanupTimeout,
+		RegistryMirrors:    commaSeparatedValues(*libvirtRegistryMirrors),
+		InsecureRegistries: commaSeparatedValues(*libvirtInsecureRegistries),
+		DockerCommand:      *command,
+	})
+	if err != nil {
+		return nil, "", "", err
 	}
 	remote, err := runner.NewRemote(runner.RemoteConfig{
 		URL:          *serverURL,
 		Token:        *token,
 		ID:           *runnerID,
 		WorkRoot:     *workRoot,
-		Workers:      workers,
 		PollInterval: *pollInterval,
 		Executor:     executor,
 	})

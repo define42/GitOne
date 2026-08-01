@@ -350,14 +350,3 @@ func TestEmbeddedRunnerCheckoutAndCappedWriterErrors(t *testing.T) {
 		t.Fatalf("marker writer error = %d, %v", written, err)
 	}
 }
-
-func TestContainerExecutorRejectsInvalidBuildID(t *testing.T) {
-	err := (ContainerExecutor{}).Run(
-		context.Background(),
-		ExecuteRequest{Job: Job{ID: "bad build"}},
-		io.Discard,
-	)
-	if err == nil || !strings.Contains(err.Error(), "invalid build ID") {
-		t.Fatalf("invalid build ID error = %v", err)
-	}
-}
