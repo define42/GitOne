@@ -17,6 +17,7 @@ func setValidEnvironment(t *testing.T) {
 	t.Setenv("GITONE_SESSION_BLOCK_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("b", 32))))
 	t.Setenv("GITONE_RUNNER_TOKEN", "")
 	t.Setenv("GITONE_IMPORT_ALLOWLIST", "")
+	clearTLSEnvironment(t)
 }
 
 func TestNewServer(t *testing.T) {
@@ -35,6 +36,24 @@ func TestNewServer(t *testing.T) {
 		server.ReadHeaderTimeout != 10*time.Second ||
 		server.IdleTimeout != 2*time.Minute {
 		t.Fatalf("unexpected server: %#v ephemeral=%v", server, ephemeral)
+	}
+}
+
+func TestNewServerConfiguresACMEHTTPS(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("GITONE_TLS_MODE", "acme")
+	t.Setenv("GITONE_TLS_DOMAINS", "git.example")
+	server, ephemeral, err := newServer([]string{
+		"-root", t.TempDir(),
+		"-listen", "127.0.0.1:8443",
+		"-public-url", "https://git.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ephemeral || server.transport.mode != transportACME ||
+		server.transport.protocol() != "HTTPS" {
+		t.Fatalf("unexpected HTTPS server: %#v ephemeral=%v", server, ephemeral)
 	}
 }
 
@@ -75,6 +94,28 @@ func TestNewServerRejectsInvalidConfiguration(t *testing.T) {
 		setValidEnvironment(t)
 		if _, _, err := newServer([]string{"-public-url", "://invalid"}); err == nil {
 			t.Fatal("invalid public URL was accepted")
+		}
+	})
+
+	t.Run("ACME with HTTP public URL", func(t *testing.T) {
+		setValidEnvironment(t)
+		t.Setenv("GITONE_TLS_MODE", "acme")
+		t.Setenv("GITONE_TLS_DOMAINS", "git.example")
+		if _, _, err := newServer([]string{
+			"-public-url", "http://git.example",
+		}); err == nil || !strings.Contains(err.Error(), "absolute HTTPS") {
+			t.Fatalf("ACME public URL error = %v", err)
+		}
+	})
+
+	t.Run("ACME public URL not in certificate domains", func(t *testing.T) {
+		setValidEnvironment(t)
+		t.Setenv("GITONE_TLS_MODE", "acme")
+		t.Setenv("GITONE_TLS_DOMAINS", "other.example")
+		if _, _, err := newServer([]string{
+			"-public-url", "https://git.example",
+		}); err == nil || !strings.Contains(err.Error(), "must be included") {
+			t.Fatalf("ACME public URL domain error = %v", err)
 		}
 	})
 

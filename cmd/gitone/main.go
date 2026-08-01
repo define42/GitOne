@@ -24,11 +24,11 @@ func main() {
 	if ephemeralSessions {
 		log.Print("session cookie keys are ephemeral; configure GITONE_SESSION_HASH_KEY and GITONE_SESSION_BLOCK_KEY to preserve browser sessions across restarts")
 	}
-	log.Printf("GitOne listening on %s", server.Addr)
+	log.Printf("GitOne listening with %s on %s", server.transport.protocol(), server.Addr)
 	log.Fatal(server.ListenAndServe())
 }
 
-func newServer(args []string) (*http.Server, bool, error) {
+func newServer(args []string) (*configuredServer, bool, error) {
 	flags := flag.NewFlagSet("gitone", flag.ContinueOnError)
 	root := flags.String("root", "./data", "storage root")
 	listen := flags.String("listen", ":8080", "listen address")
@@ -59,6 +59,13 @@ func newServer(args []string) (*http.Server, bool, error) {
 	}
 	parsedPublicURL, err := url.Parse(*publicURL)
 	if err != nil {
+		return nil, false, err
+	}
+	transport, err := transportConfigFromEnvironment(*root)
+	if err != nil {
+		return nil, false, err
+	}
+	if err = transport.validatePublicURL(parsedPublicURL); err != nil {
 		return nil, false, err
 	}
 	sessionConfig, ephemeralSessions, err := auth.SessionConfigFromEnvironment(
@@ -96,11 +103,14 @@ func newServer(args []string) (*http.Server, bool, error) {
 		RunnerToken:         *runnerToken,
 		ImportNetworkPolicy: importNetworkPolicy,
 	})
-	server := &http.Server{
-		Addr:              *listen,
-		Handler:           h,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
+	server := &configuredServer{
+		Server: &http.Server{
+			Addr:              *listen,
+			Handler:           h,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+		},
+		transport: transport,
 	}
 	return server, ephemeralSessions, nil
 }

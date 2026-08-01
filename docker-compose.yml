@@ -32,9 +32,9 @@ services:
       - -runner-work-root
       - /var/lib/gitone-runner
       - -libvirt-idle-count
-      - ${GITONE_LIBVIRT_IDLE_COUNT:-4}
+      - ${GITONE_LIBVIRT_IDLE_COUNT:-3}
       - -libvirt-max-instances
-      - ${GITONE_LIBVIRT_MAX_INSTANCES:-8}
+      - ${GITONE_LIBVIRT_MAX_INSTANCES:-5}
       - -libvirt-pool-path
       - ${GITONE_LIBVIRT_POOL_PATH:-/var/lib/libvirt/images}
       - -libvirt-base-volume

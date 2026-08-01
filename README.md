@@ -35,6 +35,42 @@ The session keys encrypt and authenticate browser cookies and can be generated w
 
 Remote HTTP(S) repository imports block loopback, private, link-local, metadata, shared, multicast, documentation, and reserved address ranges by default. DNS is checked again when connecting, the validated numeric address is dialed directly, and every redirect is subject to the same policy. Administrators can set `GITONE_IMPORT_ALLOWLIST` or `-import-allowlist` to a comma-separated list of exact hostnames, IP addresses, or CIDR prefixes, such as `git.internal.example,10.20.0.0/16`. Allowlist entries explicitly permit otherwise blocked destinations.
 
+## HTTPS with ACME
+
+GitOne can obtain and renew its HTTPS certificate with CertMagic. Plain HTTP
+remains the default. To enable ACME, set the TLS environment variables and make
+the public URL HTTPS:
+
+```bash
+export GITONE_TLS_MODE=acme
+export GITONE_TLS_DOMAINS=git.example.com
+export GITONE_ACME_EMAIL=operator@example.com
+make run RUN_ARGS="-root ./data -listen :443 -public-url https://git.example.com"
+```
+
+`GITONE_TLS_DOMAINS` is a required comma-separated list of certificate names,
+and it must include the `-public-url` hostname. Enabling ACME signifies
+acceptance of the configured CA's subscriber agreement. By default CertMagic
+uses Let's Encrypt and stores its account, certificates, and renewal state in
+`<root>/acme`; keep that directory persistent, private, and writable by the
+GitOne process.
+
+The optional ACME settings are:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GITONE_ACME_EMAIL` | empty | ACME account contact address. |
+| `GITONE_ACME_DIRECTORY` | Let's Encrypt | Alternate ACME directory URL, such as a private step-ca deployment. |
+| `GITONE_ACME_CA_ROOT` | system roots | PEM root CA used instead to trust a private ACME directory. |
+| `GITONE_ACME_STORAGE` | `<root>/acme` | Persistent CertMagic storage directory. |
+
+GitOne uses TLS-ALPN-01 on the HTTPS listener and does not open an HTTP port or
+redirect HTTP to HTTPS. Public TCP port 443 must therefore reach the configured
+`-listen` port; forwarding `443` to a different internal port is supported.
+Wildcard certificates are not supported because they require DNS-01. A private
+ACME CA's root must also be installed in every GitOne client that needs to trust
+the issued server certificate.
+
 The development web server and LDAP directory can be started with:
 
 ```bash
