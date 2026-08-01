@@ -355,8 +355,11 @@ func (a API) createMergeRequest(
 	if targetName == sourceName {
 		return nil, huma.Error400BadRequest("source and target branches must be different")
 	}
-	ahead, _, err := commitDifference(repository, targetCommit, sourceCommit)
+	ahead, _, err := commitDifference(ctx, repository, targetCommit, sourceCommit)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, huma.Error500InternalServerError("could not compare commit history", err)
 	}
 	if ahead == 0 {
@@ -1340,6 +1343,9 @@ func (a API) buildMergeRequestView(
 ) (mergeRequestView, error) {
 	comparison, err := compareMergeRequest(ctx, repository, request, includeFiles)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return mergeRequestView{}, ctxErr
+		}
 		return mergeRequestView{}, huma.Error500InternalServerError(
 			"could not compare merge request branches",
 			err,
@@ -1495,7 +1501,7 @@ func compareMergeRequest(
 	}
 	result.TargetCommit = targetCommit.Hash.String()
 	result.HeadCommit = sourceCommit.Hash.String()
-	ahead, behind, err := commitDifference(repository, targetCommit, sourceCommit)
+	ahead, behind, err := commitDifference(ctx, repository, targetCommit, sourceCommit)
 	if err != nil {
 		return result, err
 	}

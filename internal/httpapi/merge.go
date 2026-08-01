@@ -72,8 +72,11 @@ func (a API) compareRepositoryBranches(
 		return nil, huma.Error400BadRequest("choose two different branches")
 	}
 
-	ahead, behind, err := commitDifference(repository, baseCommit, headCommit)
+	ahead, behind, err := commitDifference(ctx, repository, baseCommit, headCommit)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, huma.Error500InternalServerError("could not compare commit history", err)
 	}
 	mergeBase, mergeable, conflicts, err := assessBranchMerge(repository, baseCommit, headCommit)
@@ -466,26 +469,33 @@ func assessBranchMerge(
 }
 
 func commitDifference(
+	ctx context.Context,
 	repository *git.Repository,
 	base *object.Commit,
 	head *object.Commit,
 ) (int, int, error) {
-	baseCommits, err := reachableCommits(repository, base.Hash)
+	baseCommits, err := reachableCommits(ctx, repository, base.Hash)
 	if err != nil {
 		return 0, 0, err
 	}
-	headCommits, err := reachableCommits(repository, head.Hash)
+	headCommits, err := reachableCommits(ctx, repository, head.Hash)
 	if err != nil {
 		return 0, 0, err
 	}
 	ahead := 0
 	for hash := range headCommits {
+		if err = ctx.Err(); err != nil {
+			return 0, 0, err
+		}
 		if _, exists := baseCommits[hash]; !exists {
 			ahead++
 		}
 	}
 	behind := 0
 	for hash := range baseCommits {
+		if err = ctx.Err(); err != nil {
+			return 0, 0, err
+		}
 		if _, exists := headCommits[hash]; !exists {
 			behind++
 		}
@@ -494,26 +504,43 @@ func commitDifference(
 }
 
 func reachableCommits(
+	ctx context.Context,
 	repository *git.Repository,
 	start plumbing.Hash,
 ) (map[plumbing.Hash]struct{}, error) {
-	seen := map[plumbing.Hash]struct{}{}
+	seen := map[plumbing.Hash]struct{}{start: {}}
 	pending := []plumbing.Hash{start}
 	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		hash := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
-		if _, exists := seen[hash]; exists {
-			continue
-		}
 		commit, err := repository.CommitObject(hash)
 		if err != nil {
 			return nil, err
 		}
-		seen[hash] = struct{}{}
-		pending = append(pending, commit.ParentHashes...)
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
+		for _, parent := range commit.ParentHashes {
+			if err = ctx.Err(); err != nil {
+				return nil, err
+			}
+			if _, exists := seen[parent]; exists {
+				continue
+			}
+			if len(seen) >= maximumCommitHistoryWalk {
+				return nil, errCommitHistoryWalkLimit
+			}
+			seen[parent] = struct{}{}
+			pending = append(pending, parent)
+		}
 	}
 	return seen, nil
 }
+
+var errCommitHistoryWalkLimit = errors.New("commit history exceeds maximum walk")
 
 func compareTrees(
 	ctx context.Context,

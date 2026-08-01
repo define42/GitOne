@@ -19,6 +19,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gitstorage "github.com/go-git/go-git/v5/storage"
+	"github.com/go-git/go-git/v5/storage/memory"
 )
 
 func storeTestBlob(t *testing.T, repository *git.Repository, content []byte) plumbing.Hash {
@@ -305,6 +306,81 @@ func TestCompareCanMergeWithRepositoryScopedWriteToken(t *testing.T) {
 	}
 	if !branches.Body.CanWrite {
 		t.Fatal("group write token was not reported as writable")
+	}
+}
+
+func TestCompareRepositoryBranchesHonorsCanceledContext(t *testing.T) {
+	service, credentials, head := repositoryAPIFixture(t)
+	parsed := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	repositoryPath, err := service.Storage.GitPath(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("feature"),
+		plumbing.NewHash(head),
+	)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = service.compareRepositoryBranches(ctx, &compareRepositoryBranchesInput{
+		AuthInput: credentials, Repository: parsed.Full(), Base: "main", Head: "feature",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled branch comparison returned %v", err)
+	}
+}
+
+func TestReachableCommitsEnforcesWalkLimit(t *testing.T) {
+	repository, err := git.Init(memory.NewStorage(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := storeTestTree(t, repository)
+	commit := storeTestCommit(t, repository, tree)
+	atLimit := commit
+	for count := 2; count <= maximumCommitHistoryWalk+1; count++ {
+		commit = storeTestCommit(t, repository, tree, commit.Hash)
+		if count == maximumCommitHistoryWalk {
+			atLimit = commit
+		}
+	}
+
+	commits, err := reachableCommits(context.Background(), repository, atLimit.Hash)
+	if err != nil {
+		t.Fatalf("walk at limit failed: %v", err)
+	}
+	if len(commits) != maximumCommitHistoryWalk {
+		t.Fatalf("walk returned %d commits, want %d", len(commits), maximumCommitHistoryWalk)
+	}
+
+	commits, err = reachableCommits(context.Background(), repository, commit.Hash)
+	if !errors.Is(err, errCommitHistoryWalkLimit) {
+		t.Fatalf("walk beyond limit returned %v", err)
+	}
+	if commits != nil {
+		t.Fatalf("limited walk returned %d partial commits", len(commits))
+	}
+}
+
+func TestCommitDifferenceHonorsCanceledContext(t *testing.T) {
+	repository, err := git.Init(memory.NewStorage(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := storeTestCommit(t, repository, storeTestTree(t, repository))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err = commitDifference(ctx, repository, commit, commit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled commit comparison returned %v", err)
 	}
 }
 
