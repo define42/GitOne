@@ -30,6 +30,19 @@ var (
 	mergeProcessID    = rand.Text() //nolint:gochecknoglobals // Identifies persisted claims after a restart.
 )
 
+type ambiguousMergeClaimError struct {
+	cause   error
+	claimID string
+}
+
+func (e *ambiguousMergeClaimError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *ambiguousMergeClaimError) Unwrap() error {
+	return e.cause
+}
+
 type mergeRequestsInput struct {
 	AuthInput
 	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
@@ -276,10 +289,19 @@ func (a API) listMergeRequests(
 	output.Body.Repository = parsed.Full()
 	output.Body.MergeRequests = make([]mergeRequestView, 0, len(requests))
 	for _, request := range requests {
-		request, err = a.recoverInterruptedMergeClaim(parsed, request)
-		if err != nil {
-			return nil, err
+		if state != "all" && string(request.State) != state {
+			continue
 		}
+		recovered, recoverErr := a.recoverInterruptedMergeClaim(parsed, request)
+		if recoverErr != nil {
+			var ambiguous *ambiguousMergeClaimError
+			if !errors.As(recoverErr, &ambiguous) {
+				return nil, recoverErr
+			}
+		}
+		request = recovered
+		// Recovery can move an open request to merged. Do not return it for a
+		// state filter it no longer matches.
 		if state != "all" && string(request.State) != state {
 			continue
 		}
@@ -432,13 +454,21 @@ func (a API) updateMergeRequest(
 		return nil, err
 	}
 	defer releaseOperationLock()
+	abandonedClaimID := ""
 	if _, err = a.prepareReviewMutationWithOperationLock(parsed, input.ID); err != nil {
-		return nil, err
+		var ambiguous *ambiguousMergeClaimError
+		if input.Body.State != review.StateClosed || !errors.As(err, &ambiguous) {
+			return nil, err
+		}
+		abandonedClaimID = ambiguous.claimID
 	}
 	var updated review.MergeRequest
 	updated, err = a.reviewStore().Update(parsed, input.ID, func(request *review.MergeRequest) error {
 		if request.MergeInProgress {
-			return huma.Error409Conflict("merge request is currently being merged")
+			if request.MergeClaimID != abandonedClaimID {
+				return huma.Error409Conflict("merge request is currently being merged")
+			}
+			clearMergeClaim(request)
 		}
 		if request.State == review.StateMerged {
 			return huma.Error409Conflict("a merged request cannot be reopened or closed")
@@ -1189,10 +1219,13 @@ func (a API) reconcileMergeClaim(
 			knownHelperFailure
 	}
 	if !merged && !canClear {
-		return review.MergeRequest{}, huma.Error409Conflict(
-			"the target changed after an interrupted merge; " +
-				"the recovery record was retained because the outcome is ambiguous",
-		)
+		return request, &ambiguousMergeClaimError{
+			cause: huma.Error409Conflict(
+				"the target changed after an interrupted merge; " +
+					"the recovery record was retained because the outcome is ambiguous",
+			),
+			claimID: claimID,
+		}
 	}
 
 	now := time.Now().UTC()

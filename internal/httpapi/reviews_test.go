@@ -1595,8 +1595,23 @@ func TestMergeRequestRecoveryPreservesPlannedResultAfterTargetAdvances(t *testin
 	}
 }
 
-func TestMergeRequestRecoveryRetainsAmbiguousPlannedResult(t *testing.T) {
+func TestMergeRequestAmbiguousRecoveryCanBeListedAndClosed(t *testing.T) {
 	fixture := newMergeRequestAPIFixture(t)
+	first := createTestMergeRequest(t, fixture)
+	closed, err := fixture.service.updateMergeRequest(
+		context.Background(),
+		&updateMergeRequestInput{
+			MergeRequestInput: mergeRequestInput{
+				AuthInput:  fixture.alice,
+				Repository: fixture.path.Full(),
+				ID:         first.Body.ID,
+			},
+			Body: updateMergeRequestBody{State: review.StateClosed},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	created := createTestMergeRequest(t, fixture)
 	_ = commitReviewBranchFile(
 		t,
@@ -1608,7 +1623,7 @@ func TestMergeRequestRecoveryRetainsAmbiguousPlannedResult(t *testing.T) {
 	)
 	started := time.Now().Add(-time.Hour).UTC()
 	claimID := "99999999999999999999999999999999"
-	_, err := fixture.service.Reviews.Update(
+	_, err = fixture.service.Reviews.Update(
 		fixture.path,
 		created.Body.ID,
 		func(request *review.MergeRequest) error {
@@ -1637,6 +1652,45 @@ func TestMergeRequestRecoveryRetainsAmbiguousPlannedResult(t *testing.T) {
 		},
 	)
 	requireReviewHTTPStatus(t, err, http.StatusConflict)
+
+	for _, test := range []struct {
+		name  string
+		state string
+		ids   []uint64
+	}{
+		{name: "default", ids: []uint64{created.Body.ID}},
+		{name: "open", state: string(review.StateOpen), ids: []uint64{created.Body.ID}},
+		{name: "closed", state: string(review.StateClosed), ids: []uint64{closed.Body.ID}},
+		{name: "merged", state: string(review.StateMerged), ids: []uint64{}},
+		{name: "all", state: "all", ids: []uint64{created.Body.ID, closed.Body.ID}},
+	} {
+		t.Run("list "+test.name, func(t *testing.T) {
+			listed, listErr := fixture.service.listMergeRequests(
+				context.Background(),
+				&mergeRequestsInput{
+					AuthInput:  fixture.bob,
+					Repository: fixture.path.Full(),
+					State:      test.state,
+				},
+			)
+			if listErr != nil {
+				t.Fatal(listErr)
+			}
+			if len(listed.Body.MergeRequests) != len(test.ids) {
+				t.Fatalf("unexpected merge request list: %#v", listed.Body.MergeRequests)
+			}
+			for index, id := range test.ids {
+				if listed.Body.MergeRequests[index].ID != id {
+					t.Fatalf("unexpected merge request list: %#v", listed.Body.MergeRequests)
+				}
+			}
+			if (test.state == "" || test.state == string(review.StateOpen) || test.state == "all") &&
+				!listed.Body.MergeRequests[0].MergeInProgress {
+				t.Fatalf("ambiguous merge claim was hidden: %#v", listed.Body.MergeRequests[0])
+			}
+		})
+	}
+
 	persisted, err := fixture.service.Reviews.Get(fixture.path, created.Body.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1645,6 +1699,34 @@ func TestMergeRequestRecoveryRetainsAmbiguousPlannedResult(t *testing.T) {
 		persisted.MergeClaimID != claimID ||
 		persisted.MergeResultCommit != fixture.head.String() {
 		t.Fatalf("ambiguous recovery discarded its write-ahead plan: %#v", persisted)
+	}
+
+	closed, err = fixture.service.updateMergeRequest(
+		context.Background(),
+		&updateMergeRequestInput{
+			MergeRequestInput: mergeRequestInput{
+				AuthInput:  fixture.alice,
+				Repository: fixture.path.Full(),
+				ID:         created.Body.ID,
+			},
+			Body: updateMergeRequestBody{State: review.StateClosed},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Body.State != review.StateClosed || closed.Body.MergeInProgress {
+		t.Fatalf("ambiguous merge request was not closed: %#v", closed.Body)
+	}
+	persisted, err = fixture.service.Reviews.Get(fixture.path, created.Body.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.State != review.StateClosed ||
+		persisted.MergeInProgress ||
+		persisted.MergeClaimID != "" ||
+		persisted.MergeResultCommit != "" {
+		t.Fatalf("closed merge request retained its stale claim: %#v", persisted)
 	}
 }
 
