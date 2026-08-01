@@ -483,9 +483,17 @@ func commitDifference(
 	if err != nil {
 		return 0, 0, err
 	}
+	return commitSetDifference(ctx, baseCommits, headCommits)
+}
+
+func commitSetDifference(
+	ctx context.Context,
+	baseCommits map[plumbing.Hash]struct{},
+	headCommits map[plumbing.Hash]struct{},
+) (int, int, error) {
 	ahead := 0
 	for hash := range headCommits {
-		if err = ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return 0, 0, err
 		}
 		if _, exists := baseCommits[hash]; !exists {
@@ -494,7 +502,7 @@ func commitDifference(
 	}
 	behind := 0
 	for hash := range baseCommits {
-		if err = ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return 0, 0, err
 		}
 		if _, exists := headCommits[hash]; !exists {

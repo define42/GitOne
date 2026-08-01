@@ -3557,9 +3557,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=16">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=18">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=38">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=40">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -3766,8 +3766,14 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "clone.dialog") {
 		t.Fatal("served UI does not present the clone command from the repository toolbar")
 	}
-	if !strings.Contains(assetResponse.Body.String(), "branchPicker.append(branchLabel, branchCreator.trigger, branchComparison.trigger)") {
-		t.Fatal("served UI does not place the new branch and compare actions beside the branch selector")
+	if !strings.Contains(assetResponse.Body.String(), "repositoryBranchManager") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryBranchDivergence") ||
+		!strings.Contains(assetResponse.Body.String(), "expectedCommit: branch.commit") ||
+		!strings.Contains(assetResponse.Body.String(), `method: "DELETE"`) ||
+		!strings.Contains(assetResponse.Body.String(), "confirmation.remove()") ||
+		!strings.Contains(assetResponse.Body.String(), "deletedCurrentBranch") ||
+		!strings.Contains(assetResponse.Body.String(), "branchManager.trigger") {
+		t.Fatal("served UI does not provide branch divergence and deletion management")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") ||
 		!strings.Contains(assetResponse.Body.String(), `input.value !== repositoryName`) ||

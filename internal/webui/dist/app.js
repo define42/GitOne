@@ -2552,6 +2552,203 @@ function repositoryBranchCreator(route, data) {
     });
     return { trigger, dialog };
 }
+function repositoryBranchDivergence(branch) {
+    if (!branch.compared) {
+        return "Comparison unavailable";
+    }
+    return `${branch.ahead} ahead · ${branch.behind} behind`;
+}
+function repositoryBranchManager(route, data) {
+    const trigger = actionButton("View all", "git-branch", "secondary");
+    trigger.classList.add("branch-manage-trigger");
+    trigger.setAttribute("aria-label", "View all branches");
+    trigger.title = "View all branches";
+    const dialog = element("dialog");
+    dialog.className = "action-dialog branch-manager-dialog";
+    const shell = element("div");
+    shell.className = "branch-manager-shell";
+    const header = element("div");
+    header.className = "dialog-header";
+    const title = element("h2", "Branches");
+    const close = actionButton("Close", "close", "icon-button");
+    close.setAttribute("aria-label", "Close");
+    close.title = "Close";
+    header.append(title, close);
+    const body = element("div");
+    body.className = "branch-manager-body";
+    const comparisonReference = data.defaultBranch || data.defaultRef;
+    const description = element("p", comparisonReference
+        ? `Ahead and behind counts are relative to ${comparisonReference}.`
+        : "Ahead and behind counts are unavailable because this repository has no default reference.");
+    description.className = "dialog-description branch-manager-description";
+    body.append(description);
+    let resetManager = () => { };
+    let branchesChanged = false;
+    let deletedCurrentBranch = false;
+    if (data.branches.length === 0) {
+        body.append(emptyState("This repository has no branches."));
+    }
+    else {
+        const tableWrapper = element("div");
+        tableWrapper.className = "branch-manager-table-wrapper";
+        const table = element("table");
+        table.className = "branch-manager-table";
+        const head = element("thead");
+        const heading = element("tr");
+        for (const label of ["Branch", "Compared with default", "Commit", "Actions"]) {
+            heading.append(element("th", label));
+        }
+        head.append(heading);
+        const rows = element("tbody");
+        let activeConfirmation = null;
+        let activeDelete = null;
+        const clearConfirmation = () => {
+            activeConfirmation?.remove();
+            activeConfirmation = null;
+            if (activeDelete?.isConnected) {
+                activeDelete.disabled = false;
+            }
+            activeDelete = null;
+        };
+        resetManager = clearConfirmation;
+        for (const branch of data.branches) {
+            const row = element("tr");
+            const nameCell = element("td");
+            const name = element("a");
+            name.href = repositoryBrowserURL(route.repository, { ref: branch.name });
+            name.append(element("code", branch.name));
+            const labels = element("span");
+            labels.className = "branch-manager-labels";
+            if (branch.name === data.defaultBranch) {
+                const badge = element("span", "default");
+                badge.className = "branch-manager-badge";
+                labels.append(badge);
+            }
+            if (branch.name === route.ref) {
+                const badge = element("span", "current");
+                badge.className = "branch-manager-badge branch-manager-current";
+                labels.append(badge);
+            }
+            nameCell.append(name, labels);
+            const divergence = element("td", repositoryBranchDivergence(branch));
+            divergence.className = branch.compared
+                ? "branch-manager-divergence"
+                : "branch-manager-divergence branch-manager-unavailable";
+            const commit = element("td");
+            const commitCode = element("code", shortCommitHash(branch.commit));
+            commitCode.title = branch.commit;
+            commit.append(commitCode);
+            const actions = element("td");
+            actions.className = "branch-manager-actions";
+            const remove = actionButton("Delete", "trash", "danger-secondary");
+            if (branch.name === data.defaultBranch) {
+                remove.disabled = true;
+                remove.title = "Choose another default branch before deleting this branch";
+            }
+            else if (!data.canWrite) {
+                remove.disabled = true;
+                remove.title = "Developer access is required to delete a branch";
+            }
+            else {
+                remove.title = `Delete ${branch.name}`;
+                remove.addEventListener("click", () => {
+                    clearConfirmation();
+                    remove.disabled = true;
+                    activeDelete = remove;
+                    const confirmation = element("tr");
+                    confirmation.className = "branch-delete-confirmation";
+                    const cell = element("td");
+                    cell.colSpan = 4;
+                    const form = element("form");
+                    const warning = element("p", `Delete ${branch.name}? The branch pointer will be removed and this cannot be undone from the UI.`);
+                    const controls = element("div");
+                    controls.className = "branch-delete-confirmation-actions";
+                    const cancel = actionButton("Cancel", undefined, "secondary");
+                    const confirm = actionButton("Delete branch", "trash", "danger");
+                    confirm.type = "submit";
+                    controls.append(cancel, confirm);
+                    form.append(warning, controls);
+                    cell.append(form);
+                    confirmation.append(cell);
+                    row.after(confirmation);
+                    activeConfirmation = confirmation;
+                    cancel.addEventListener("click", () => {
+                        clearConfirmation();
+                        remove.focus();
+                    });
+                    form.addEventListener("submit", async (event) => {
+                        event.preventDefault();
+                        confirm.disabled = true;
+                        cancel.disabled = true;
+                        form.setAttribute("aria-busy", "true");
+                        try {
+                            const deleted = await request(repositoryBranchAPIURL(route.repository, branch.name), {
+                                method: "DELETE",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ expectedCommit: branch.commit }),
+                            });
+                            const branchIndex = data.branches.findIndex((candidate) => candidate.name === branch.name);
+                            if (branchIndex >= 0) {
+                                data.branches.splice(branchIndex, 1);
+                            }
+                            branchesChanged = true;
+                            activeConfirmation = null;
+                            activeDelete = null;
+                            confirmation.remove();
+                            row.remove();
+                            if (rows.childElementCount === 0) {
+                                tableWrapper.replaceWith(emptyState("This repository has no branches."));
+                            }
+                            if (route.ref === branch.name) {
+                                deletedCurrentBranch = true;
+                                const notice = element("p", "The branch currently being viewed was deleted. Closing this window returns to the repository default.");
+                                notice.className = "branch-manager-notice";
+                                description.after(notice);
+                            }
+                            showStatus(`${deleted.name} deleted at ${shortCommitHash(deleted.commit)}.`);
+                        }
+                        catch (reason) {
+                            showStatus(reason instanceof Error ? reason.message : "Could not delete the branch.", true);
+                            confirm.disabled = false;
+                            cancel.disabled = false;
+                            form.removeAttribute("aria-busy");
+                        }
+                    });
+                });
+            }
+            actions.append(remove);
+            row.append(nameCell, divergence, commit, actions);
+            rows.append(row);
+        }
+        table.append(head, rows);
+        tableWrapper.append(table);
+        body.append(tableWrapper);
+    }
+    shell.append(header, body);
+    dialog.append(shell);
+    trigger.addEventListener("click", () => dialog.showModal());
+    close.addEventListener("click", () => dialog.close());
+    dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) {
+            dialog.close();
+        }
+    });
+    dialog.addEventListener("close", () => {
+        resetManager();
+        if (deletedCurrentBranch) {
+            window.location.assign(repositoryBrowserURL(route.repository));
+            return;
+        }
+        if (branchesChanged) {
+            void renderRepositoryBrowser(route);
+            return;
+        }
+        if (trigger.isConnected) {
+            trigger.focus();
+        }
+    });
+    return { trigger, dialog };
+}
 function comparisonStat(label, value) {
     const stat = element("span");
     stat.append(element("strong", value), document.createTextNode(label));
@@ -4204,6 +4401,7 @@ function renderEmptyRepositoryBrowser(route, branches, group) {
     }
     const branchCreator = repositoryBranchCreator(route, branches);
     const branchComparison = repositoryBranchComparison(route, branches);
+    const branchManager = repositoryBranchManager(route, branches);
     const clone = cloneControl(repositoryURL(groupPath, repositoryName, group.username));
     const rename = group.role === "maintainer" || group.role === "owner"
         ? repositoryRenameControl(route, groupPath, repositoryName)
@@ -4217,7 +4415,7 @@ function renderEmptyRepositoryBrowser(route, branches, group) {
     branchLabel.append(branchLabelText, branchSelect);
     const branchPicker = element("div");
     branchPicker.className = "branch-picker";
-    branchPicker.append(branchLabel, branchCreator.trigger, branchComparison.trigger);
+    branchPicker.append(branchLabel, branchManager.trigger, branchCreator.trigger, branchComparison.trigger);
     const branchControl = element("div");
     branchControl.className = "branch-control";
     branchControl.append(branchPicker);
@@ -4233,7 +4431,7 @@ function renderEmptyRepositoryBrowser(route, branches, group) {
     const content = element("section");
     content.className = "content-section";
     content.append(emptyState("This repository has no browsable default. Push a commit to create its first branch."));
-    app.append(repositoryDescription, overview, repositoryNavigation(route), branchCreator.dialog, branchComparison.dialog, clone.dialog, ...(rename ? [rename.dialog] : []), content);
+    app.append(repositoryDescription, overview, repositoryNavigation(route), branchCreator.dialog, branchComparison.dialog, branchManager.dialog, clone.dialog, ...(rename ? [rename.dialog] : []), content);
 }
 async function renderRepositoryBrowser(route) {
     stopRepositoryBuildPolling();
@@ -4301,6 +4499,7 @@ async function renderRepositoryBrowser(route) {
     overview.className = "repository-overview";
     const branchCreator = repositoryBranchCreator(route, branches);
     const branchComparison = repositoryBranchComparison(route, branches);
+    const branchManager = repositoryBranchManager(route, branches);
     const clone = cloneControl(repositoryURL(groupPath, repositoryName, group.username));
     const archive = repositoryArchiveControl(route);
     const toolbar = element("div");
@@ -4339,7 +4538,7 @@ async function renderRepositoryBrowser(route) {
     branchLabel.append(branchSelect);
     const branchPicker = element("div");
     branchPicker.className = "branch-picker";
-    branchPicker.append(branchLabel, branchCreator.trigger, branchComparison.trigger);
+    branchPicker.append(branchLabel, branchManager.trigger, branchCreator.trigger, branchComparison.trigger);
     branchControl.append(branchPicker);
     const commitHash = content?.commit
         ?? branches.branches.find((branch) => branch.name === route.ref)?.commit;
@@ -4366,7 +4565,7 @@ async function renderRepositoryBrowser(route) {
     const fileCreator = content !== null && "entries" in content && content.canEdit
         ? repositoryFileCreator(route, content)
         : null;
-    app.append(overview, repositoryNavigation(route, fileCreator?.trigger), branchCreator.dialog, branchComparison.dialog, archive.dialog, clone.dialog, ...(rename ? [rename.dialog] : []), ...(fileCreator ? [fileCreator.dialog] : []));
+    app.append(overview, repositoryNavigation(route, fileCreator?.trigger), branchCreator.dialog, branchComparison.dialog, branchManager.dialog, archive.dialog, clone.dialog, ...(rename ? [rename.dialog] : []), ...(fileCreator ? [fileCreator.dialog] : []));
     if (route.view === "history") {
         app.append(repositoryHistory(route, commits));
         return;

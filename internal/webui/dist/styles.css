@@ -1243,6 +1243,139 @@ textarea:focus {
   width: 72rem;
 }
 
+.branch-manager-dialog {
+  height: min(42rem, calc(100vh - 2rem));
+  width: 60rem;
+}
+
+.branch-manager-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+}
+
+.branch-manager-shell > .dialog-header {
+  margin: 0;
+}
+
+.branch-manager-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 1.25rem;
+}
+
+.branch-manager-description {
+  margin-bottom: 1rem;
+}
+
+.branch-manager-notice {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: 6px;
+  color: var(--warning-text);
+  margin: 0 0 1rem;
+  padding: 0.75rem;
+}
+
+.branch-manager-table-wrapper {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.branch-manager-table {
+  min-width: 42rem;
+}
+
+.branch-manager-table th,
+.branch-manager-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.branch-manager-table th {
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.branch-manager-table tbody tr:last-child > td {
+  border-bottom: 0;
+}
+
+.branch-manager-table td:first-child {
+  min-width: 12rem;
+}
+
+.branch-manager-table td:first-child > a {
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.branch-manager-labels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-left: 0.5rem;
+}
+
+.branch-manager-badge {
+  background: var(--accent-soft);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0.12rem 0.4rem;
+}
+
+.branch-manager-current {
+  background: var(--surface-subtle);
+  color: var(--muted);
+}
+
+.branch-manager-divergence {
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.branch-manager-unavailable {
+  color: var(--muted);
+}
+
+.branch-manager-actions {
+  text-align: right !important;
+  white-space: nowrap;
+}
+
+.branch-delete-confirmation > td {
+  background: var(--danger-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.branch-delete-confirmation form {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  margin: 0;
+  max-width: none;
+}
+
+.branch-delete-confirmation p {
+  margin: 0;
+}
+
+.branch-delete-confirmation-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.6rem;
+}
+
 .comparison-shell {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -3542,7 +3675,7 @@ table {
 
   .branch-picker {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
   }
 
   .branch-control label {
@@ -3836,11 +3969,21 @@ table {
   }
 
   .branch-picker .new-branch-trigger,
-  .branch-picker .branch-compare-trigger {
+  .branch-picker .branch-compare-trigger,
+  .branch-picker .branch-manage-trigger {
     font-size: 0;
     padding-left: 0.75rem;
     padding-right: 0.75rem;
     width: 2.65rem;
+  }
+
+  .branch-delete-confirmation form {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .branch-delete-confirmation-actions {
+    justify-content: flex-end;
   }
 
   .page-actions {

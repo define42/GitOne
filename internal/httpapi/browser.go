@@ -50,6 +50,17 @@ type createRepositoryBranchInput struct {
 	From       string `query:"from" doc:"Existing branch from which the new branch is created"`
 }
 
+type deleteRepositoryBranchBody struct {
+	ExpectedCommit string `json:"expectedCommit" minLength:"64" maxLength:"64" doc:"Branch tip shown when deletion was requested"`
+}
+
+type deleteRepositoryBranchInput struct {
+	AuthInput
+	Repository string `path:"repository" doc:"URL-encoded full group and repository path"`
+	Branch     string `path:"branch" doc:"URL-encoded name of the branch to delete"`
+	Body       deleteRepositoryBranchBody
+}
+
 type updateRepositoryDefaultBranchBody struct {
 	Branch string `json:"branch" minLength:"1" doc:"Existing branch that becomes the repository default"`
 }
@@ -179,8 +190,11 @@ type repositoryTreeEntry struct {
 }
 
 type repositoryBranch struct {
-	Name   string `json:"name" doc:"Branch name"`
-	Commit string `json:"commit" doc:"Commit hash at the branch tip"`
+	Name     string `json:"name" doc:"Branch name"`
+	Commit   string `json:"commit" doc:"Commit hash at the branch tip"`
+	Ahead    int    `json:"ahead" doc:"Commits only on this branch relative to the repository default reference"`
+	Behind   int    `json:"behind" doc:"Commits only on the repository default reference relative to this branch"`
+	Compared bool   `json:"compared" doc:"Whether ahead and behind could be calculated relative to the repository default reference"`
 }
 
 type repositoryBranchesOutput struct {
@@ -207,6 +221,14 @@ type createRepositoryBranchOutput struct {
 		Repository string `json:"repository"`
 		Name       string `json:"name"`
 		From       string `json:"from"`
+		Commit     string `json:"commit"`
+	}
+}
+
+type deleteRepositoryBranchOutput struct {
+	Body struct {
+		Repository string `json:"repository"`
+		Name       string `json:"name"`
 		Commit     string `json:"commit"`
 	}
 }
@@ -365,6 +387,14 @@ func registerRepositoryBrowser(api huma.API, service API) {
 	}), service.createRepositoryBranch)
 
 	huma.Register(api, protected(huma.Operation{
+		OperationID: "delete-repository-branch",
+		Method:      http.MethodDelete,
+		Path:        "/api/repositories/{repository}/branches/{branch}",
+		Summary:     "Delete a repository branch",
+		Tags:        []string{"Repository browser"},
+	}), service.deleteRepositoryBranch)
+
+	huma.Register(api, protected(huma.Operation{
 		OperationID: "update-repository-default-branch",
 		Method:      http.MethodPut,
 		Path:        "/api/repositories/{repository}/default-branch",
@@ -504,6 +534,9 @@ func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranch
 		return branches[left].Name < branches[right].Name
 	})
 	defaultBranch, defaultRef := repositoryDefaultReferences(repository, branches)
+	if err = populateRepositoryBranchDivergence(ctx, repository, defaultRef, branches); err != nil {
+		return nil, err
+	}
 
 	output := &repositoryBranchesOutput{}
 	output.Body.Repository = parsed.Full()
@@ -515,6 +548,61 @@ func (a API) listRepositoryBranches(ctx context.Context, input *repositoryBranch
 	output.Body.CanManage = manageErr == nil
 	output.Body.Branches = branches
 	return output, nil
+}
+
+func populateRepositoryBranchDivergence(
+	ctx context.Context,
+	repository *git.Repository,
+	defaultRef string,
+	branches []repositoryBranch,
+) error {
+	if defaultRef == "" {
+		return nil
+	}
+	base, err := resolveBrowserCommit(repository, defaultRef)
+	if err != nil {
+		return nil
+	}
+	baseCommits, err := reachableCommits(ctx, repository, base.Hash)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return nil
+	}
+	commitSets := map[plumbing.Hash]map[plumbing.Hash]struct{}{
+		base.Hash: baseCommits,
+	}
+	for index := range branches {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		hash := plumbing.NewHash(branches[index].Commit)
+		headCommits, ok := commitSets[hash]
+		if !ok {
+			if _, err = repository.CommitObject(hash); err != nil {
+				continue
+			}
+			headCommits, err = reachableCommits(ctx, repository, hash)
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				continue
+			}
+			commitSets[hash] = headCommits
+		}
+		branches[index].Ahead, branches[index].Behind, err = commitSetDifference(
+			ctx,
+			baseCommits,
+			headCommits,
+		)
+		if err != nil {
+			return err
+		}
+		branches[index].Compared = true
+	}
+	return nil
 }
 
 func repositoryDefaultReferences(
@@ -664,6 +752,65 @@ func (a API) createRepositoryBranch(ctx context.Context, input *createRepository
 	output.Body.Name = input.Branch
 	output.Body.From = input.From
 	output.Body.Commit = source.Hash().String()
+	return output, nil
+}
+
+func (a API) deleteRepositoryBranch(
+	ctx context.Context,
+	input *deleteRepositoryBranchInput,
+) (*deleteRepositoryBranchOutput, error) {
+	branchName, err := validatedBranchReference(input.Branch)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid branch name", err)
+	}
+	parsed, err := parseRepositoryPath(input.Repository)
+	if err != nil {
+		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if parsed.Name == "control" {
+		return nil, huma.Error400BadRequest("the control repository branch cannot be deleted")
+	}
+	releaseOperation, err := a.acquireRepositoryOperationLocks(parsed)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = releaseOperation()
+	}()
+	repository, parsed, err := a.openRepository(
+		ctx,
+		input.AuthInput,
+		input.Repository,
+		control.RoleDeveloper,
+	)
+	if err != nil {
+		return nil, err
+	}
+	head, headErr := repository.Reference(plumbing.HEAD, false)
+	if headErr != nil && !errors.Is(headErr, plumbing.ErrReferenceNotFound) {
+		return nil, huma.Error500InternalServerError("could not read repository default branch", headErr)
+	}
+	if headErr == nil && head.Type() == plumbing.SymbolicReference && head.Target() == branchName {
+		return nil, huma.Error409Conflict("the default branch cannot be deleted")
+	}
+	reference, err := repository.Reference(branchName, false)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return nil, huma.Error404NotFound("branch not found")
+	}
+	if err != nil {
+		return nil, huma.Error500InternalServerError("could not read branch", err)
+	}
+	if reference.Hash().String() != input.Body.ExpectedCommit {
+		return nil, huma.Error409Conflict("branch changed since deletion was requested")
+	}
+	if err = repository.Storer.RemoveReference(branchName); err != nil {
+		return nil, huma.Error409Conflict("could not delete branch", err)
+	}
+
+	output := &deleteRepositoryBranchOutput{}
+	output.Body.Repository = parsed.Full()
+	output.Body.Name = input.Branch
+	output.Body.Commit = reference.Hash().String()
 	return output, nil
 }
 
