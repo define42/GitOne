@@ -125,13 +125,16 @@ func (c *Coordinator) ScheduleLocked(
 	if err = repositoryConfig.Validate(); err != nil {
 		return failedConfigurationJobs(c.state, repositoryPath, branch, commit, err)
 	}
-	jobs := configuredJobs(
+	jobs, err := configuredJobs(
 		repositoryPath,
 		branch,
 		commit.String(),
 		repositoryConfig,
 		time.Now().UTC(),
 	)
+	if err != nil {
+		return nil, err
+	}
 	for _, job := range jobs {
 		if err = c.state.save(repositoryPath, job); err != nil {
 			return nil, err
@@ -242,8 +245,12 @@ func (c *Coordinator) Rerun(
 	if dependencyErr != nil {
 		return Job{}, fmt.Errorf("%w: %w", ErrBuildDependenciesUnmet, dependencyErr)
 	}
+	jobID, idErr := newJobID()
+	if idErr != nil {
+		return Job{}, idErr
+	}
 	job := Job{
-		ID:         newJobID(),
+		ID:         jobID,
 		Name:       original.Name,
 		Repository: repositoryPath.Full(),
 		Branch:     original.Branch,
@@ -703,9 +710,13 @@ func failedConfigurationJob(
 	commit plumbing.Hash,
 	configurationErr error,
 ) (*Job, error) {
+	id, idErr := newJobID()
+	if idErr != nil {
+		return nil, errors.Join(configurationErr, idErr)
+	}
 	finished := time.Now().UTC()
 	job := Job{
-		ID:         newJobID(),
+		ID:         id,
 		Name:       "configuration",
 		Repository: repository.Full(),
 		Branch:     branch,

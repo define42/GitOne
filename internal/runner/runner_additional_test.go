@@ -67,6 +67,25 @@ func TestEmbeddedRunnerValidatesConfiguration(t *testing.T) {
 	}
 }
 
+func TestGenerateJobIDUsesNanosecondsAndStrongRandomness(t *testing.T) {
+	now := time.Date(2026, time.August, 1, 12, 34, 56, 123456789, time.UTC)
+	random := bytes.Repeat([]byte{0xab}, jobIDRandomBytes)
+	id, err := generateJobID(now, bytes.NewReader(random))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "20260801T123456123456789-" + strings.Repeat("ab", jobIDRandomBytes)
+	if id != want {
+		t.Fatalf("build ID = %q, want %q", id, want)
+	}
+	if !validJobID(id) {
+		t.Fatalf("generated invalid build ID %q", id)
+	}
+	if _, err = generateJobID(now, bytes.NewReader(random[:jobIDRandomBytes-1])); err == nil {
+		t.Fatal("random-source failure produced a build ID")
+	}
+}
+
 func TestEmbeddedRunnerScheduleErrorsAndFullQueue(t *testing.T) {
 	root := t.TempDir()
 	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}

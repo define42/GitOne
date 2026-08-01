@@ -16,7 +16,7 @@ func configuredJobs(
 	commit string,
 	config repoconfig.Config,
 	created time.Time,
-) []Job {
+) ([]Job, error) {
 	names := make([]string, 0, len(config.Jobs))
 	for name, job := range config.Jobs {
 		if job.MatchesBranch(branch) {
@@ -26,7 +26,11 @@ func configuredJobs(
 	sort.Strings(names)
 	ids := make(map[string]string, len(names))
 	for _, name := range names {
-		ids[name] = newJobID()
+		id, err := newJobID()
+		if err != nil {
+			return nil, err
+		}
+		ids[name] = id
 	}
 	jobs := make([]Job, 0, len(names))
 	for _, name := range names {
@@ -69,7 +73,7 @@ func configuredJobs(
 		}
 		jobs = append(jobs, job)
 	}
-	return jobs
+	return jobs, nil
 }
 
 func reconcileJobDependencies(jobs []Job, now time.Time) (updates, promoted []Job) {

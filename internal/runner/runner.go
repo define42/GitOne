@@ -135,13 +135,16 @@ func (r *Runner) ScheduleLocked(
 	}
 	r.dependencyMu.Lock()
 	defer r.dependencyMu.Unlock()
-	jobs := configuredJobs(
+	jobs, err := configuredJobs(
 		repositoryPath,
 		branch,
 		commit.String(),
 		repositoryConfig,
 		time.Now().UTC(),
 	)
+	if err != nil {
+		return nil, err
+	}
 	var scheduleErr error
 	for _, job := range jobs {
 		if err = r.state.save(repositoryPath, job); err != nil {
@@ -515,12 +518,19 @@ func (w *operationBuildLogWriter) Write(contents []byte) (int, error) {
 	return len(contents), releaseErr
 }
 
-func newJobID() string {
-	random := make([]byte, 4)
-	if _, err := rand.Read(random); err != nil {
-		return time.Now().UTC().Format("20060102T150405000000000")
+const jobIDRandomBytes = 16
+
+func newJobID() (string, error) {
+	return generateJobID(time.Now().UTC(), rand.Reader)
+}
+
+func generateJobID(now time.Time, randomSource io.Reader) (string, error) {
+	random := make([]byte, jobIDRandomBytes)
+	if _, err := io.ReadFull(randomSource, random); err != nil {
+		return "", fmt.Errorf("generate build ID: %w", err)
 	}
-	return time.Now().UTC().Format("20060102T150405000000000") + "-" + hex.EncodeToString(random)
+	timestamp := now.Format("20060102T150405") + fmt.Sprintf("%09d", now.Nanosecond())
+	return timestamp + "-" + hex.EncodeToString(random), nil
 }
 
 type cappedLogWriter struct {
