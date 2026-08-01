@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
@@ -259,6 +260,102 @@ func TestCoordinatorRunsJobDependenciesInOrder(t *testing.T) {
 	lease, err = coordinator.Claim("runner-one")
 	if err != nil || lease == nil || lease.Job.Name != "deploy" {
 		t.Fatalf("manual dependency lease = %#v, %v", lease, err)
+	}
+}
+
+func TestCoordinatorReconciliationDoesNotResurrectCanceledJob(t *testing.T) {
+	_, repositoryPath, _, coordinator := coordinatorRepository(t)
+	created := time.Now().UTC()
+	dependency := Job{
+		ID:         "dependency",
+		Name:       "test",
+		Repository: repositoryPath.Full(),
+		Status:     StatusRunning,
+		CreatedAt:  created,
+		RunnerID:   "runner-one",
+	}
+	dependent := Job{
+		ID:         "dependent",
+		Name:       "build",
+		Repository: repositoryPath.Full(),
+		Needs:      []JobDependency{{Name: dependency.Name, ID: dependency.ID}},
+		Status:     StatusWaiting,
+		CreatedAt:  created,
+	}
+	for _, job := range []Job{dependency, dependent} {
+		if err := coordinator.state.save(repositoryPath, job); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	releaseDependent, err := lockmgr.Process.Acquire(
+		lockmgr.JobRequest(coordinator.storage.Root, repositoryPath, dependent.ID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseDependent()
+
+	completeResult := make(chan error, 1)
+	go func() {
+		_, completeErr := coordinator.Complete(
+			repositoryPath,
+			dependency.ID,
+			"runner-one",
+			"",
+		)
+		completeResult <- completeErr
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		stored, getErr := coordinator.state.Get(repositoryPath, dependency.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if stored.Status == StatusSucceeded {
+			break
+		}
+		select {
+		case completeErr := <-completeResult:
+			t.Fatalf("completion did not lock dependent job: %v", completeErr)
+		case <-deadline:
+			t.Fatal("dependency completion was not persisted")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	select {
+	case completeErr := <-completeResult:
+		t.Fatalf("completion did not wait for dependent job lock: %v", completeErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// This is the state mutation Cancel performs while it owns the dependent
+	// job lock. Keeping the test's lock makes the stale-write interleaving
+	// deterministic.
+	finished := time.Now().UTC()
+	dependent.Status = StatusCanceled
+	dependent.FinishedAt = &finished
+	if err = coordinator.state.save(repositoryPath, dependent); err != nil {
+		t.Fatal(err)
+	}
+	releaseDependent()
+	select {
+	case err = <-completeResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("completion did not resume after dependent job lock was released")
+	}
+
+	stored, err := coordinator.state.Get(repositoryPath, dependent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != StatusCanceled || stored.FinishedAt == nil {
+		t.Fatalf("canceled dependent job was resurrected: %#v", stored)
 	}
 }
 

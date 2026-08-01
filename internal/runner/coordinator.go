@@ -197,7 +197,7 @@ func (c *Coordinator) Start(
 	if err = c.state.save(repositoryPath, job); err != nil {
 		return Job{}, err
 	}
-	if err = c.reconcileDependencies(repositoryPath); err != nil {
+	if err = c.reconcileDependenciesWithLockedJob(repositoryPath, id); err != nil {
 		return Job{}, err
 	}
 	return job, nil
@@ -299,7 +299,7 @@ func (c *Coordinator) Cancel(
 	if err = c.state.save(repositoryPath, job); err != nil {
 		return Job{}, err
 	}
-	if err = c.reconcileDependencies(repositoryPath); err != nil {
+	if err = c.reconcileDependenciesWithLockedJob(repositoryPath, id); err != nil {
 		return Job{}, err
 	}
 	return job, nil
@@ -490,7 +490,7 @@ func (c *Coordinator) Complete(
 	if err = c.state.save(repository, job); err != nil {
 		return Job{}, err
 	}
-	if err = c.reconcileDependencies(repository); err != nil {
+	if err = c.reconcileDependenciesWithLockedJob(repository, id); err != nil {
 		return Job{}, err
 	}
 	return job, nil
@@ -533,15 +533,12 @@ func (c *Coordinator) candidates(now time.Time) ([]jobCandidate, error) {
 		}
 		for _, name := range group.Repositories {
 			repository := repopath.Repository{Groups: groupParts, Name: name}
+			if reconcileErr := c.reconcileDependencies(repository); reconcileErr != nil {
+				return nil, reconcileErr
+			}
 			jobs, listErr := c.state.List(repository)
 			if listErr != nil {
 				return nil, listErr
-			}
-			updates, _ := reconcileJobDependencies(jobs, now)
-			for _, update := range updates {
-				if saveErr := c.state.save(repository, update); saveErr != nil {
-					return nil, saveErr
-				}
 			}
 			for _, job := range jobs {
 				if job.Status == StatusQueued ||
@@ -570,17 +567,52 @@ func (c *Coordinator) candidates(now time.Time) ([]jobCandidate, error) {
 }
 
 func (c *Coordinator) reconcileDependencies(repository repopath.Repository) error {
-	jobs, err := c.state.List(repository)
-	if err != nil {
-		return err
-	}
-	updates, _ := reconcileJobDependencies(jobs, time.Now().UTC())
-	for _, update := range updates {
-		if err = c.state.save(repository, update); err != nil {
+	return c.reconcileDependenciesWithLockedJob(repository, "")
+}
+
+func (c *Coordinator) reconcileDependenciesWithLockedJob(
+	repository repopath.Repository,
+	lockedJobID string,
+) error {
+	for {
+		jobs, err := c.state.List(repository)
+		if err != nil {
+			return err
+		}
+		updates, _ := reconcileJobDependencies(jobs, time.Now().UTC())
+		if len(updates) == 0 {
+			return nil
+		}
+
+		// The scan above is only used to select a job to reconcile. Its state may
+		// change before the job lock is acquired, so recompute the update while
+		// holding the lock instead of saving the stale snapshot.
+		updateID := updates[0].ID
+		releaseUpdate := func() {}
+		if updateID != lockedJobID {
+			releaseUpdate, err = lockmgr.Process.Acquire(
+				lockmgr.JobRequest(c.storage.Root, repository, updateID),
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		jobs, err = c.state.List(repository)
+		if err == nil {
+			updates, _ = reconcileJobDependencies(jobs, time.Now().UTC())
+			for _, update := range updates {
+				if update.ID == updateID {
+					err = c.state.save(repository, update)
+					break
+				}
+			}
+		}
+		releaseUpdate()
+		if err != nil {
 			return err
 		}
 	}
-	return nil
 }
 
 func (c *Coordinator) jobConfig(
