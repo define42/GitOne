@@ -15,10 +15,10 @@ import (
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	gittransport "github.com/go-git/go-git/v5/plumbing/transport"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	gittransport "github.com/go-git/go-git/v6/plumbing/transport"
 )
 
 func TestRemoteImportErrorMessagesAndUnwrap(t *testing.T) {
@@ -525,7 +525,7 @@ func TestUpdateGroupControlEmptyAndBrokenTrees(t *testing.T) {
 		}
 		repository := openControlRepository(t, root, "engineering")
 		emptyTree := &object.Tree{}
-		encodedTree := &plumbing.MemoryObject{}
+		encodedTree := repository.Storer.NewEncodedObject()
 		if err := emptyTree.Encode(encodedTree); err != nil {
 			t.Fatal(err)
 		}
@@ -553,7 +553,7 @@ func TestUpdateGroupControlEmptyAndBrokenTrees(t *testing.T) {
 		setControlCommit(
 			t,
 			repository,
-			plumbing.NewHash(strings.Repeat("1", 40)),
+			plumbing.NewHash(strings.Repeat("1", 64)),
 		)
 		if err := store.UpdateGroupControlLocked(
 			"engineering",
@@ -776,8 +776,8 @@ func TestRepositoryRenameReportsRollbackFailures(t *testing.T) {
 		Target:            "main",
 		Source:            "feature",
 		Author:            "alice",
-		BaseCommit:        strings.Repeat("0", 40),
-		HeadCommit:        strings.Repeat("1", 40),
+		BaseCommit:        strings.Repeat("0", 64),
+		HeadCommit:        strings.Repeat("1", 64),
 		RequiredApprovals: 1,
 		Approvals:         []review.Approval{},
 		Threads:           []review.Thread{},
@@ -914,7 +914,7 @@ func setControlCommit(
 		Message:   "test control state",
 		TreeHash:  treeHash,
 	}
-	encoded := &plumbing.MemoryObject{}
+	encoded := repository.Storer.NewEncodedObject()
 	if err := commit.Encode(encoded); err != nil {
 		t.Fatal(err)
 	}

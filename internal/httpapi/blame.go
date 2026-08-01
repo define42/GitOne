@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
-	git "github.com/go-git/go-git/v5"
+	git "github.com/go-git/go-git/v6"
 )
 
 func (a API) readRepositoryBlame(

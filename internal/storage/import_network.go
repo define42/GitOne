@@ -10,15 +10,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/go-git/go-git/v5/plumbing/transport"
-	transportclient "github.com/go-git/go-git/v5/plumbing/transport/client"
-	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
-)
-
-const (
-	importHTTPProtocol  = "gitone-http"
-	importHTTPSProtocol = "gitone-https"
 )
 
 type importNetworkPolicyContextKey struct{}
@@ -331,44 +322,6 @@ func effectiveImportURLPort(value *url.URL) string {
 	return "80"
 }
 
-type importHTTPTransport struct {
-	protocol string
-	delegate transport.Transport
-}
-
-func (t importHTTPTransport) endpoint(endpoint *transport.Endpoint) *transport.Endpoint {
-	rewritten := *endpoint
-	rewritten.Protocol = t.protocol
-	return &rewritten
-}
-
-func (t importHTTPTransport) NewUploadPackSession(
-	endpoint *transport.Endpoint,
-	auth transport.AuthMethod,
-) (transport.UploadPackSession, error) {
-	return t.delegate.NewUploadPackSession(t.endpoint(endpoint), auth)
-}
-
-func (t importHTTPTransport) NewReceivePackSession(
-	endpoint *transport.Endpoint,
-	auth transport.AuthMethod,
-) (transport.ReceivePackSession, error) {
-	return t.delegate.NewReceivePackSession(t.endpoint(endpoint), auth)
-}
-
-func init() {
-	client := newImportHTTPClient()
-	gitClient := githttp.NewClient(client)
-	transportclient.InstallProtocol(importHTTPProtocol, importHTTPTransport{
-		protocol: "http",
-		delegate: gitClient,
-	})
-	transportclient.InstallProtocol(importHTTPSProtocol, importHTTPTransport{
-		protocol: "https",
-		delegate: gitClient,
-	})
-}
-
 func newImportHTTPClient() *http.Client {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -386,20 +339,4 @@ func newImportHTTPClient() *http.Client {
 		Transport:     safeTransport,
 		CheckRedirect: importCheckRedirect,
 	}
-}
-
-func importTransportURL(rawURL string) (string, bool) {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL, false
-	}
-	switch parsed.Scheme {
-	case "http":
-		parsed.Scheme = importHTTPProtocol
-	case "https":
-		parsed.Scheme = importHTTPSProtocol
-	default:
-		return rawURL, false
-	}
-	return parsed.String(), true
 }

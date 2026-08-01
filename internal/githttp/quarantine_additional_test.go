@@ -5,15 +5,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/define42/GitOne/internal/gitformat"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 func TestQuarantineStorerDelegatesObjectOperations(t *testing.T) {
 	repositoryPath := filepath.Join(t.TempDir(), "repository.git")
-	repository, err := git.PlainInit(repositoryPath, true)
+	repository, err := gitformat.Init(repositoryPath, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +43,9 @@ func TestQuarantineStorerDelegatesObjectOperations(t *testing.T) {
 	hash, err := store.SetEncodedObject(object)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if hash.Size() != gitSHA256ObjectIDSize {
+		t.Fatalf("quarantine object ID uses %d bytes, want %d", hash.Size(), gitSHA256ObjectIDSize)
 	}
 	if err = store.HasEncodedObject(hash); err != nil {
 		t.Fatal(err)
@@ -98,7 +102,38 @@ func TestRegularFileChecks(t *testing.T) {
 	if err := requireRegularFile(file); err != nil {
 		t.Fatal(err)
 	}
+	symlink := filepath.Join(root, "symlink")
+	if err := os.Symlink(file, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if size, err := directoryRegularFileBytes(root); err != nil || size != int64(len("contents")) {
+		t.Fatalf("regular file bytes = %d, %v", size, err)
+	}
+	notDirectory := filepath.Join(file, "child")
+	if _, err := regularFileExists(notDirectory); err == nil {
+		t.Fatal("path below a regular file did not return an inspection error")
+	}
+	if err := requireRegularFile(notDirectory); err == nil {
+		t.Fatal("required path below a regular file did not return an inspection error")
+	}
 	if _, err := directoryRegularFileBytes(missing); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing directory size error = %v", err)
+	}
+}
+
+func TestRepositoryObjectQuotaReportsMeasurementBoundaries(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository.git")
+	quarantine := filepath.Join(root, "quarantine")
+	if err := enforceRepositoryObjectQuota(repository, quarantine, 1024); err == nil ||
+		!strings.Contains(err.Error(), "measure repository") {
+		t.Fatalf("missing repository objects returned %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repository, "objects"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforceRepositoryObjectQuota(repository, quarantine, 1024); err == nil ||
+		!strings.Contains(err.Error(), "measure quarantined") {
+		t.Fatalf("missing quarantine objects returned %v", err)
 	}
 }

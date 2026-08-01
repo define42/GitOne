@@ -698,7 +698,7 @@ func TestLibvirtProviderExecuteLifecycle(t *testing.T) {
 				Name:       "test",
 				Repository: "group/repository",
 				Branch:     "main",
-				Commit:     strings.Repeat("7", 40),
+				Commit:     strings.Repeat("7", 64),
 			},
 			Directory: directory,
 			Config: repoconfig.JobConfig{

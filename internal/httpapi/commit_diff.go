@@ -5,8 +5,9 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/define42/GitOne/internal/gitformat"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 func (a API) readRepositoryCommitDiff(
@@ -22,8 +23,8 @@ func (a API) readRepositoryCommitDiff(
 	if err != nil {
 		return nil, err
 	}
-	if !plumbing.IsHash(input.Commit) {
-		return nil, huma.Error400BadRequest("commit must be a complete commit hash")
+	if !gitformat.IsSHA256OID(input.Commit) {
+		return nil, huma.Error400BadRequest("commit must be a complete lowercase SHA-256 commit hash")
 	}
 	commit, err := repository.CommitObject(plumbing.NewHash(input.Commit))
 	if err != nil {

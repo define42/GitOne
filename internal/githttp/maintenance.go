@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	git "github.com/go-git/go-git/v5"
+	"github.com/define42/GitOne/internal/gitformat"
+	git "github.com/go-git/go-git/v6"
 )
 
 const (
@@ -38,7 +39,7 @@ func maintainRepositoryObjects(repositoryPath string) error {
 		return nil
 	}
 
-	repository, err := git.PlainOpen(repositoryPath)
+	repository, err := gitformat.Open(repositoryPath)
 	if err != nil {
 		return fmt.Errorf("open repository for maintenance: %w", err)
 	}

@@ -17,11 +17,11 @@ import (
 
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/httpio"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
 )
 
 const (
@@ -447,7 +447,7 @@ func (h Handler) object(
 			http.Error(w, "bad path", http.StatusBadRequest)
 			return
 		}
-		if _, err = git.PlainOpen(gitPath); err != nil {
+		if _, err = gitformat.Open(gitPath); err != nil {
 			http.NotFound(w, r)
 			return
 		}

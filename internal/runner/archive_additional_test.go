@@ -12,12 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 type archiveTestEntry struct {
@@ -202,8 +203,11 @@ func TestWriteSourceArchivePreservesExecutableAndSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkout := filepath.Join(t.TempDir(), "checkout")
-	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
+	repository, err := git.PlainClone(checkout, &git.CloneOptions{URL: gitPath})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = gitformat.Validate(repository); err != nil {
 		t.Fatal(err)
 	}
 	if err = os.MkdirAll(filepath.Join(checkout, "bin"), 0o750); err != nil {
@@ -291,7 +295,7 @@ func TestWriteSourceArchiveReportsRepositoryAndOutputErrors(t *testing.T) {
 	if err := WriteSourceArchive(
 		store,
 		validRepository,
-		plumbing.NewHash(strings.Repeat("f", 40)),
+		plumbing.NewHash(strings.Repeat("f", 64)),
 		io.Discard,
 	); err == nil {
 		t.Fatal("unknown commit was accepted")
@@ -300,7 +304,7 @@ func TestWriteSourceArchiveReportsRepositoryAndOutputErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := git.PlainOpen(gitPath)
+	repository, err := gitformat.Open(gitPath)
 	if err != nil {
 		t.Fatal(err)
 	}

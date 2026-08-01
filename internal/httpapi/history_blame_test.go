@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 func TestRepositoryCommitPaginationBeyondHundred(t *testing.T) {
@@ -42,7 +42,7 @@ func TestRepositoryCommitPaginationBeyondHundred(t *testing.T) {
 			TreeHash:     treeHash,
 			ParentHashes: []plumbing.Hash{parentHash},
 		}
-		encoded := &plumbing.MemoryObject{}
+		encoded := repository.Storer.NewEncodedObject()
 		if err = commit.Encode(encoded); err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +137,7 @@ func TestRepositoryCommitPageStopsAfterLookahead(t *testing.T) {
 			TreeHash:     initial.TreeHash,
 			ParentHashes: []plumbing.Hash{parentHash},
 		}
-		encoded := &plumbing.MemoryObject{}
+		encoded := repository.Storer.NewEncodedObject()
 		if err = commit.Encode(encoded); err != nil {
 			t.Fatal(err)
 		}

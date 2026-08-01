@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 func TestRepositoryFileCreateRenameAndDelete(t *testing.T) {
@@ -152,7 +152,7 @@ func TestRepositoryFileMutationsRejectConflictsAndInvalidPaths(t *testing.T) {
 	for name, err := range map[string]error{
 		"existing file": create("README.md", head),
 		"invalid path":  create("../outside", head),
-		"stale branch":  create("new.txt", strings.Repeat("0", 40)),
+		"stale branch":  create("new.txt", strings.Repeat("0", 64)),
 		"binary content": func() error {
 			_, err := service.createRepositoryFile(ctx, &createRepositoryFileInput{
 				AuthInput: credentials, Repository: "engineering/api", Ref: "main",

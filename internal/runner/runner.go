@@ -11,11 +11,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-billy/v6/osfs"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/cache"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
+	gitfilesystem "github.com/go-git/go-git/v6/storage/filesystem"
 )
 
 type Config struct {
@@ -353,12 +358,31 @@ func (r *Runner) checkout(
 	if err != nil {
 		return err
 	}
-	repository, err := git.PlainClone(destination, false, &git.CloneOptions{
+	worktreeFS := osfs.New(destination, osfs.WithBoundOS())
+	gitDirectory, err := worktreeFS.Chroot(git.GitDirName)
+	if err != nil {
+		return fmt.Errorf("prepare build Git directory: %w", err)
+	}
+	checkoutStorage := gitfilesystem.NewStorageWithOptions(
+		gitDirectory,
+		cache.NewObjectLRUDefault(),
+		gitfilesystem.Options{ObjectFormat: formatcfg.SHA256},
+	)
+	repository, err := git.Clone(checkoutStorage, worktreeFS, &git.CloneOptions{
 		URL:        gitPath,
 		NoCheckout: true,
 	})
 	if err != nil {
+		if repository != nil {
+			_ = repository.Close()
+		} else {
+			_ = checkoutStorage.Close()
+		}
 		return fmt.Errorf("prepare build checkout: %w", err)
+	}
+	defer func() { _ = repository.Close() }()
+	if err = gitformat.Validate(repository); err != nil {
+		return fmt.Errorf("validate build checkout: %w", err)
 	}
 	worktree, err := repository.Worktree()
 	if err != nil {

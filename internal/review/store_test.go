@@ -25,8 +25,8 @@ func testMergeRequest(title string) MergeRequest {
 		Target:            "main",
 		Source:            "feature",
 		Author:            "alice",
-		BaseCommit:        "1111111111111111111111111111111111111111",
-		HeadCommit:        "2222222222222222222222222222222222222222",
+		BaseCommit:        "1111111111111111111111111111111111111111111111111111111111111111",
+		HeadCommit:        "2222222222222222222222222222222222222222222222222222222222222222",
 		RequiredApprovals: 1,
 	}
 }

@@ -1,7 +1,6 @@
 package review
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
 )
 
@@ -730,7 +730,7 @@ func validate(
 		return errors.New("merge request base and head commits are required")
 	}
 	if !validCommitHash(request.BaseCommit) || !validCommitHash(request.HeadCommit) {
-		return errors.New("merge request base and head commits must be complete Git hashes")
+		return errors.New("merge request base and head commits must be lowercase SHA-256 object IDs")
 	}
 	if request.RequiredApprovals < 1 {
 		return errors.New("merge request must require at least one approval")
@@ -874,9 +874,5 @@ func validate(
 }
 
 func validCommitHash(value string) bool {
-	if len(value) != 40 {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
+	return gitformat.IsSHA256OID(value)
 }

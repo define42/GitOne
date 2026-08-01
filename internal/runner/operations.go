@@ -3,10 +3,11 @@ package runner
 import (
 	"errors"
 
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
+	git "github.com/go-git/go-git/v6"
 )
 
 func acquireBuildOperationLock(
@@ -40,7 +41,7 @@ func openRepositoryForBuild(
 	if err != nil {
 		return nil, err
 	}
-	return git.PlainOpen(path)
+	return gitformat.Open(path)
 }
 
 func acquireRepositoryBuildLock(

@@ -21,9 +21,9 @@ import (
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 func assertMainDefaultWithoutMaster(t *testing.T, repository *git.Repository, mainExists bool) {
@@ -935,8 +935,8 @@ func TestRepositoryAndGroupDeletionPreservesDataInTrash(t *testing.T) {
 		Target:     "main",
 		Source:     "feature",
 		Author:     "alice",
-		BaseCommit: strings.Repeat("1", 40),
-		HeadCommit: strings.Repeat("2", 40),
+		BaseCommit: strings.Repeat("1", 64),
+		HeadCommit: strings.Repeat("2", 64),
 	}
 	if err = reviews.Create(repositoryPath, &mergeRequest); err != nil {
 		t.Fatal(err)
@@ -1122,8 +1122,8 @@ func TestRenameRepositoryRollsBackWhenReviewMoveFails(t *testing.T) {
 		Target:     "main",
 		Source:     "feature",
 		Author:     "alice",
-		BaseCommit: strings.Repeat("1", 40),
-		HeadCommit: strings.Repeat("2", 40),
+		BaseCommit: strings.Repeat("1", 64),
+		HeadCommit: strings.Repeat("2", 64),
 	}
 	if err := review.NewStore(root).Create(repositoryPath, &request); err != nil {
 		t.Fatal(err)
@@ -1488,8 +1488,8 @@ func TestRenameGroupMovesNestedRepositoriesAndRejectsInvalidDestinations(t *test
 		Target:     "main",
 		Source:     "feature",
 		Author:     "alice",
-		BaseCommit: strings.Repeat("1", 40),
-		HeadCommit: strings.Repeat("2", 40),
+		BaseCommit: strings.Repeat("1", 64),
+		HeadCommit: strings.Repeat("2", 64),
 	}
 	if err := review.NewStore(root).Create(repositoryPath, &request); err != nil {
 		t.Fatal(err)
@@ -1563,7 +1563,7 @@ func TestRepositoryDescriptionHandlesMissingInvalidAndBrokenMetadata(t *testing.
 		t.Fatal(err)
 	}
 	checkout := filepath.Join(t.TempDir(), "invalid")
-	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
+	repository, err := git.PlainClone(checkout, &git.CloneOptions{URL: gitPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1600,7 +1600,7 @@ func TestRepositoryDescriptionHandlesMissingInvalidAndBrokenMetadata(t *testing.
 	}
 	if err = bare.Storer.SetReference(plumbing.NewHashReference(
 		plumbing.NewBranchReferenceName("main"),
-		plumbing.NewHash("4444444444444444444444444444444444444444"),
+		plumbing.NewHash(strings.Repeat("4", 64)),
 	)); err != nil {
 		t.Fatal(err)
 	}
@@ -1651,7 +1651,7 @@ func TestUpdateGroupControlRejectsInvalidStateAndUsesDefaultAuthor(t *testing.T)
 
 	if err = repository.Storer.SetReference(plumbing.NewHashReference(
 		plumbing.NewBranchReferenceName("main"),
-		plumbing.NewHash("5555555555555555555555555555555555555555"),
+		plumbing.NewHash(strings.Repeat("5", 64)),
 	)); err != nil {
 		t.Fatal(err)
 	}

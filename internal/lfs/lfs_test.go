@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
 )
 
 type stagedUploadReader struct {
@@ -865,7 +865,7 @@ func initializeLFSRepository(t *testing.T, root string) {
 	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = git.PlainInit(path, true); err != nil {
+	if _, err = gitformat.Init(path, true); err != nil {
 		t.Fatal(err)
 	}
 }

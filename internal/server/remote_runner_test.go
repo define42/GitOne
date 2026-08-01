@@ -18,8 +18,8 @@ import (
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/runner"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"gopkg.in/yaml.v3"
 )
 
@@ -62,7 +62,7 @@ func TestRemoteRunnerEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkout := filepath.Join(t.TempDir(), "checkout")
-	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
+	repository, err := git.PlainClone(checkout, &git.CloneOptions{URL: gitPath})
 	if err != nil {
 		t.Fatal(err)
 	}

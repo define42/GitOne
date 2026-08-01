@@ -194,8 +194,11 @@ func TestRepositoryBuildRerunAndCancelEndpoints(t *testing.T) {
 	readList, err := service.listRepositoryBuilds(context.Background(), &repositoryBuildsInput{
 		AuthInput: readCredentials, Repository: repository.Full(),
 	})
-	if err != nil || readList.Body.CanManage {
-		t.Fatalf("read-only build capability = %v, %v", readList.Body.CanManage, err)
+	if err != nil {
+		t.Fatalf("read-only build list: %v", err)
+	}
+	if readList.Body.CanManage {
+		t.Fatal("read-only user was allowed to manage builds")
 	}
 	_, err = service.rerunRepositoryBuild(context.Background(), &repositoryBuildInput{
 		AuthInput: readCredentials, Repository: repository.Full(), ID: original.ID,

@@ -12,16 +12,21 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
-	gittransport "github.com/go-git/go-git/v5/plumbing/transport"
-	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-billy/v6/osfs"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/cache"
+	gitclient "github.com/go-git/go-git/v6/plumbing/client"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	gittransport "github.com/go-git/go-git/v6/plumbing/transport"
+	githttp "github.com/go-git/go-git/v6/plumbing/transport/http"
+	gitfilesystem "github.com/go-git/go-git/v6/storage/filesystem"
 	"gopkg.in/yaml.v3"
 )
 
@@ -308,40 +313,89 @@ func (s Store) stageRemoteRepository(
 		gitPath: filepath.Join(temporaryRoot, "repository.git"),
 		lfsPath: filepath.Join(temporaryRoot, "repository.lfs"),
 	}
-	cloneURL, usesImportTransport := importTransportURL(options.URL)
+	sourcePath := filepath.Join(temporaryRoot, "source.git")
 	cloneOptions := &git.CloneOptions{
-		URL:    cloneURL,
-		Mirror: true,
+		URL:           options.URL,
+		Mirror:        true,
+		Bare:          true,
+		ClientOptions: []gitclient.Option{gitclient.WithHTTPClient(newImportHTTPClient())},
 	}
 	if options.Username != "" {
-		cloneOptions.Auth = &githttp.BasicAuth{
-			Username: options.Username,
-			Password: options.Password,
-		}
+		cloneOptions.ClientOptions = append(
+			cloneOptions.ClientOptions,
+			gitclient.WithHTTPAuth(&githttp.BasicAuth{
+				Username: options.Username,
+				Password: options.Password,
+			}),
+		)
 	}
-	cloned, err := git.PlainCloneContext(ctx, staged.gitPath, true, cloneOptions)
+	remoteObjectFormat, err := preflightRemoteObjectFormat(
+		ctx,
+		cloneOptions.URL,
+		cloneOptions.ClientOptions,
+	)
 	if err != nil {
 		_ = os.RemoveAll(temporaryRoot)
 		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
 	}
-	if usesImportTransport {
-		configuration, configErr := cloned.Config()
-		if configErr != nil {
-			_ = os.RemoveAll(temporaryRoot)
-			return stagedRemoteRepository{}, configErr
+	// Pin the storage before the second upload-pack handshake so go-git's
+	// object-format reconciliation can reject a changed advertisement before
+	// requesting a pack.
+	sourceStorage := gitfilesystem.NewStorageWithOptions(
+		osfs.New(sourcePath, osfs.WithBoundOS()),
+		cache.NewObjectLRUDefault(),
+		gitfilesystem.Options{ObjectFormat: remoteObjectFormat},
+	)
+	// SHA-1 is normally implicit in Git configuration, which would leave a
+	// fresh store looking unpinned to go-git's format reconciliation. Persist
+	// the preflight result explicitly so a second advertisement cannot switch
+	// formats in either direction before the pack request.
+	if err = sourceStorage.Init(); err == nil {
+		err = sourceStorage.SetObjectFormat(remoteObjectFormat)
+	}
+	if err != nil {
+		_ = sourceStorage.Close()
+		_ = os.RemoveAll(temporaryRoot)
+		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
+	}
+	cloned, err := git.CloneContext(ctx, sourceStorage, nil, cloneOptions)
+	if err != nil {
+		if cloned != nil {
+			_ = cloned.Close()
+		} else {
+			_ = sourceStorage.Close()
 		}
-		origin := configuration.Remotes[git.DefaultRemoteName]
-		if origin == nil {
-			_ = os.RemoveAll(temporaryRoot)
-			return stagedRemoteRepository{}, errors.New("imported repository has no origin remote")
+		_ = os.RemoveAll(temporaryRoot)
+		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
+	}
+	clonedObjectFormat, err := gitformat.ObjectFormat(cloned)
+	if err != nil || clonedObjectFormat != remoteObjectFormat {
+		_ = cloned.Close()
+		_ = os.RemoveAll(temporaryRoot)
+		if err == nil {
+			err = fmt.Errorf(
+				"remote object-format changed from %s to %s during clone",
+				remoteObjectFormat,
+				clonedObjectFormat,
+			)
 		}
-		origin.URLs = []string{options.URL}
-		if configErr = cloned.Storer.SetConfig(configuration); configErr != nil {
-			_ = os.RemoveAll(temporaryRoot)
-			return stagedRemoteRepository{}, configErr
-		}
+		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
+	}
+	if err = cloned.Close(); err != nil {
+		_ = os.RemoveAll(temporaryRoot)
+		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
+	}
+	cloned, err = normalizeImportedRepository(sourcePath, staged.gitPath)
+	if err != nil {
+		_ = os.RemoveAll(temporaryRoot)
+		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
 	}
 	if err = importRemoteLFS(ctx, cloned, options, staged.lfsPath); err != nil {
+		_ = cloned.Close()
+		_ = os.RemoveAll(temporaryRoot)
+		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
+	}
+	if err = cloned.Close(); err != nil {
 		_ = os.RemoveAll(temporaryRoot)
 		return stagedRemoteRepository{}, &RemoteImportError{Err: err}
 	}
@@ -423,7 +477,7 @@ func (s Store) createRepository(r repopath.Repository, options CreateRepositoryO
 			return e
 		}
 	} else {
-		repository, initErr := git.PlainInit(gitp, true)
+		repository, initErr := gitformat.Init(gitp, true)
 		if initErr != nil {
 			return initErr
 		}
@@ -444,7 +498,7 @@ func (s Store) RepositoryDescription(r repopath.Repository) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	repository, err := git.PlainOpen(path)
+	repository, err := gitformat.Open(path)
 	if err != nil {
 		return "", err
 	}
@@ -478,7 +532,7 @@ func (s Store) createInitializedRepository(destination, name string, options Cre
 		_ = os.RemoveAll(temporary)
 	}()
 
-	repository, err := git.PlainInit(temporary, false)
+	repository, err := gitformat.Init(temporary, false)
 	if err != nil {
 		return err
 	}
@@ -606,7 +660,7 @@ func (s Store) createGroup(group, owner, author, description string) error {
 	defer func() {
 		_ = os.RemoveAll(tmp)
 	}()
-	r, e := git.PlainInit(tmp, false)
+	r, e := gitformat.Init(tmp, false)
 	if e != nil {
 		return e
 	}
@@ -695,7 +749,7 @@ func (s Store) updateGroupControl(group string, document control.Document, autho
 	if err != nil {
 		return err
 	}
-	repository, err := git.PlainOpen(filepath.Join(groupPath, "control.git"))
+	repository, err := gitformat.Open(filepath.Join(groupPath, "control.git"))
 	if err != nil {
 		return err
 	}
@@ -717,7 +771,7 @@ func (s Store) updateGroupControl(group string, document control.Document, autho
 		return err
 	}
 	contents = append(contents, '\n')
-	blob := &plumbing.MemoryObject{}
+	blob := repository.Storer.NewEncodedObject()
 	blob.SetType(plumbing.BlobObject)
 	writer, err := blob.Writer()
 	if err != nil {
@@ -754,7 +808,7 @@ func (s Store) updateGroupControl(group string, document control.Document, autho
 	}
 	sort.Sort(object.TreeEntrySorter(entries))
 	updatedTree := &object.Tree{Entries: entries}
-	encodedTree := &plumbing.MemoryObject{}
+	encodedTree := repository.Storer.NewEncodedObject()
 	if err = updatedTree.Encode(encodedTree); err != nil {
 		return err
 	}
@@ -778,7 +832,7 @@ func (s Store) updateGroupControl(group string, document control.Document, autho
 		TreeHash:     treeHash,
 		ParentHashes: []plumbing.Hash{parent.Hash},
 	}
-	encodedCommit := &plumbing.MemoryObject{}
+	encodedCommit := repository.Storer.NewEncodedObject()
 	if err = commit.Encode(encodedCommit); err != nil {
 		return err
 	}

@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 const (
@@ -623,7 +623,7 @@ func (c *Coordinator) jobConfig(
 	if err != nil {
 		return repoconfig.JobConfig{}, err
 	}
-	repository, err := git.PlainOpen(gitPath)
+	repository, err := gitformat.Open(gitPath)
 	if err != nil {
 		return repoconfig.JobConfig{}, err
 	}

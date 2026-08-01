@@ -14,12 +14,13 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/runner"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"gopkg.in/yaml.v3"
 )
 
@@ -527,7 +528,7 @@ func (s *recordingLockedScheduler) ScheduleLocked(
 
 func TestScheduleBuildSelectsLockAwareScheduler(t *testing.T) {
 	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
-	commit := plumbing.NewHash(strings.Repeat("1", 40))
+	commit := plumbing.NewHash(strings.Repeat("1", 64))
 
 	(API{}).scheduleBuild(repository, "main", commit)
 
@@ -575,8 +576,11 @@ func commitRunnerBuildConfig(
 		t.Fatal(err)
 	}
 	checkout := filepath.Join(t.TempDir(), "checkout")
-	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
+	repository, err := git.PlainClone(checkout, &git.CloneOptions{URL: gitPath})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = gitformat.Validate(repository); err != nil {
 		t.Fatal(err)
 	}
 	isManual := len(manual) > 0 && manual[0]

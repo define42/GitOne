@@ -16,7 +16,7 @@ import (
 	"testing"
 
 	"github.com/define42/GitOne/internal/repopath"
-	git "github.com/go-git/go-git/v5"
+	git "github.com/go-git/go-git/v6"
 )
 
 func TestImportRemoteLFSWithoutPointersDoesNotContactEndpoint(t *testing.T) {

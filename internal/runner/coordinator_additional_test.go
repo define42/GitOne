@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 func TestNewCoordinatorValidatesConfigurationAndUsesDefaults(t *testing.T) {
@@ -66,7 +66,7 @@ func TestCoordinatorScheduleOutcomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := git.PlainOpen(gitPath)
+	repository, err := gitformat.Open(gitPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,11 @@ func TestCoordinatorScheduleOutcomes(t *testing.T) {
 		t.Fatalf("configuration log = %q, %v", configurationLog, err)
 	}
 
-	badCommit, err := coordinator.Schedule(repositoryPath, "main", plumbing.ZeroHash)
+	badCommit, err := coordinator.Schedule(
+		repositoryPath,
+		"main",
+		plumbing.NewHash(strings.Repeat("0", 64)),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +274,7 @@ func TestCoordinatorReconciliationDoesNotResurrectCanceledJob(t *testing.T) {
 		ID:         "dependency",
 		Name:       "test",
 		Repository: repositoryPath.Full(),
+		Commit:     strings.Repeat("1", 64),
 		Status:     StatusRunning,
 		CreatedAt:  created,
 		RunnerID:   "runner-one",
@@ -278,6 +283,7 @@ func TestCoordinatorReconciliationDoesNotResurrectCanceledJob(t *testing.T) {
 		ID:         "dependent",
 		Name:       "build",
 		Repository: repositoryPath.Full(),
+		Commit:     strings.Repeat("1", 64),
 		Needs:      []JobDependency{{Name: dependency.Name, ID: dependency.ID}},
 		Status:     StatusWaiting,
 		CreatedAt:  created,
@@ -785,7 +791,7 @@ func TestCoordinatorRejectsUnbuildableCandidateAndStorageFailures(t *testing.T) 
 		ID:         "unbuildable",
 		Repository: repositoryPath.Full(),
 		Branch:     "main",
-		Commit:     strings.Repeat("f", 40),
+		Commit:     strings.Repeat("f", 64),
 		Status:     StatusQueued,
 		CreatedAt:  time.Now().UTC(),
 	}
@@ -839,7 +845,7 @@ func TestCoordinatorJobConfigurationAndValidationHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := git.PlainOpen(gitPath)
+	repository, err := gitformat.Open(gitPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -865,7 +871,7 @@ func TestCoordinatorJobConfigurationAndValidationHelpers(t *testing.T) {
 		t.Fatal("unsafe repository build configuration was accepted")
 	}
 	if _, err = coordinator.jobConfig(repositoryPath, Job{
-		ID: "missing-commit", Commit: strings.Repeat("f", 40),
+		ID: "missing-commit", Commit: strings.Repeat("f", 64),
 	}); err == nil {
 		t.Fatal("missing commit build configuration was accepted")
 	}

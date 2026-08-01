@@ -22,12 +22,13 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 const (
@@ -101,7 +102,7 @@ type repositoryArchiveInput struct {
 type updateRepositoryFileBody struct {
 	Content        string `json:"content" maxLength:"1048576" doc:"Complete UTF-8 file contents"`
 	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
-	ExpectedCommit string `json:"expectedCommit" minLength:"40" maxLength:"40" doc:"Branch tip commit shown when editing began"`
+	ExpectedCommit string `json:"expectedCommit" minLength:"64" maxLength:"64" doc:"Branch tip commit shown when editing began"`
 }
 
 type updateRepositoryFileInput struct {
@@ -115,7 +116,7 @@ type updateRepositoryFileInput struct {
 type createRepositoryFileBody struct {
 	Content        string `json:"content" maxLength:"1048576" doc:"Complete UTF-8 file contents"`
 	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
-	ExpectedCommit string `json:"expectedCommit" minLength:"40" maxLength:"40" doc:"Current branch tip commit"`
+	ExpectedCommit string `json:"expectedCommit" minLength:"64" maxLength:"64" doc:"Current branch tip commit"`
 }
 
 type createRepositoryFileInput struct {
@@ -128,7 +129,7 @@ type createRepositoryFileInput struct {
 
 type deleteRepositoryFileBody struct {
 	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
-	ExpectedCommit string `json:"expectedCommit" minLength:"40" maxLength:"40" doc:"Current branch tip commit"`
+	ExpectedCommit string `json:"expectedCommit" minLength:"64" maxLength:"64" doc:"Current branch tip commit"`
 }
 
 type deleteRepositoryFileInput struct {
@@ -142,7 +143,7 @@ type deleteRepositoryFileInput struct {
 type renameRepositoryFileBody struct {
 	NewPath        string `json:"newPath" minLength:"1" doc:"New path inside the repository"`
 	Message        string `json:"message,omitempty" maxLength:"500" doc:"Optional commit message"`
-	ExpectedCommit string `json:"expectedCommit" minLength:"40" maxLength:"40" doc:"Current branch tip commit"`
+	ExpectedCommit string `json:"expectedCommit" minLength:"64" maxLength:"64" doc:"Current branch tip commit"`
 }
 
 type renameRepositoryFileInput struct {
@@ -1034,7 +1035,7 @@ func (a API) openRepository(
 	if err != nil {
 		return nil, repopath.Repository{}, huma.Error400BadRequest(err.Error())
 	}
-	repository, err := git.PlainOpen(repositoryPath)
+	repository, err := gitformat.Open(repositoryPath)
 	if err != nil {
 		return nil, repopath.Repository{}, huma.Error404NotFound("repository not found", err)
 	}

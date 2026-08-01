@@ -13,11 +13,12 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 const (
@@ -110,7 +111,7 @@ type updateReviewThreadInput struct {
 }
 
 type approveMergeRequestBody struct {
-	ExpectedHeadCommit string `json:"expectedHeadCommit" minLength:"40" maxLength:"40" doc:"Reviewed source branch commit"`
+	ExpectedHeadCommit string `json:"expectedHeadCommit" minLength:"64" maxLength:"64" doc:"Reviewed source branch commit"`
 }
 
 type approveMergeRequestInput struct {
@@ -700,8 +701,10 @@ func (a API) approveMergeRequest(
 	ctx context.Context,
 	input *approveMergeRequestInput,
 ) (*mergeRequestOutput, error) {
-	if !plumbing.IsHash(input.Body.ExpectedHeadCommit) {
-		return nil, huma.Error400BadRequest("expectedHeadCommit must be a complete commit hash")
+	if !gitformat.IsSHA256OID(input.Body.ExpectedHeadCommit) {
+		return nil, huma.Error400BadRequest(
+			"expectedHeadCommit must be a complete lowercase SHA-256 commit hash",
+		)
 	}
 	expectedHeadCommit := plumbing.NewHash(input.Body.ExpectedHeadCommit).String()
 	repository, parsed, principal, releaseOperationLock, err := a.openLockedReviewRepository(
@@ -811,8 +814,10 @@ func (a API) mergeApprovedRequest(
 	ctx context.Context,
 	input *approveMergeRequestInput,
 ) (*mergeRequestOutput, error) {
-	if !plumbing.IsHash(input.Body.ExpectedHeadCommit) {
-		return nil, huma.Error400BadRequest("expectedHeadCommit must be a complete commit hash")
+	if !gitformat.IsSHA256OID(input.Body.ExpectedHeadCommit) {
+		return nil, huma.Error400BadRequest(
+			"expectedHeadCommit must be a complete lowercase SHA-256 commit hash",
+		)
 	}
 	expectedHeadCommit := plumbing.NewHash(input.Body.ExpectedHeadCommit).String()
 	parsed, err := parseRepositoryPath(input.Repository)
@@ -877,7 +882,7 @@ func (a API) mergeStoredRequest(
 			err,
 		)
 	}
-	repository, err := git.PlainOpen(repositoryPath)
+	repository, err := gitformat.Open(repositoryPath)
 	if err != nil {
 		return mergeRequestView{}, huma.Error404NotFound("repository not found", err)
 	}
@@ -1164,7 +1169,7 @@ func (a API) recoverInterruptedMergeClaimWithOperationLock(
 			err,
 		)
 	}
-	repository, err := git.PlainOpen(repositoryPath)
+	repository, err := gitformat.Open(repositoryPath)
 	if err != nil {
 		return review.MergeRequest{}, huma.Error404NotFound("repository not found", err)
 	}
@@ -1300,7 +1305,7 @@ func (a API) openLockedReviewRepository(
 		release()
 		return nil, repopath.Repository{}, auth.Principal{}, nil, huma.Error400BadRequest(err.Error())
 	}
-	repository, err := git.PlainOpen(repositoryPath)
+	repository, err := gitformat.Open(repositoryPath)
 	if err != nil {
 		release()
 		return nil, repopath.Repository{}, auth.Principal{}, nil, huma.Error404NotFound(
@@ -1480,10 +1485,10 @@ func compareMergeRequest(
 			missing = "Source branch no longer exists"
 		}
 	}
-	if targetCommit == nil && plumbing.IsHash(request.BaseCommit) {
+	if targetCommit == nil && gitformat.IsSHA256OID(request.BaseCommit) {
 		targetCommit, _ = repository.CommitObject(plumbing.NewHash(request.BaseCommit))
 	}
-	if sourceCommit == nil && plumbing.IsHash(request.HeadCommit) {
+	if sourceCommit == nil && gitformat.IsSHA256OID(request.HeadCommit) {
 		sourceCommit, _ = repository.CommitObject(plumbing.NewHash(request.HeadCommit))
 	}
 	result := mergeRequestComparison{

@@ -15,12 +15,13 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 type mergeRequestAPIFixture struct {
@@ -81,7 +82,7 @@ func newMergeRequestAPIFixture(t *testing.T) mergeRequestAPIFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := git.PlainOpen(gitPath)
+	repository, err := gitformat.Open(gitPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,7 +861,7 @@ func TestMergeRequestDiscussionApprovalAndExplicitMergeRetry(t *testing.T) {
 			Repository: fixture.path.Full(),
 			ID:         created.Body.ID,
 		},
-		Body: approveMergeRequestBody{ExpectedHeadCommit: plumbing.ZeroHash.String()},
+		Body: approveMergeRequestBody{ExpectedHeadCommit: strings.Repeat("0", 64)},
 	})
 	requireReviewHTTPStatus(t, err, http.StatusConflict)
 

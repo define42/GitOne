@@ -11,12 +11,13 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
-	git "github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
+	git "github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 func (a API) updateRepositoryFile(
@@ -338,10 +339,12 @@ func (a API) prepareRepositoryFileChange(
 	if err != nil {
 		return nil, huma.Error404NotFound("branch not found", err)
 	}
-	if !plumbing.IsHash(expectedCommit) {
-		return nil, huma.Error400BadRequest("expectedCommit must be a complete commit hash")
+	if !gitformat.IsSHA256OID(expectedCommit) {
+		return nil, huma.Error400BadRequest(
+			"expectedCommit must be a complete lowercase SHA-256 commit hash",
+		)
 	}
-	if !strings.EqualFold(branchRef.Hash().String(), expectedCommit) {
+	if branchRef.Hash().String() != expectedCommit {
 		return nil, huma.Error409Conflict("branch changed since the file view was loaded")
 	}
 	rootTree, err := parent.Tree()
@@ -406,7 +409,7 @@ func (a API) commitRepositoryFileChange(
 		TreeHash:     treeHash,
 		ParentHashes: []plumbing.Hash{change.parent.Hash},
 	}
-	encodedCommit := &plumbing.MemoryObject{}
+	encodedCommit := change.repository.Storer.NewEncodedObject()
 	if err = commit.Encode(encodedCommit); err != nil {
 		return nil, huma.Error500InternalServerError("could not encode file commit", err)
 	}
@@ -433,7 +436,7 @@ func (a API) commitRepositoryFileChange(
 }
 
 func storeRepositoryBlob(repository *git.Repository, content []byte) (plumbing.Hash, error) {
-	blob := &plumbing.MemoryObject{}
+	blob := repository.Storer.NewEncodedObject()
 	blob.SetType(plumbing.BlobObject)
 	blob.SetSize(int64(len(content)))
 	writer, err := blob.Writer()
@@ -482,7 +485,7 @@ func replaceRepositoryTreeBlob(
 		}
 		sort.Sort(object.TreeEntrySorter(entries))
 		updatedTree := &object.Tree{Entries: entries}
-		encodedTree := &plumbing.MemoryObject{}
+		encodedTree := repository.Storer.NewEncodedObject()
 		if err := updatedTree.Encode(encodedTree); err != nil {
 			return plumbing.ZeroHash, err
 		}
@@ -612,7 +615,7 @@ func storeRepositoryTree(
 ) (plumbing.Hash, error) {
 	sort.Sort(object.TreeEntrySorter(entries))
 	updatedTree := &object.Tree{Entries: entries}
-	encodedTree := &plumbing.MemoryObject{}
+	encodedTree := repository.Storer.NewEncodedObject()
 	if err := updatedTree.Encode(encodedTree); err != nil {
 		return plumbing.ZeroHash, err
 	}
