@@ -237,7 +237,7 @@ func TestMergeLockSerializesRepositoryTransactions(t *testing.T) {
 	}
 }
 
-func TestStoreRejectsMalformedPersistedRecords(t *testing.T) {
+func TestStoreSkipsMalformedPersistedRecords(t *testing.T) {
 	root := t.TempDir()
 	repository := testRepository()
 	createTestGitStore(t, root, repository)
@@ -258,8 +258,12 @@ func TestStoreRejectsMalformedPersistedRecords(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.List(repository); err == nil {
-		t.Fatal("malformed JSON record was accepted")
+	requests, err := store.List(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].ID != request.ID {
+		t.Fatalf("malformed JSON record affected list: %#v", requests)
 	}
 	if err = os.Remove(filepath.Join(directory, "2.json")); err != nil {
 		t.Fatal(err)
@@ -267,8 +271,12 @@ func TestStoreRejectsMalformedPersistedRecords(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(directory, "02.json"), []byte("{}"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.List(repository); err == nil {
-		t.Fatal("non-canonical record name was accepted")
+	requests, err = store.List(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].ID != request.ID {
+		t.Fatalf("non-canonical record name affected list: %#v", requests)
 	}
 	if err = os.Remove(filepath.Join(directory, "02.json")); err != nil {
 		t.Fatal(err)
@@ -278,6 +286,71 @@ func TestStoreRejectsMalformedPersistedRecords(t *testing.T) {
 	}
 	if _, err = store.Get(repository, 1); err == nil {
 		t.Fatal("zero-ID persisted record was accepted")
+	}
+}
+
+func TestMalformedRecordDoesNotBlockCreateOrReopen(t *testing.T) {
+	root := t.TempDir()
+	repository := testRepository()
+	createTestGitStore(t, root, repository)
+	store := NewStore(root)
+	first := testMergeRequest("First")
+	if err := store.Create(repository, &first); err != nil {
+		t.Fatal(err)
+	}
+	closedAt := time.Now().UTC()
+	if _, err := store.Update(repository, first.ID, func(request *MergeRequest) error {
+		request.State = StateClosed
+		request.ClosedBy = "alice"
+		request.ClosedAt = &closedAt
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := repositoryDirectory(root, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformedPath := filepath.Join(directory, "2.json")
+	malformedContents := []byte("{broken")
+	if err = os.WriteFile(malformedPath, malformedContents, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	second := testMergeRequest("Second")
+	second.Source = "feature-two"
+	if err = store.Create(repository, &second); err != nil {
+		t.Fatalf("malformed record blocked create: %v", err)
+	}
+	if second.ID != 3 {
+		t.Fatalf("new merge request ID = %d, want 3", second.ID)
+	}
+	remaining, err := os.ReadFile(malformedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(remaining) != string(malformedContents) {
+		t.Fatalf("malformed record was overwritten: %q", remaining)
+	}
+
+	reopened, err := store.Update(repository, first.ID, func(request *MergeRequest) error {
+		request.State = StateOpen
+		request.ClosedBy = ""
+		request.ClosedAt = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("malformed record blocked reopen: %v", err)
+	}
+	if reopened.State != StateOpen {
+		t.Fatalf("merge request was not reopened: %#v", reopened)
+	}
+	requests, err := store.List(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || requests[0].ID != second.ID || requests[1].ID != first.ID {
+		t.Fatalf("unexpected merge request list: %#v", requests)
 	}
 }
 

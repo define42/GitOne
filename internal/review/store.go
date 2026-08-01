@@ -25,6 +25,18 @@ var (
 	ErrDuplicate = errors.New("an open merge request already exists for these branches")
 )
 
+type invalidRecordError struct {
+	cause error
+}
+
+func (e *invalidRecordError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *invalidRecordError) Unwrap() error {
+	return e.cause
+}
+
 type Store struct {
 	Root string
 }
@@ -90,27 +102,24 @@ func (s *Store) Create(
 		return errors.New("repository Git store is not a directory")
 	}
 
-	existing, err := s.list(repository)
+	existing, maximumID, err := s.listValid(repository)
 	if err != nil {
 		return err
 	}
-	var maximumID uint64
 	for _, candidate := range existing {
-		if candidate.ID > maximumID {
-			maximumID = candidate.ID
-		}
 		if candidate.State == StateOpen &&
 			candidate.Target == request.Target &&
 			candidate.Source == request.Source {
 			return fmt.Errorf("%w: !%d", ErrDuplicate, candidate.ID)
 		}
 	}
-	if maximumID == math.MaxUint64 {
-		return errors.New("merge request ID space is exhausted")
+	nextID, err := s.nextRecordID(repository, maximumID)
+	if err != nil {
+		return err
 	}
 
 	now := time.Now().UTC()
-	request.ID = maximumID + 1
+	request.ID = nextID
 	if request.Repository == "" {
 		request.Repository = repository.Full()
 	}
@@ -225,7 +234,7 @@ func (s *Store) relocate(
 		return err
 	}
 
-	requests, err := s.list(repository)
+	requests, err := listDirectory(sourceDirectory, repository)
 	if err != nil {
 		return err
 	}
@@ -399,51 +408,108 @@ func (s *Store) rewriteGroup(sourceGroup, destinationGroup string) error {
 }
 
 func (s *Store) list(repository repopath.Repository) ([]MergeRequest, error) {
+	requests, _, err := s.listValid(repository)
+	return requests, err
+}
+
+func (s *Store) listValid(
+	repository repopath.Repository,
+) ([]MergeRequest, uint64, error) {
 	directory, err := repositoryDirectory(s.Root, repository)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return listDirectory(directory, repository)
+	return scanDirectory(directory, repository, true)
 }
 
 func listDirectory(
 	directory string,
 	repository repopath.Repository,
 ) ([]MergeRequest, error) {
+	requests, _, err := scanDirectory(directory, repository, false)
+	return requests, err
+}
+
+func scanDirectory(
+	directory string,
+	repository repopath.Repository,
+	skipInvalid bool,
+) ([]MergeRequest, uint64, error) {
 	entries, err := os.ReadDir(directory)
 	if errors.Is(err, os.ErrNotExist) {
-		return []MergeRequest{}, nil
+		return []MergeRequest{}, 0, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	requests := make([]MergeRequest, 0, len(entries))
+	var maximumID uint64
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
 		info, infoErr := entry.Info()
 		if infoErr != nil {
-			return nil, infoErr
+			return nil, 0, infoErr
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("merge request record %q is not a regular file", entry.Name())
+			if skipInvalid {
+				continue
+			}
+			return nil, 0, fmt.Errorf(
+				"merge request record %q is not a regular file",
+				entry.Name(),
+			)
 		}
 		id, parseErr := parseRecordName(entry.Name())
 		if parseErr != nil {
-			return nil, parseErr
+			if skipInvalid {
+				continue
+			}
+			return nil, 0, parseErr
 		}
 		request, readErr := readRecord(directory, repository, id)
 		if readErr != nil {
-			return nil, readErr
+			var invalid *invalidRecordError
+			if skipInvalid && errors.As(readErr, &invalid) {
+				continue
+			}
+			return nil, 0, readErr
 		}
 		requests = append(requests, request)
+		if id > maximumID {
+			maximumID = id
+		}
 	}
 	sort.Slice(requests, func(left, right int) bool {
 		return requests[left].ID > requests[right].ID
 	})
-	return requests, nil
+	return requests, maximumID, nil
+}
+
+func (s *Store) nextRecordID(
+	repository repopath.Repository,
+	maximumID uint64,
+) (uint64, error) {
+	directory, err := repositoryDirectory(s.Root, repository)
+	if err != nil {
+		return 0, err
+	}
+	for maximumID < math.MaxUint64 {
+		candidate := maximumID + 1
+		path, pathErr := recordPath(directory, candidate)
+		if pathErr != nil {
+			return 0, pathErr
+		}
+		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+			return candidate, nil
+		} else if statErr != nil {
+			return 0, statErr
+		}
+		maximumID = candidate
+	}
+	return 0, errors.New("merge request ID space is exhausted")
 }
 
 func rewriteDirectory(
@@ -622,24 +688,39 @@ func readRecord(
 		return MergeRequest{}, fmt.Errorf("merge request record %q is not a regular file", filepath.Base(path))
 	}
 	if info.Size() > maximumRecordBytes {
-		return MergeRequest{}, fmt.Errorf("merge request record %q is too large", filepath.Base(path))
+		return MergeRequest{}, &invalidRecordError{cause: fmt.Errorf(
+			"merge request record %q is too large",
+			filepath.Base(path),
+		)}
 	}
 
 	decoder := json.NewDecoder(io.LimitReader(file, maximumRecordBytes+1))
 	decoder.DisallowUnknownFields()
 	var request MergeRequest
 	if err = decoder.Decode(&request); err != nil {
-		return MergeRequest{}, fmt.Errorf("read merge request %d: %w", id, err)
+		return MergeRequest{}, &invalidRecordError{cause: fmt.Errorf(
+			"read merge request %d: %w",
+			id,
+			err,
+		)}
 	}
 	var trailing any
 	if err = decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
 			err = errors.New("record must contain one JSON document")
 		}
-		return MergeRequest{}, fmt.Errorf("read merge request %d: %w", id, err)
+		return MergeRequest{}, &invalidRecordError{cause: fmt.Errorf(
+			"read merge request %d: %w",
+			id,
+			err,
+		)}
 	}
 	if err = validate(repository, id, request); err != nil {
-		return MergeRequest{}, fmt.Errorf("read merge request %d: %w", id, err)
+		return MergeRequest{}, &invalidRecordError{cause: fmt.Errorf(
+			"read merge request %d: %w",
+			id,
+			err,
+		)}
 	}
 	return request, nil
 }
