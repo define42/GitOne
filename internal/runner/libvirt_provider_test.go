@@ -342,17 +342,38 @@ func TestCreateReturnsPartialInstanceWhenRollbackMustBeRetried(t *testing.T) {
 
 func TestProviderCheckReadyRequiresRunningDomainSSHAndDocker(t *testing.T) {
 	poolPath := t.TempDir()
-	runner := &readinessLibvirtRPC{state: "running"}
+	const (
+		macAddress = "52:54:00:01:02:03"
+		address    = "10.240.0.10"
+		network    = "gitone-readiness-test"
+	)
+	runner := &readinessLibvirtRPC{
+		state:             "running",
+		domainMACAddress:  macAddress,
+		domainNetworkName: network,
+		domainInterfaces: []libvirt.DomainInterface{{
+			Hwaddr: libvirt.OptString{macAddress},
+			Addrs:  []libvirt.DomainIPAddr{{Addr: address}},
+		}},
+		dhcpLeases: []libvirt.NetworkDhcpLease{{
+			Mac:        libvirt.OptString{macAddress},
+			Ipaddr:     address,
+			Expirytime: time.Now().Add(time.Minute).Unix(),
+		}},
+	}
 	guestSSH := &readinessGuestSSH{}
 	provider := &libvirtRPCProvider{
 		config: LibvirtConfig{
 			URI:           "test:///system",
 			PoolPath:      poolPath,
+			NetworkName:   network,
+			NetworkCIDR:   "10.240.0.0/20",
 			SSHUser:       "core",
 			SSHPort:       22,
 			DockerCommand: "docker",
 		},
 		client:      runner,
+		network:     libvirt.Network{Name: network},
 		ownerPrefix: libvirtOwnerPrefix("test:///system", "test-pool", "readiness-test"),
 		guestSSH:    guestSSH,
 	}
@@ -360,12 +381,15 @@ func TestProviderCheckReadyRequiresRunningDomainSSHAndDocker(t *testing.T) {
 	runner.domainName = name
 	runner.domainExists = true
 	runner.domainRunning = true
-	instance := vmInstance{Name: name, Address: "192.0.2.10"}
+	instance := vmInstance{Name: name, Address: address, MACAddress: macAddress}
 	if err := provider.CheckReady(context.Background(), instance); err != nil {
 		t.Fatal(err)
 	}
 	if guestSSH.calls != 1 {
 		t.Fatalf("readiness SSH probes = %d, want 1", guestSSH.calls)
+	}
+	if runner.requestedDHCPMAC != macAddress {
+		t.Fatalf("DHCP query MAC = %q, want %q", runner.requestedDHCPMAC, macAddress)
 	}
 	runner.state = "shut off"
 	if err := provider.CheckReady(context.Background(), instance); err == nil ||
@@ -380,6 +404,106 @@ func TestProviderCheckReadyRequiresRunningDomainSSHAndDocker(t *testing.T) {
 	if err := provider.CheckReady(context.Background(), instance); err == nil ||
 		!strings.Contains(err.Error(), "SSH and Docker") {
 		t.Fatalf("guest health error = %v", err)
+	}
+}
+
+func TestProviderCheckReadyRejectsMismatchedNetworkIdentityBeforeSSH(t *testing.T) {
+	const (
+		macAddress = "52:54:00:01:02:03"
+		address    = "10.240.0.10"
+		network    = "gitone-readiness-test"
+	)
+	tests := []struct {
+		name   string
+		mutate func(*readinessLibvirtRPC, *vmInstance)
+		want   string
+	}{
+		{
+			name: "domain MAC",
+			mutate: func(runner *readinessLibvirtRPC, _ *vmInstance) {
+				runner.domainMACAddress = "52:54:00:04:05:06"
+			},
+			want: "does not match reserved MAC",
+		},
+		{
+			name: "domain network",
+			mutate: func(runner *readinessLibvirtRPC, _ *vmInstance) {
+				runner.domainNetworkName = "untrusted-network"
+			},
+			want: "does not match runner network",
+		},
+		{
+			name: "DHCP MAC",
+			mutate: func(runner *readinessLibvirtRPC, _ *vmInstance) {
+				runner.dhcpLeases[0].Mac = libvirt.OptString{"52:54:00:04:05:06"}
+			},
+			want: "has no active DHCP lease",
+		},
+		{
+			name: "DHCP address outside runner network",
+			mutate: func(runner *readinessLibvirtRPC, _ *vmInstance) {
+				runner.dhcpLeases[0].Ipaddr = "10.250.0.10"
+			},
+			want: "has no active DHCP lease",
+		},
+		{
+			name: "changed address",
+			mutate: func(_ *readinessLibvirtRPC, instance *vmInstance) {
+				instance.Address = "10.240.0.11"
+			},
+			want: "address changed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			poolPath := t.TempDir()
+			runner := &readinessLibvirtRPC{
+				state:             "running",
+				domainExists:      true,
+				domainRunning:     true,
+				domainMACAddress:  macAddress,
+				domainNetworkName: network,
+				domainInterfaces: []libvirt.DomainInterface{{
+					Hwaddr: libvirt.OptString{macAddress},
+					Addrs:  []libvirt.DomainIPAddr{{Addr: address}},
+				}},
+				dhcpLeases: []libvirt.NetworkDhcpLease{{
+					Mac:        libvirt.OptString{macAddress},
+					Ipaddr:     address,
+					Expirytime: time.Now().Add(time.Minute).Unix(),
+				}},
+			}
+			guestSSH := &readinessGuestSSH{}
+			provider := &libvirtRPCProvider{
+				config: LibvirtConfig{
+					URI:           "test:///system",
+					PoolPath:      poolPath,
+					NetworkName:   network,
+					NetworkCIDR:   "10.240.0.0/20",
+					SSHUser:       "core",
+					SSHPort:       22,
+					DockerCommand: "docker",
+				},
+				client:      runner,
+				network:     libvirt.Network{Name: network},
+				ownerPrefix: libvirtOwnerPrefix("test:///system", "test-pool", "readiness-test"),
+				guestSSH:    guestSSH,
+			}
+			instance := vmInstance{
+				Name:       provider.ownerPrefix + "-20260731120000-abcdef",
+				Address:    address,
+				MACAddress: macAddress,
+			}
+			runner.domainName = instance.Name
+			test.mutate(runner, &instance)
+			err := provider.CheckReady(context.Background(), instance)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("CheckReady error = %v, want containing %q", err, test.want)
+			}
+			if guestSSH.calls != 0 {
+				t.Fatalf("network identity failure attempted SSH %d times", guestSSH.calls)
+			}
+		})
 	}
 }
 
@@ -765,12 +889,56 @@ func TestProviderOwnershipAndAddressParsingAreStrict(t *testing.T) {
 			t.Fatalf("provider accepted unmanaged name %q", candidate)
 		}
 	}
-	if address := preferredLibvirtIPAddress([]string{"127.0.0.1", "fe80::1", "192.0.2.44"}); address != "192.0.2.44" {
-		t.Fatalf("parsed address = %q", address)
-	}
 	if !pathWithinDirectory("/var/lib/libvirt/images", "/var/lib/libvirt/images/vm.qcow2") ||
 		pathWithinDirectory("/var/lib/libvirt/images", "/var/lib/libvirt/images-other/vm.qcow2") {
 		t.Fatal("storage path containment check is incorrect")
+	}
+}
+
+func TestLibvirtAddressSelectionRequiresMACLeaseAndRunnerNetwork(t *testing.T) {
+	const macAddress = "52:54:00:01:02:03"
+	addressRange, err := newLibvirtDHCPAddressRange("10.240.0.0/20", "gitone-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, err := libvirtInterfaceIPAddress([]libvirt.DomainInterface{
+		{
+			Hwaddr: libvirt.OptString{"52:54:00:04:05:06"},
+			Addrs:  []libvirt.DomainIPAddr{{Addr: "10.240.0.20"}},
+		},
+		{
+			Hwaddr: libvirt.OptString{macAddress},
+			Addrs: []libvirt.DomainIPAddr{
+				{Addr: "127.0.0.1"},
+				{Addr: "10.250.0.20"},
+				{Addr: "10.240.0.21"},
+			},
+		},
+	}, macAddress, addressRange)
+	if err != nil || address != "10.240.0.21" {
+		t.Fatalf("domain interface address = %q, err = %v", address, err)
+	}
+
+	now := time.Now()
+	address, err = libvirtLeaseIPAddress([]libvirt.NetworkDhcpLease{
+		{
+			Mac:        libvirt.OptString{macAddress},
+			Ipaddr:     "10.240.0.22",
+			Expirytime: now.Add(-time.Minute).Unix(),
+		},
+		{
+			Mac:        libvirt.OptString{"52:54:00:04:05:06"},
+			Ipaddr:     "10.240.0.23",
+			Expirytime: now.Add(time.Minute).Unix(),
+		},
+		{
+			Mac:        libvirt.OptString{macAddress},
+			Ipaddr:     "10.240.0.24",
+			Expirytime: now.Add(time.Minute).Unix(),
+		},
+	}, macAddress, addressRange, now)
+	if err != nil || address != "10.240.0.24" {
+		t.Fatalf("DHCP lease address = %q, err = %v", address, err)
 	}
 }
 

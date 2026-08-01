@@ -47,6 +47,11 @@ type fakeLibvirtRPCClient struct {
 	volumeExists      bool
 	domainDescription string
 	domainDiskPath    string
+	domainMACAddress  string
+	domainNetworkName string
+	domainInterfaces  []libvirt.DomainInterface
+	dhcpLeases        []libvirt.NetworkDhcpLease
+	requestedDHCPMAC  string
 	destroyFlags      []libvirt.DomainDestroyFlagsValues
 	state             string
 	disconnected      bool
@@ -117,12 +122,26 @@ func (f *fakeLibvirtRPCClient) DomainDefineXML(contents string) (libvirt.Domain,
 		return libvirt.Domain{}, err
 	}
 	var description struct {
-		Name string `xml:"name"`
+		Name    string `xml:"name"`
+		Devices struct {
+			Interfaces []struct {
+				MAC struct {
+					Address string `xml:"address,attr"`
+				} `xml:"mac"`
+				Source struct {
+					Network string `xml:"network,attr"`
+				} `xml:"source"`
+			} `xml:"interface"`
+		} `xml:"devices"`
 	}
 	if err := xml.Unmarshal([]byte(contents), &description); err != nil {
 		return libvirt.Domain{}, err
 	}
 	f.domainName = description.Name
+	if len(description.Devices.Interfaces) == 1 {
+		f.domainMACAddress = description.Devices.Interfaces[0].MAC.Address
+		f.domainNetworkName = description.Devices.Interfaces[0].Source.Network
+	}
 	f.domainExists = true
 	return libvirt.Domain{Name: description.Name}, nil
 }
@@ -172,10 +191,19 @@ func (f *fakeLibvirtRPCClient) DomainGetXMLDesc(
 	if diskPath == "" {
 		diskPath = filepath.Join(f.poolPath, domain.Name+".qcow2")
 	}
+	interfaceXML := ""
+	if f.domainMACAddress != "" || f.domainNetworkName != "" {
+		interfaceXML = fmt.Sprintf(
+			"<interface type='network'><mac address='%s'/><source network='%s'/></interface>",
+			f.domainMACAddress,
+			f.domainNetworkName,
+		)
+	}
 	return fmt.Sprintf(
-		"<domain><description>%s</description><devices><disk device='disk'><source file='%s'/></disk></devices></domain>",
+		"<domain><description>%s</description><devices><disk device='disk'><source file='%s'/></disk>%s</devices></domain>",
 		description,
 		diskPath,
+		interfaceXML,
 	), nil
 }
 
@@ -187,7 +215,7 @@ func (f *fakeLibvirtRPCClient) DomainInterfaceAddresses(
 	if err := f.record("domifaddr"); err != nil {
 		return nil, err
 	}
-	return nil, nil
+	return append([]libvirt.DomainInterface(nil), f.domainInterfaces...), nil
 }
 
 func (f *fakeLibvirtRPCClient) DomainDestroyFlags(
@@ -285,14 +313,18 @@ func (f *fakeLibvirtRPCClient) NetworkSetAutostart(_ libvirt.Network, _ int32) e
 
 func (f *fakeLibvirtRPCClient) NetworkGetDhcpLeases(
 	_ libvirt.Network,
-	_ libvirt.OptString,
+	mac libvirt.OptString,
 	_ int32,
 	_ uint32,
 ) ([]libvirt.NetworkDhcpLease, uint32, error) {
 	if err := f.record("net-dhcp-leases"); err != nil {
 		return nil, 0, err
 	}
-	return nil, 0, nil
+	if len(mac) == 1 {
+		f.requestedDHCPMAC = mac[0]
+	}
+	leases := append([]libvirt.NetworkDhcpLease(nil), f.dhcpLeases...)
+	return leases, uint32(len(leases)), nil
 }
 
 func (f *fakeLibvirtRPCClient) StoragePoolLookupByName(name string) (libvirt.StoragePool, error) {

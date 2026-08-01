@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -69,6 +70,9 @@ type libvirtOwnedDomainDescription struct {
 			MAC struct {
 				Address string `xml:"address,attr"`
 			} `xml:"mac"`
+			Source struct {
+				Network string `xml:"network,attr"`
+			} `xml:"source"`
 		} `xml:"interface"`
 	} `xml:"devices"`
 }
@@ -934,6 +938,18 @@ func (p *libvirtRPCProvider) CheckReady(ctx context.Context, instance vmInstance
 	if libvirt.DomainState(state) != libvirt.DomainRunning {
 		return fmt.Errorf("KVM domain state is %q, not running", libvirt.DomainState(state))
 	}
+	address, err := p.discoverAddress(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("verify guest MAC, DHCP lease, and IP address: %w", err)
+	}
+	if !net.ParseIP(address).Equal(net.ParseIP(instance.Address)) {
+		return fmt.Errorf(
+			"VM address changed from %q to %q for MAC %q",
+			instance.Address,
+			address,
+			instance.MACAddress,
+		)
+	}
 	if err = p.verifyGuestReady(ctx, instance); err != nil {
 		return fmt.Errorf("verify guest SSH and Docker readiness: %w", err)
 	}
@@ -941,15 +957,27 @@ func (p *libvirtRPCProvider) CheckReady(ctx context.Context, instance vmInstance
 }
 
 func (p *libvirtRPCProvider) discoverAddress(ctx context.Context, instance vmInstance) (string, error) {
+	addressRange, err := newLibvirtDHCPAddressRange(p.config.NetworkCIDR, p.config.NetworkName)
+	if err != nil {
+		return "", err
+	}
+	if _, err = net.ParseMAC(instance.MACAddress); err != nil {
+		return "", fmt.Errorf("invalid VM MAC address %q", instance.MACAddress)
+	}
 	var domain libvirt.Domain
-	err := callLibvirtRPC(ctx, func() (lookupErr error) {
+	err = callLibvirtRPC(ctx, func() (lookupErr error) {
 		domain, lookupErr = p.client.DomainLookupByName(instance.Name)
 		return lookupErr
 	})
 	if err != nil {
 		return "", fmt.Errorf("look up KVM domain for address discovery: %w", err)
 	}
+	if err = p.verifyDomainNetworkIdentity(ctx, domain, instance); err != nil {
+		return "", err
+	}
+
 	var errs []error
+	interfaceAddresses := make(map[string]struct{})
 	for _, source := range []libvirt.DomainInterfaceAddressesSource{
 		libvirt.DomainInterfaceAddressesSrcLease,
 		libvirt.DomainInterfaceAddressesSrcAgent,
@@ -961,12 +989,26 @@ func (p *libvirtRPCProvider) discoverAddress(ctx context.Context, instance vmIns
 			return addressErr
 		})
 		if err == nil {
-			if address := libvirtInterfaceIPAddress(interfaces); address != "" {
-				return address, nil
+			address, addressErr := libvirtInterfaceIPAddress(
+				interfaces,
+				instance.MACAddress,
+				addressRange,
+			)
+			if addressErr != nil {
+				return "", addressErr
+			}
+			if address != "" {
+				interfaceAddresses[address] = struct{}{}
 			}
 		} else {
 			errs = append(errs, err)
 		}
+	}
+	if len(interfaceAddresses) > 1 {
+		return "", fmt.Errorf(
+			"domain interface sources disagree on the runner-network address for MAC %q",
+			instance.MACAddress,
+		)
 	}
 	var leases []libvirt.NetworkDhcpLease
 	err = callLibvirtRPC(ctx, func() (leaseErr error) {
@@ -979,48 +1021,177 @@ func (p *libvirtRPCProvider) discoverAddress(ctx context.Context, instance vmIns
 		return leaseErr
 	})
 	if err == nil {
-		if address := libvirtLeaseIPAddress(leases); address != "" {
+		address, addressErr := libvirtLeaseIPAddress(
+			leases,
+			instance.MACAddress,
+			addressRange,
+			time.Now(),
+		)
+		if addressErr != nil {
+			return "", addressErr
+		}
+		if address != "" {
+			if len(interfaceAddresses) > 0 {
+				if _, found := interfaceAddresses[address]; !found {
+					return "", fmt.Errorf(
+						"DHCP address %q for MAC %q does not match domain interface addresses",
+						address,
+						instance.MACAddress,
+					)
+				}
+			}
 			return address, nil
 		}
 	} else {
 		errs = append(errs, err)
 	}
-	return "", errors.Join(append([]error{errors.New("VM has no discoverable IP address")}, errs...)...)
+	return "", errors.Join(append(
+		[]error{fmt.Errorf("VM MAC %q has no active DHCP lease in the runner network", instance.MACAddress)},
+		errs...,
+	)...)
 }
 
-func libvirtInterfaceIPAddress(interfaces []libvirt.DomainInterface) string {
-	var addresses []string
+func (p *libvirtRPCProvider) verifyDomainNetworkIdentity(
+	ctx context.Context,
+	domain libvirt.Domain,
+	instance vmInstance,
+) error {
+	var contents string
+	err := callLibvirtRPC(ctx, func() (readErr error) {
+		contents, readErr = p.client.DomainGetXMLDesc(domain, 0)
+		return readErr
+	})
+	if err != nil {
+		return fmt.Errorf("read KVM domain network identity: %w", err)
+	}
+	var description libvirtOwnedDomainDescription
+	if err = xml.Unmarshal([]byte(contents), &description); err != nil {
+		return fmt.Errorf("parse KVM domain network identity: %w", err)
+	}
+	if len(description.Devices.Interfaces) != 1 {
+		return fmt.Errorf(
+			"KVM domain has %d network interfaces, want exactly one",
+			len(description.Devices.Interfaces),
+		)
+	}
+	domainInterface := description.Devices.Interfaces[0]
+	if !sameLibvirtMACAddress(domainInterface.MAC.Address, instance.MACAddress) {
+		return fmt.Errorf(
+			"KVM domain MAC %q does not match reserved MAC %q",
+			domainInterface.MAC.Address,
+			instance.MACAddress,
+		)
+	}
+	if domainInterface.Source.Network != p.config.NetworkName {
+		return fmt.Errorf(
+			"KVM domain network %q does not match runner network %q",
+			domainInterface.Source.Network,
+			p.config.NetworkName,
+		)
+	}
+	return nil
+}
+
+type libvirtDHCPAddressRange struct {
+	network *net.IPNet
+	first   uint32
+	last    uint32
+}
+
+func newLibvirtDHCPAddressRange(cidr string, networkName string) (libvirtDHCPAddressRange, error) {
+	normalizedCIDR, err := normalizeLibvirtNetworkCIDR(cidr, networkName)
+	if err != nil {
+		return libvirtDHCPAddressRange{}, err
+	}
+	template, err := libvirtNetworkTemplateForCIDR(networkName, normalizedCIDR)
+	if err != nil {
+		return libvirtDHCPAddressRange{}, err
+	}
+	_, network, err := net.ParseCIDR(normalizedCIDR)
+	if err != nil {
+		return libvirtDHCPAddressRange{}, fmt.Errorf("parse libvirt network CIDR: %w", err)
+	}
+	first := net.ParseIP(template.DHCPStart).To4()
+	last := net.ParseIP(template.DHCPEnd).To4()
+	if first == nil || last == nil {
+		return libvirtDHCPAddressRange{}, errors.New("libvirt DHCP range is not IPv4")
+	}
+	return libvirtDHCPAddressRange{
+		network: network,
+		first:   binary.BigEndian.Uint32(first),
+		last:    binary.BigEndian.Uint32(last),
+	}, nil
+}
+
+func (r libvirtDHCPAddressRange) address(field string) (string, bool) {
+	address := net.ParseIP(strings.TrimSpace(field))
+	if address == nil || !r.network.Contains(address) {
+		return "", false
+	}
+	address = address.To4()
+	if address == nil {
+		return "", false
+	}
+	value := binary.BigEndian.Uint32(address)
+	if value < r.first || value > r.last {
+		return "", false
+	}
+	return address.String(), true
+}
+
+func libvirtInterfaceIPAddress(
+	interfaces []libvirt.DomainInterface,
+	expectedMAC string,
+	addressRange libvirtDHCPAddressRange,
+) (string, error) {
+	addresses := make(map[string]struct{})
 	for _, domainInterface := range interfaces {
-		for _, address := range domainInterface.Addrs {
-			addresses = append(addresses, address.Addr)
-		}
-	}
-	return preferredLibvirtIPAddress(addresses)
-}
-
-func libvirtLeaseIPAddress(leases []libvirt.NetworkDhcpLease) string {
-	addresses := make([]string, 0, len(leases))
-	for _, lease := range leases {
-		addresses = append(addresses, lease.Ipaddr)
-	}
-	return preferredLibvirtIPAddress(addresses)
-}
-
-func preferredLibvirtIPAddress(fields []string) string {
-	var fallback string
-	for _, field := range fields {
-		address := net.ParseIP(strings.TrimSpace(field))
-		if address == nil || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() {
+		if len(domainInterface.Hwaddr) != 1 ||
+			!sameLibvirtMACAddress(domainInterface.Hwaddr[0], expectedMAC) {
 			continue
 		}
-		if address.To4() != nil {
-			return address.String()
-		}
-		if fallback == "" {
-			fallback = address.String()
+		for _, address := range domainInterface.Addrs {
+			if parsed, valid := addressRange.address(address.Addr); valid {
+				addresses[parsed] = struct{}{}
+			}
 		}
 	}
-	return fallback
+	return uniqueLibvirtIPAddress(addresses, "domain interface", expectedMAC)
+}
+
+func libvirtLeaseIPAddress(
+	leases []libvirt.NetworkDhcpLease,
+	expectedMAC string,
+	addressRange libvirtDHCPAddressRange,
+	now time.Time,
+) (string, error) {
+	addresses := make(map[string]struct{})
+	for _, lease := range leases {
+		if len(lease.Mac) != 1 || !sameLibvirtMACAddress(lease.Mac[0], expectedMAC) ||
+			lease.Expirytime <= now.Unix() {
+			continue
+		}
+		if address, valid := addressRange.address(lease.Ipaddr); valid {
+			addresses[address] = struct{}{}
+		}
+	}
+	return uniqueLibvirtIPAddress(addresses, "DHCP lease", expectedMAC)
+}
+
+func uniqueLibvirtIPAddress(addresses map[string]struct{}, source string, macAddress string) (string, error) {
+	if len(addresses) > 1 {
+		return "", fmt.Errorf("%s reported multiple runner-network addresses for MAC %q", source, macAddress)
+	}
+	for address := range addresses {
+		return address, nil
+	}
+	return "", nil
+}
+
+func sameLibvirtMACAddress(first string, second string) bool {
+	firstMAC, firstErr := net.ParseMAC(strings.TrimSpace(first))
+	secondMAC, secondErr := net.ParseMAC(strings.TrimSpace(second))
+	return firstErr == nil && secondErr == nil && firstMAC.String() == secondMAC.String()
 }
 
 func (p *libvirtRPCProvider) cleanupFailedInstance(instance vmInstance) error {

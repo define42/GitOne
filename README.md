@@ -254,13 +254,18 @@ management services. Do not co-locate sensitive services on the runner host.
 Generated domains, overlays, and Ignition files are scoped to the libvirt URI,
 storage pool, and runner ID; ownership metadata and the overlay path are
 verified before teardown. Stale resources from a previous controller
-generation are reconciled at startup. VM readiness requires both SSH
-authentication and `docker info`, not only a DHCP address. SSH authentication,
-command execution, streaming, liveness probes, and host-key pinning use the Go
-SSH library; no private identity or `known_hosts` file is written. Normal
-teardown asks libvirt to remove the one-use QEMU log. The image's configured
-non-root user can use the transferred workspace. Build containers receive
-neither the libvirt socket nor the host filesystem.
+generation are reconciled at startup. Address discovery requires the domain's
+only interface to use its reserved MAC and the configured runner network, plus
+an unexpired DHCP lease for that MAC inside the configured DHCP range. The
+domain, MAC, lease, and unchanged IP mapping are checked again before a warm VM
+is reserved. These are valuable routing checks, but they are not cryptographic
+VM identity. VM readiness additionally requires SSH authentication and
+`docker info`. SSH authentication, command execution, streaming, liveness
+probes, and host-key pinning use the Go SSH library; no private identity or
+`known_hosts` file is written. Normal teardown asks libvirt to remove the
+one-use QEMU log. The image's configured non-root user can use the transferred
+workspace. Build containers receive neither the libvirt socket nor the host
+filesystem.
 
 To run the packaged controller container, mount the libvirt socket and pool
 path at the same absolute path seen by the host daemon. No SSH-key volume is
