@@ -85,6 +85,13 @@ func TestCreateGroupAndRepository(t *testing.T) {
 	if description != "" {
 		t.Fatalf("unexpected empty repository description: %q", description)
 	}
+	stats, err := s.RepositoryStats(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats != (RepositoryStats{}) {
+		t.Fatalf("unexpected empty repository stats: %#v", stats)
+	}
 	for _, p := range []string{filepath.Join(root, "engineering", "control.git"), filepath.Join(root, "engineering", "api.git"), filepath.Join(root, "engineering", "api.lfs", "objects")} {
 		if _, e := os.Stat(p); e != nil {
 			t.Fatalf("missing %s: %v", p, e)

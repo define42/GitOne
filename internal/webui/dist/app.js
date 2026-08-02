@@ -944,7 +944,10 @@ function groupList(groups, emptyMessage = "No groups yet.", showDescriptions = t
         const title = element("span");
         title.className = "resource-title";
         const name = element("strong", group.name);
-        title.append(name, groupRoleBadge(group.role));
+        const count = element("span");
+        count.className = "count-badge group-child-count";
+        title.append(name, groupRoleBadge(group.role), count);
+        setGroupTreeChildCount(link, group.childCount, count);
         content.append(title);
         if (showDescriptions) {
             const description = element("span", group.description || "No description");
@@ -990,7 +993,8 @@ function groupTreeSpacer() {
     spacer.setAttribute("aria-hidden", "true");
     return spacer;
 }
-function groupTreeLink(href, name, kind, description, childCount, showArrow = true) {
+function groupTreeLink(href, name, kind, options = {}) {
+    const { description, childCount, showArrow = true, repository } = options;
     const link = element("a");
     link.href = href;
     link.className = "resource-link group-tree-link";
@@ -1015,6 +1019,24 @@ function groupTreeLink(href, name, kind, description, childCount, showArrow = tr
         const summary = element("span", description || "No description");
         summary.className = "resource-description";
         content.append(summary);
+        if (repository?.sha && repository.updatedAt) {
+            content.classList.add("repository-summary-content");
+            const metadata = element("span");
+            metadata.className = "repository-summary-metadata";
+            const updated = element("span", relativeTime(repository.updatedAt));
+            updated.className = "repository-summary-updated";
+            updated.title = `Last updated ${new Date(repository.updatedAt).toLocaleString()}`;
+            const details = element("span");
+            details.className = "repository-summary-details";
+            const sha = element("code", shortCommitHash(repository.sha));
+            sha.title = `Latest commit ${repository.sha}`;
+            const separator = element("span", "·");
+            separator.setAttribute("aria-hidden", "true");
+            const commitCount = element("span", `${repository.commitCount} ${repository.commitCount === 1 ? "commit" : "commits"}`);
+            details.append(sha, separator, commitCount);
+            metadata.append(updated, details);
+            content.append(metadata);
+        }
     }
     link.append(iconContainer, content);
     if (showArrow) {
@@ -1050,7 +1072,10 @@ function groupTreeItems(data) {
             item.className = "group-tree-item group-tree-repository";
             const entry = element("div");
             entry.className = "group-tree-entry";
-            const link = groupTreeLink(repositoryBrowserURL(`${data.path}/${resource.repository.name}`), resource.repository.name, "repository", resource.repository.description);
+            const link = groupTreeLink(repositoryBrowserURL(`${data.path}/${resource.repository.name}`), resource.repository.name, "repository", {
+                description: resource.repository.description,
+                repository: resource.repository,
+            });
             setGroupTreeLeafEntry(entry, link);
             item.append(entry);
             return item;
@@ -1060,7 +1085,10 @@ function groupTreeItems(data) {
         const entry = element("div");
         entry.className = "group-tree-entry";
         const subgroup = resource.subgroup;
-        const link = groupTreeLink(groupURL(subgroup.path), subgroup.name, "subgroup", undefined, subgroup.childCount, subgroup.childCount === 0);
+        const link = groupTreeLink(groupURL(subgroup.path), subgroup.name, "subgroup", {
+            childCount: subgroup.childCount,
+            showArrow: subgroup.childCount === 0,
+        });
         if (subgroup.childCount === 0) {
             setGroupTreeLeafEntry(entry, link);
             item.append(entry);
@@ -4910,7 +4938,7 @@ async function renderRepositoryBrowser(route) {
             username: "",
             role: "read",
             subgroups: [],
-            repositories: [{ name: repositoryName, description: "" }],
+            repositories: [{ name: repositoryName, description: "", commitCount: 0 }],
         })),
     ]);
     if (!route.ref) {

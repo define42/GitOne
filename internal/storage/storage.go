@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,6 +27,12 @@ import (
 )
 
 type Store struct{ Root string }
+
+type RepositoryStats struct {
+	SHA         string
+	UpdatedAt   time.Time
+	CommitCount int
+}
 
 type CreateRepositoryOptions struct {
 	InitializeReadme bool
@@ -523,6 +530,57 @@ func (s Store) RepositoryDescription(r repopath.Repository) (string, error) {
 		return "", nil
 	}
 	return metadata.Description, nil
+}
+
+// RepositoryStats returns metadata for the commit referenced by HEAD and the
+// number of commits reachable from it. Empty repositories return zero values.
+func (s Store) RepositoryStats(ctx context.Context, r repopath.Repository) (RepositoryStats, error) {
+	if err := ctx.Err(); err != nil {
+		return RepositoryStats{}, err
+	}
+	path, err := s.GitPath(r)
+	if err != nil {
+		return RepositoryStats{}, err
+	}
+	repository, err := git.PlainOpen(path)
+	if err != nil {
+		return RepositoryStats{}, err
+	}
+	head, err := repository.Head()
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return RepositoryStats{}, nil
+	}
+	if err != nil {
+		return RepositoryStats{}, err
+	}
+	commit, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		return RepositoryStats{}, err
+	}
+	iterator, err := repository.Log(&git.LogOptions{From: commit.Hash})
+	if err != nil {
+		return RepositoryStats{}, err
+	}
+	defer iterator.Close()
+
+	stats := RepositoryStats{
+		SHA:       commit.Hash.String(),
+		UpdatedAt: commit.Committer.When,
+	}
+	for {
+		if err = ctx.Err(); err != nil {
+			return RepositoryStats{}, err
+		}
+		_, nextErr := iterator.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			return RepositoryStats{}, nextErr
+		}
+		stats.CommitCount++
+	}
+	return stats, nil
 }
 
 func (s Store) createInitializedRepository(destination, name string, options CreateRepositoryOptions) error {

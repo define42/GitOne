@@ -142,8 +142,11 @@ type generatedGroupTokenSecret struct {
 }
 
 type repositorySummary struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	SHA         string     `json:"sha,omitempty"`
+	UpdatedAt   *time.Time `json:"updatedAt,omitempty"`
+	CommitCount int        `json:"commitCount"`
 }
 
 type createGroupOutput struct {
@@ -470,17 +473,28 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		return nil, huma.Error404NotFound("group not found")
 	}
 	for _, name := range current.Repositories {
-		description, descriptionErr := a.Storage.RepositoryDescription(repopath.Repository{
+		repository := repopath.Repository{
 			Groups: strings.Split(path, "/"),
 			Name:   name,
-		})
+		}
+		description, descriptionErr := a.Storage.RepositoryDescription(repository)
 		if descriptionErr != nil {
 			description = ""
 		}
-		output.Body.Repositories = append(output.Body.Repositories, repositorySummary{
+		summary := repositorySummary{
 			Name:        name,
 			Description: description,
-		})
+		}
+		stats, statsErr := a.Storage.RepositoryStats(ctx, repository)
+		if errors.Is(statsErr, context.Canceled) || errors.Is(statsErr, context.DeadlineExceeded) {
+			return nil, statsErr
+		}
+		if statsErr == nil && stats.SHA != "" {
+			summary.SHA = stats.SHA
+			summary.UpdatedAt = &stats.UpdatedAt
+			summary.CommitCount = stats.CommitCount
+		}
+		output.Body.Repositories = append(output.Body.Repositories, summary)
 	}
 	return output, nil
 }

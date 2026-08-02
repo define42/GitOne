@@ -265,7 +265,7 @@ func TestRepositoryManualBuildStartEndpoint(t *testing.T) {
 }
 
 func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
-	service, _, _ := repositoryAPIFixture(t)
+	service, _, head := repositoryAPIFixture(t)
 	ctx := context.Background()
 	if err := service.Storage.CreateGroup(
 		"engineering/platform",
@@ -323,6 +323,14 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 		group.Body.Subgroups[0].HasChildren ||
 		group.Body.Subgroups[0].ChildCount != 0 {
 		t.Fatalf("unexpected subgroup summaries: %#v", group.Body.Subgroups)
+	}
+	if len(group.Body.Repositories) != 1 ||
+		group.Body.Repositories[0].Name != "api" ||
+		group.Body.Repositories[0].SHA != head ||
+		group.Body.Repositories[0].UpdatedAt == nil ||
+		group.Body.Repositories[0].UpdatedAt.IsZero() ||
+		group.Body.Repositories[0].CommitCount != 1 {
+		t.Fatalf("unexpected repository summaries: %#v", group.Body.Repositories)
 	}
 }
 
