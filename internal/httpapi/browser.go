@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -15,10 +14,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/alecthomas/chroma/v2"
-	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
-	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
@@ -32,7 +27,6 @@ import (
 
 const (
 	maxBrowsableBlobSize     = 10 * 1024 * 1024
-	maxHighlightedBlobSize   = 1024 * 1024
 	maxEditableBlobSize      = 1024 * 1024
 	maximumCommitHistoryWalk = 10_000
 )
@@ -245,20 +239,18 @@ type repositoryTreeOutput struct {
 
 type repositoryBlobOutput struct {
 	Body struct {
-		Repository      string `json:"repository"`
-		Ref             string `json:"ref"`
-		Commit          string `json:"commit"`
-		Path            string `json:"path"`
-		Hash            string `json:"hash"`
-		Size            int64  `json:"size"`
-		Encoding        string `json:"encoding" enum:"utf-8,base64"`
-		Content         string `json:"content"`
-		Language        string `json:"language,omitempty"`
-		HighlightedHTML string `json:"highlightedHtml,omitempty"`
-		CanEdit         bool   `json:"canEdit" doc:"Whether this file and reference can be edited by the authenticated user"`
-		CanManage       bool   `json:"canManage" doc:"Whether this file can be renamed or deleted on the selected reference"`
-		LFS             bool   `json:"lfs,omitempty" doc:"Whether content was resolved from Git LFS storage"`
-		LFSOID          string `json:"lfsOid,omitempty" doc:"SHA-256 object ID for resolved Git LFS content"`
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		Commit     string `json:"commit"`
+		Path       string `json:"path"`
+		Hash       string `json:"hash"`
+		Size       int64  `json:"size"`
+		Encoding   string `json:"encoding" enum:"utf-8,base64"`
+		Content    string `json:"content"`
+		CanEdit    bool   `json:"canEdit" doc:"Whether this file and reference can be edited by the authenticated user"`
+		CanManage  bool   `json:"canManage" doc:"Whether this file can be renamed or deleted on the selected reference"`
+		LFS        bool   `json:"lfs,omitempty" doc:"Whether content was resolved from Git LFS storage"`
+		LFSOID     string `json:"lfsOid,omitempty" doc:"SHA-256 object ID for resolved Git LFS content"`
 	}
 }
 
@@ -1031,43 +1023,12 @@ func (a API) readRepositoryBlob(ctx context.Context, input *repositoryBrowserPat
 		file.Mode.IsFile() &&
 		writeErr == nil
 	if encoding == "utf-8" {
-		output.Body.HighlightedHTML, output.Body.Language = highlightRepositoryBlob(
-			cleanPath,
-			encodedContent,
-		)
 		output.Body.CanEdit = output.Body.CanManage &&
 			!isLFS &&
 			file.Blob.Size <= maxEditableBlobSize &&
 			mergeableTextMode(file.Mode)
 	}
 	return output, nil
-}
-
-func highlightRepositoryBlob(path, content string) (string, string) {
-	if len(content) > maxHighlightedBlobSize {
-		return "", ""
-	}
-	lexer := lexers.Match(path)
-	if lexer == nil || strings.EqualFold(lexer.Config().Name, "plaintext") {
-		return "", ""
-	}
-	language := lexer.Config().Name
-	iterator, err := chroma.Coalesce(lexer).Tokenise(nil, content)
-	if err != nil {
-		return "", ""
-	}
-	style := styles.Get("github-dark")
-	if style == nil {
-		style = styles.Fallback
-	}
-	formatter := chroma.RecoveringFormatter(chromahtml.New(
-		chromahtml.TabWidth(4),
-	))
-	var highlighted bytes.Buffer
-	if err = formatter.Format(&highlighted, style, iterator); err != nil {
-		return "", ""
-	}
-	return highlighted.String(), language
 }
 
 func (a API) listRepositoryCommits(ctx context.Context, input *repositoryCommitsInput) (*repositoryCommitsOutput, error) {

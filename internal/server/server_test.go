@@ -2745,27 +2745,27 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	if blob.Path != "docs/guide.txt" || blob.Encoding != "utf-8" || blob.Content != "Browse me\n" {
 		t.Fatalf("unexpected repository blob: %#v", blob)
 	}
-	var highlightedBlob struct {
-		Path            string `json:"path"`
-		Encoding        string `json:"encoding"`
-		Content         string `json:"content"`
-		Language        string `json:"language"`
-		HighlightedHTML string `json:"highlightedHtml"`
-		CanEdit         bool   `json:"canEdit"`
-		CanManage       bool   `json:"canManage"`
+	var sourceBlob struct {
+		Path      string `json:"path"`
+		Encoding  string `json:"encoding"`
+		Content   string `json:"content"`
+		CanEdit   bool   `json:"canEdit"`
+		CanManage bool   `json:"canManage"`
 	}
-	if err = json.Unmarshal(get("/api/repositories/engineering%2Fapi/blob/HEAD/server.js").Body.Bytes(), &highlightedBlob); err != nil {
+	sourceBlobResponse := get("/api/repositories/engineering%2Fapi/blob/HEAD/server.js")
+	if err = json.Unmarshal(sourceBlobResponse.Body.Bytes(), &sourceBlob); err != nil {
 		t.Fatal(err)
 	}
-	if highlightedBlob.Path != "server.js" ||
-		highlightedBlob.Encoding != "utf-8" ||
-		highlightedBlob.Content != nodeSource ||
-		highlightedBlob.Language != "JavaScript" ||
-		!strings.Contains(highlightedBlob.HighlightedHTML, "<span") ||
-		!strings.Contains(highlightedBlob.HighlightedHTML, "node:http") ||
-		highlightedBlob.CanEdit ||
-		highlightedBlob.CanManage {
-		t.Fatalf("unexpected highlighted repository blob: %#v", highlightedBlob)
+	if sourceBlob.Path != "server.js" ||
+		sourceBlob.Encoding != "utf-8" ||
+		sourceBlob.Content != nodeSource ||
+		sourceBlob.CanEdit ||
+		sourceBlob.CanManage {
+		t.Fatalf("unexpected repository source blob: %#v", sourceBlob)
+	}
+	if strings.Contains(sourceBlobResponse.Body.String(), `"language"`) ||
+		strings.Contains(sourceBlobResponse.Body.String(), `"highlightedHtml"`) {
+		t.Fatal("repository source blob unexpectedly contains server-side highlighting")
 	}
 	var blame struct {
 		Repository string `json:"repository"`
@@ -3698,9 +3698,10 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=23">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=24">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=45">`) ||
+			!strings.Contains(body, `<script src="/assets/prism.min.js?v=1"></script>`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=47">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -3867,10 +3868,10 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "marked.parse") {
 		t.Fatal("served UI does not safely render Markdown files")
 	}
-	if !strings.Contains(assetResponse.Body.String(), "content.highlightedHtml") ||
-		!strings.Contains(assetResponse.Body.String(), `ALLOWED_TAGS: ["pre", "code", "span"]`) ||
+	if !strings.Contains(assetResponse.Body.String(), "syntaxHighlightedHTML(content, path)") ||
+		!strings.Contains(assetResponse.Body.String(), "return prism.highlight(content, grammar, language)") ||
 		!strings.Contains(assetResponse.Body.String(), "highlighted-source") {
-		t.Fatal("served UI does not safely render Chroma-highlighted source files")
+		t.Fatal("served UI does not consistently render Prism-highlighted source files")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "repositoryFileAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), "content.canEdit") ||

@@ -17,6 +17,7 @@ func TestHandlerServesAssetsAndRejectsNestedAssetPaths(t *testing.T) {
 		contentType string
 	}{
 		{name: "asset", path: "/assets/app.js", status: http.StatusOK, contentType: "text/javascript"},
+		{name: "syntax highlighter", path: "/assets/prism.min.js", status: http.StatusOK, contentType: "text/javascript"},
 		{name: "empty asset", path: "/assets/", status: http.StatusNotFound},
 		{name: "nested asset", path: "/assets/nested/app.js", status: http.StatusNotFound},
 		{name: "invalid asset", path: "/assets/../index.html", status: http.StatusNotFound},

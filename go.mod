@@ -3,7 +3,6 @@ module github.com/define42/GitOne
 go 1.26.5
 
 require (
-	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/digitalocean/go-libvirt v0.0.0-20260609165003-6254771e63a8
@@ -37,7 +36,6 @@ require (
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
 	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect

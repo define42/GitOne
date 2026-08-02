@@ -1374,14 +1374,8 @@ textarea:focus {
   width: 44rem;
 }
 
-.file-create-content {
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 0.83rem;
-  line-height: 1.55;
+.file-create-content .syntax-editor-input {
   min-height: 18rem;
-  resize: vertical;
-  tab-size: 4;
-  white-space: pre;
 }
 
 .settings-dialog {
@@ -2925,20 +2919,14 @@ table {
   gap: 0;
 }
 
-.file-editor-content > textarea {
-  background: var(--code-bg);
+.file-editor-content > .syntax-editor {
   border: 0;
   border-bottom: 1px solid var(--border);
   border-radius: 0;
-  color: var(--code-text);
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 0.83rem;
-  line-height: 1.55;
+}
+
+.file-editor-content .syntax-editor-input {
   min-height: 30rem;
-  padding: 1rem;
-  resize: vertical;
-  tab-size: 4;
-  white-space: pre;
 }
 
 .file-editor-diff {
@@ -2956,9 +2944,163 @@ table {
   min-height: 30rem;
 }
 
-.file-editor-content > textarea:focus {
+.file-editor-content > .syntax-editor:focus-within {
   border-color: var(--focus);
   outline-offset: -3px;
+}
+
+.syntax-editor {
+  --syntax-editor-gutter-digits: 2;
+  --syntax-editor-gutter-width: calc(var(--syntax-editor-gutter-digits) * 1ch + 1.6rem);
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+}
+
+.syntax-editor:focus-within {
+  border-color: var(--focus);
+  outline: 3px solid color-mix(in srgb, var(--focus) 18%, transparent);
+}
+
+.syntax-editor-gutter,
+.syntax-editor-highlight,
+.syntax-editor-input {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.83rem;
+  font-weight: 400;
+  line-height: 1.55;
+  margin: 0;
+  tab-size: 4;
+  white-space: pre;
+}
+
+.syntax-editor-highlight {
+  inset: 0;
+  color: var(--code-text);
+  overflow: auto;
+  padding: 1rem 1rem 1rem calc(var(--syntax-editor-gutter-width) + 1rem);
+  pointer-events: none;
+  position: absolute;
+  scrollbar-width: none;
+  z-index: 1;
+}
+
+.syntax-editor-highlight::-webkit-scrollbar {
+  display: none;
+}
+
+.syntax-editor-highlight > code {
+  font: inherit;
+}
+
+.syntax-editor-gutter {
+  background: var(--surface-subtle);
+  border-right: 1px solid var(--code-border);
+  bottom: 0;
+  color: var(--muted);
+  left: 0;
+  overflow: hidden;
+  padding: 1rem 0.7rem 1rem 0.4rem;
+  pointer-events: none;
+  position: absolute;
+  text-align: right;
+  top: 0;
+  user-select: none;
+  width: var(--syntax-editor-gutter-width);
+  z-index: 2;
+}
+
+.syntax-editor-input {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  caret-color: var(--code-text);
+  color: var(--code-text);
+  min-height: 18rem;
+  overflow: auto;
+  padding: 1rem 1rem 1rem calc(var(--syntax-editor-gutter-width) + 1rem);
+  position: relative;
+  resize: vertical;
+  width: 100%;
+  z-index: 3;
+}
+
+.syntax-editor-ready .syntax-editor-input {
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.syntax-editor-input:focus {
+  border: 0;
+  outline: 0;
+}
+
+.syntax-editor-input::selection {
+  background: color-mix(in srgb, var(--focus) 32%, transparent);
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.token.punctuation,
+.token.operator {
+  color: var(--code-text);
+}
+
+.token.property,
+.token.tag,
+.token.constant,
+.token.symbol,
+.token.deleted,
+.token.keyword,
+.token.atrule {
+  color: color-mix(in srgb, var(--danger) 78%, var(--code-text));
+}
+
+.token.boolean,
+.token.number,
+.token.variable {
+  color: color-mix(in srgb, var(--warning-text) 78%, var(--code-text));
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  color: color-mix(in srgb, var(--accent) 76%, var(--code-text));
+}
+
+.token.function,
+.token.class-name,
+.token.regex,
+.token.important {
+  color: color-mix(in srgb, var(--focus) 76%, var(--code-text));
+}
+
+.token.entity,
+.token.url,
+.token.attr-value {
+  color: color-mix(in srgb, var(--brand-orange) 70%, var(--code-text));
+}
+
+.token.bold,
+.token.important {
+  font-weight: 700;
+}
+
+.token.italic {
+  font-style: italic;
 }
 
 .file-editor-footer {
@@ -3935,7 +4077,7 @@ table {
     justify-content: flex-start;
   }
 
-  .file-editor-content > textarea {
+  .file-editor-content .syntax-editor-input {
     min-height: 24rem;
   }
 

@@ -21,7 +21,13 @@ interface BrowserDiff {
 declare global {
   interface Window {
     Diff: BrowserDiff;
+    Prism?: BrowserPrism;
   }
+}
+
+interface BrowserPrism {
+  highlight(code: string, grammar: object, language: string): string;
+  languages: Record<string, object | undefined>;
 }
 
 interface GroupSummary {
@@ -111,8 +117,6 @@ interface RepositoryBlob {
   size: number;
   encoding: "utf-8" | "base64";
   content: string;
-  language?: string;
-  highlightedHtml?: string;
   canEdit: boolean;
   canManage: boolean;
   lfs?: boolean;
@@ -2471,13 +2475,201 @@ function roleSelect(
   return select;
 }
 
-function fieldLabel<T extends HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+function fieldLabel<T extends HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLDivElement>(
   text: string,
   field: T,
 ): HTMLLabelElement {
   const label = element("label", text);
   label.append(field);
   return label;
+}
+
+const syntaxLanguagesByExtension: Record<string, string> = {
+  bash: "bash",
+  c: "c",
+  cc: "cpp",
+  conf: "ini",
+  cpp: "cpp",
+  cs: "csharp",
+  css: "css",
+  dart: "dart",
+  diff: "diff",
+  dockerfile: "docker",
+  eex: "elixir",
+  el: "elixir",
+  erl: "erlang",
+  ex: "elixir",
+  exs: "elixir",
+  go: "go",
+  gql: "graphql",
+  graphql: "graphql",
+  groovy: "groovy",
+  h: "c",
+  hcl: "hcl",
+  hpp: "cpp",
+  htm: "markup",
+  html: "markup",
+  ini: "ini",
+  java: "java",
+  js: "javascript",
+  json: "json",
+  json5: "json5",
+  jsx: "jsx",
+  kt: "kotlin",
+  kts: "kotlin",
+  lua: "lua",
+  m: "objectivec",
+  makefile: "makefile",
+  md: "markdown",
+  mdx: "markdown",
+  mjs: "javascript",
+  mm: "objectivec",
+  nginx: "nginx",
+  patch: "diff",
+  php: "php",
+  pl: "perl",
+  pm: "perl",
+  proto: "protobuf",
+  ps1: "powershell",
+  py: "python",
+  r: "r",
+  rb: "ruby",
+  rs: "rust",
+  scala: "scala",
+  sh: "bash",
+  sql: "sql",
+  swift: "swift",
+  tf: "hcl",
+  toml: "toml",
+  ts: "typescript",
+  tsx: "tsx",
+  xml: "markup",
+  yaml: "yaml",
+  yml: "yaml",
+  zsh: "bash",
+};
+
+const syntaxLanguagesByFilename: Record<string, string> = {
+  ".bashrc": "bash",
+  ".dockerignore": "git",
+  ".editorconfig": "ini",
+  ".gitattributes": "git",
+  ".gitignore": "git",
+  ".gitmodules": "ini",
+  ".npmrc": "ini",
+  "dockerfile": "docker",
+  "gemfile": "ruby",
+  "go.mod": "go-module",
+  "go.sum": "go-module",
+  "makefile": "makefile",
+  "rakefile": "ruby",
+};
+
+function syntaxLanguageForPath(path: string): string | null {
+  const filename = path.split("/").pop()?.toLowerCase() ?? "";
+  const namedLanguage = syntaxLanguagesByFilename[filename];
+  if (namedLanguage) {
+    return namedLanguage;
+  }
+  const extension = filename.includes(".") ? filename.split(".").pop() ?? "" : filename;
+  return syntaxLanguagesByExtension[extension] ?? null;
+}
+
+const maxSyntaxHighlightedSize = 250_000;
+
+function syntaxHighlightedHTML(content: string, path: string): string | null {
+  if (content.length > maxSyntaxHighlightedSize) {
+    return null;
+  }
+  const language = syntaxLanguageForPath(path);
+  const prism = window.Prism;
+  const grammar = language ? prism?.languages[language] : undefined;
+  if (!language || !prism || !grammar) {
+    return null;
+  }
+  return prism.highlight(content, grammar, language);
+}
+
+interface SyntaxEditor {
+  container: HTMLDivElement;
+  refreshLanguage(): void;
+}
+
+function syntaxEditor(
+  textarea: HTMLTextAreaElement,
+  path: () => string,
+): SyntaxEditor {
+  const container = element("div");
+  container.className = "syntax-editor";
+  const gutter = element("pre");
+  gutter.className = "syntax-editor-gutter";
+  gutter.setAttribute("aria-hidden", "true");
+  const highlighted = element("pre");
+  highlighted.className = "syntax-editor-highlight";
+  highlighted.setAttribute("aria-hidden", "true");
+  const highlightedCode = element("code");
+  highlighted.append(highlightedCode);
+  textarea.classList.add("syntax-editor-input");
+  container.append(highlighted, gutter, textarea);
+
+  let animationFrame: number | null = null;
+  const render = (): void => {
+    animationFrame = null;
+    const value = textarea.value;
+    const lineCount = value.split("\n").length;
+    gutter.textContent = Array.from(
+      {length: lineCount},
+      (_, index) => String(index + 1),
+    ).join("\n");
+    container.style.setProperty(
+      "--syntax-editor-gutter-digits",
+      String(Math.max(2, String(lineCount).length)),
+    );
+
+    const highlightedHTML = syntaxHighlightedHTML(value, path());
+    if (highlightedHTML !== null) {
+      highlightedCode.innerHTML = highlightedHTML;
+    } else {
+      highlightedCode.textContent = value;
+    }
+    if (value === "" || value.endsWith("\n")) {
+      highlightedCode.append(document.createTextNode(" "));
+    }
+    container.classList.add("syntax-editor-ready");
+    syncScroll();
+  };
+  const scheduleRender = (): void => {
+    if (animationFrame === null) {
+      animationFrame = window.requestAnimationFrame(render);
+    }
+  };
+  const syncScroll = (): void => {
+    highlighted.scrollTop = textarea.scrollTop;
+    highlighted.scrollLeft = textarea.scrollLeft;
+    gutter.scrollTop = textarea.scrollTop;
+  };
+
+  textarea.addEventListener("input", scheduleRender);
+  textarea.addEventListener("scroll", syncScroll, {passive: true});
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab" || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    textarea.setRangeText(
+      "\t",
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      "end",
+    );
+    textarea.dispatchEvent(new Event("input", {bubbles: true}));
+  });
+  render();
+
+  return {
+    container,
+    refreshLanguage: scheduleRender,
+  };
 }
 
 function removeButton(label: string): HTMLButtonElement {
@@ -6198,7 +6390,9 @@ function repositoryFileCreator(
   contents.rows = 14;
   contents.maxLength = 1_048_576;
   contents.spellcheck = false;
-  contents.className = "file-create-content";
+  contents.setAttribute("aria-label", "File contents");
+  const contentEditor = syntaxEditor(contents, () => path.value);
+  contentEditor.container.classList.add("file-create-content");
   const message = element("input");
   message.name = "message";
   message.maxLength = 500;
@@ -6213,11 +6407,13 @@ function repositoryFileCreator(
   form.append(
     header,
     fieldLabel("File path", path),
-    fieldLabel("File contents", contents),
+    fieldLabel("File contents", contentEditor.container),
     fieldLabel("Commit message", message),
     actions,
   );
   dialog.append(form);
+
+  path.addEventListener("input", contentEditor.refreshLanguage);
 
   trigger.addEventListener("click", () => {
     dialog.showModal();
@@ -6557,17 +6753,17 @@ async function markdownPreview(content: string): Promise<HTMLElement> {
   return preview;
 }
 
-function sourcePreview(content: string, highlightedHtml?: string): HTMLElement {
-  if (highlightedHtml) {
+function sourcePreview(content: string, path: string): HTMLElement {
+  const highlightedHTML = syntaxHighlightedHTML(content, path);
+  if (highlightedHTML !== null) {
     const highlighted = element("div");
     highlighted.className = "file-content highlighted-source";
-    highlighted.innerHTML = DOMPurify.sanitize(highlightedHtml, {
-      ALLOWED_TAGS: ["pre", "code", "span"],
-      ALLOWED_ATTR: ["class", "style"],
-    });
-    if (highlighted.querySelector("pre")) {
-      return highlighted;
-    }
+    const pre = element("pre");
+    const code = element("code");
+    code.innerHTML = highlightedHTML;
+    pre.append(code);
+    highlighted.append(pre);
+    return highlighted;
   }
   const pre = element("pre");
   pre.className = "file-content";
@@ -6752,7 +6948,7 @@ async function repositoryBlobSection(
     [
       formatFileSize(content.size),
       content.lfs ? "Git LFS" : undefined,
-      content.language,
+      syntaxLanguageForPath(content.path),
       content.encoding,
       (content.lfsOid ?? content.hash).slice(0, 12),
     ].filter(Boolean).join(" · "),
@@ -6775,7 +6971,7 @@ async function repositoryBlobSection(
       return;
     }
     if (!isMarkdown) {
-      body.replaceChildren(sourcePreview(content.content, content.highlightedHtml));
+      body.replaceChildren(sourcePreview(content.content, content.path));
       return;
     }
 
@@ -6792,7 +6988,7 @@ async function repositoryBlobSection(
     previewButton.setAttribute("aria-selected", "true");
     sourceButton.setAttribute("aria-selected", "false");
     const preview = await markdownPreview(content.content);
-    const source = sourcePreview(content.content, content.highlightedHtml);
+    const source = sourcePreview(content.content, content.path);
     source.hidden = true;
     const select = (showPreview: boolean): void => {
       preview.hidden = !showPreview;
@@ -6836,7 +7032,8 @@ async function repositoryBlobSection(
     textarea.value = content.content;
     textarea.spellcheck = false;
     textarea.setAttribute("aria-label", `Contents of ${content.path}`);
-    const contentLabel = fieldLabel("File contents", textarea);
+    const contentEditor = syntaxEditor(textarea, () => content.path);
+    const contentLabel = fieldLabel("File contents", contentEditor.container);
     contentLabel.className = "file-editor-content";
     const diffView = element("div");
     diffView.className = "file-editor-diff";
@@ -6938,16 +7135,6 @@ async function repositoryBlobSection(
     editTab.addEventListener("click", () => selectEditorView(true));
     diffTab.addEventListener("click", () => selectEditorView(false));
     textarea.addEventListener("input", updateSaveState);
-    textarea.addEventListener("keydown", (event) => {
-      if (event.key !== "Tab") {
-        return;
-      }
-      event.preventDefault();
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      textarea.setRangeText("\t", start, end, "end");
-      updateSaveState();
-    });
     cancel.addEventListener("click", async () => {
       diffGeneration++;
       fileActions.hidden = false;
