@@ -14,6 +14,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/issue"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/runner"
@@ -26,6 +27,7 @@ type API struct {
 	Sessions            *auth.SessionManager
 	Builds              *runner.Store
 	Reviews             *review.Store
+	Issues              *issue.Store
 	Scheduler           runner.Scheduler
 	Coordinator         *runner.Coordinator
 	RunnerToken         string
@@ -344,6 +346,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 	registerRepositoryBrowser(api, service)
 	registerBuildAPI(api, service)
 	registerReviewAPI(api, service)
+	registerIssueAPI(api, service)
 
 	return api
 }

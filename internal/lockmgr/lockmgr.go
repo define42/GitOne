@@ -195,6 +195,40 @@ func ReviewGroupRequests(root string, groups []string) []Request {
 	return requests
 }
 
+// IssueCatalogRequest guards the issue stores of one storage root. Issue lock
+// keys sort after every review lock key and before the merge lock key, so a
+// caller may acquire issue locks while holding review locks but never the
+// reverse.
+func IssueCatalogRequest(root string, mode Mode) Request {
+	return Request{Key: resourceKey("52-issue-catalog", root, "issues"), Mode: mode}
+}
+
+func IssueRepositoryRequests(
+	root string,
+	repositories []repopath.Repository,
+) []Request {
+	requests := []Request{IssueCatalogRequest(root, Shared)}
+	for _, repository := range repositories {
+		requests = append(
+			requests,
+			issueGroupAncestryRequests(root, repository.Group(), Shared)...,
+		)
+		requests = append(requests, Request{
+			Key:  resourceKey("54-issue-repository", root, repository.Full()),
+			Mode: Exclusive,
+		})
+	}
+	return requests
+}
+
+func IssueGroupRequests(root string, groups []string) []Request {
+	requests := []Request{IssueCatalogRequest(root, Shared)}
+	for _, group := range groups {
+		requests = append(requests, issueGroupAncestryRequests(root, group, Exclusive)...)
+	}
+	return requests
+}
+
 func MergeRequest(root string, repository repopath.Repository) Request {
 	return Request{
 		Key:  resourceKey("60-merge", root, repository.Full()),
@@ -229,6 +263,26 @@ func reviewGroupAncestryRequests(root, group string, terminal Mode) []Request {
 		requests = append(requests, Request{
 			Key: resourceKey(
 				"50-review-group",
+				root,
+				strings.Join(parts[:index+1], "/"),
+			),
+			Mode: mode,
+		})
+	}
+	return requests
+}
+
+func issueGroupAncestryRequests(root, group string, terminal Mode) []Request {
+	parts := strings.Split(group, "/")
+	requests := make([]Request, 0, len(parts))
+	for index := range parts {
+		mode := Shared
+		if index == len(parts)-1 {
+			mode = terminal
+		}
+		requests = append(requests, Request{
+			Key: resourceKey(
+				"53-issue-group",
 				root,
 				strings.Join(parts[:index+1], "/"),
 			),
