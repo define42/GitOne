@@ -448,6 +448,13 @@ func (p *libvirtRPCProvider) downloadFlatcarBaseImage(
 	hash := sha512.New()
 	limited := &io.LimitedReader{R: response.Body, N: maximumFlatcarBaseImageBytes + 1}
 	written, err := io.Copy(io.MultiWriter(temporary, hash), limited)
+	// A canceled HTTP request can race with the server closing its response.
+	// In that case Read may report a clean EOF instead of context.Canceled, so
+	// preserve the caller's cancellation before interpreting partial data as an
+	// integrity failure.
+	if contextErr := ctx.Err(); contextErr != nil {
+		return fmt.Errorf("write Flatcar base image: %w", contextErr)
+	}
 	if err != nil {
 		return fmt.Errorf("write Flatcar base image: %w", err)
 	}

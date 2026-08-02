@@ -25,6 +25,18 @@ type flatcarRefreshRunner struct {
 	refreshes int
 }
 
+type flatcarRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f flatcarRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type flatcarReaderFunc func([]byte) (int, error)
+
+func (f flatcarReaderFunc) Read(buffer []byte) (int, error) {
+	return f(buffer)
+}
+
 func (r *flatcarRefreshRunner) StoragePoolRefresh(libvirt.StoragePool, uint32) error {
 	r.mu.Lock()
 	r.refreshes++
@@ -415,6 +427,49 @@ func TestCanceledFlatcarDownloadCleansTemporaryFileAndReleasesLock(t *testing.T)
 	}
 	if err = releaseLibvirtFileLock(lock); err != nil {
 		t.Fatalf("release reacquired Flatcar image lock: %v", err)
+	}
+}
+
+func TestFlatcarDownloadCancellationWinsOverCleanEOF(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	partialWritten := false
+	client := &http.Client{Transport: flatcarRoundTripFunc(func(
+		request *http.Request,
+	) (*http.Response, error) {
+		body := flatcarReaderFunc(func(buffer []byte) (int, error) {
+			if !partialWritten {
+				partialWritten = true
+				return copy(buffer, "partial image"), nil
+			}
+			cancel()
+			return 0, io.EOF
+		})
+		return &http.Response{
+			Status:        "200 OK",
+			StatusCode:    http.StatusOK,
+			Header:        make(http.Header),
+			Body:          io.NopCloser(body),
+			ContentLength: -1,
+			Request:       request,
+		}, nil
+	})}
+	poolPath := t.TempDir()
+	provider := newFlatcarTestProvider(
+		poolPath,
+		"https://example.test/flatcar.img",
+		flatcarTestSHA512([]byte("complete image")),
+		client,
+		&flatcarRefreshRunner{},
+	)
+
+	err := provider.ensureFlatcarBaseImage(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled Flatcar download returned %v", err)
+	}
+	path := filepath.Join(poolPath, provider.config.BaseVolumeName)
+	if _, err = os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancelled download published an image or inspect failed: %v", err)
 	}
 }
 
