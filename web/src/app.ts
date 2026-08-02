@@ -29,7 +29,7 @@ interface GroupSummary {
   path: string;
   description: string;
   role: GroupRole;
-  hasChildren: boolean;
+  childCount: number;
 }
 
 interface GroupList {
@@ -1432,7 +1432,7 @@ function groupTreeLink(
   name: string,
   kind: "subgroup" | "repository",
   description?: string,
-  role?: GroupRole,
+  childCount?: number,
   showArrow = true,
 ): HTMLAnchorElement {
   const link = element("a");
@@ -1448,8 +1448,11 @@ function groupTreeLink(
   const type = element("span", `${kind === "subgroup" ? "Subgroup" : "Repository"}: `);
   type.className = "sr-only";
   title.append(type, element("strong", name));
-  if (role) {
-    title.append(groupRoleBadge(role));
+  if (kind === "subgroup" && childCount !== undefined) {
+    const count = element("span");
+    count.className = "count-badge group-child-count";
+    title.append(count);
+    setGroupTreeChildCount(link, childCount, count);
   }
   content.append(title);
   if (kind === "repository") {
@@ -1464,6 +1467,23 @@ function groupTreeLink(
     link.append(arrow);
   }
   return link;
+}
+
+function setGroupTreeChildCount(
+  link: HTMLAnchorElement,
+  childCount: number,
+  count = link.querySelector<HTMLElement>(".group-child-count"),
+): void {
+  if (!count) {
+    return;
+  }
+  const label = `${childCount} ${childCount === 1 ? "item" : "items"}`;
+  count.textContent = label;
+  count.title = `${label} directly inside`;
+  count.setAttribute(
+    "aria-label",
+    `${childCount} direct ${childCount === 1 ? "item" : "items"}`,
+  );
 }
 
 function setGroupTreeLeafEntry(
@@ -1508,10 +1528,10 @@ function groupTreeItems(data: GroupDetail): HTMLLIElement[] {
       subgroup.name,
       "subgroup",
       undefined,
-      subgroup.role,
-      !subgroup.hasChildren,
+      subgroup.childCount,
+      subgroup.childCount === 0,
     );
-    if (!subgroup.hasChildren) {
+    if (subgroup.childCount === 0) {
       setGroupTreeLeafEntry(entry, link);
       item.append(entry);
       return item;
@@ -1563,6 +1583,8 @@ function groupTreeItems(data: GroupDetail): HTMLLIElement[] {
           return;
         }
         const nestedItems = groupTreeItems(nested);
+        subgroup.childCount = nestedItems.length;
+        setGroupTreeChildCount(link, subgroup.childCount);
         if (nestedItems.length === 0) {
           const transferFocus = document.activeElement === toggle;
           children.remove();
@@ -6694,7 +6716,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
       data.path,
       data.description,
       pageActions,
-      [groupRoleBadge(data.role)],
+      isRootGroup ? [groupRoleBadge(data.role)] : [],
     ),
     contents,
     ...(canManageGroup

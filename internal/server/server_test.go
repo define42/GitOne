@@ -3582,6 +3582,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 			Name        string `json:"name"`
 			Path        string `json:"path"`
 			Description string `json:"description"`
+			ChildCount  int    `json:"childCount"`
 		} `json:"groups"`
 	}
 	if err := json.Unmarshal(listResponse.Body.Bytes(), &list); err != nil {
@@ -3589,7 +3590,8 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 	}
 	if len(list.Groups) != 1 ||
 		list.Groups[0].Path != "engineering" ||
-		list.Groups[0].Description != "Product engineering" {
+		list.Groups[0].Description != "Product engineering" ||
+		list.Groups[0].ChildCount != 2 {
 		t.Fatalf("unexpected top-level groups: %#v", list.Groups)
 	}
 
@@ -3606,6 +3608,8 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 		Subgroups   []struct {
 			Path        string `json:"path"`
 			Description string `json:"description"`
+			HasChildren bool   `json:"hasChildren"`
+			ChildCount  int    `json:"childCount"`
 		} `json:"subgroups"`
 		Repositories []struct {
 			Name        string `json:"name"`
@@ -3620,6 +3624,8 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 		parent.Username != "alice" ||
 		parent.Subgroups[0].Path != "engineering/backend" ||
 		parent.Subgroups[0].Description != "" ||
+		!parent.Subgroups[0].HasChildren ||
+		parent.Subgroups[0].ChildCount != 1 ||
 		len(parent.Repositories) != 1 ||
 		parent.Repositories[0].Name != "web" ||
 		parent.Repositories[0].Description != "Engineering web portal" {
@@ -3692,9 +3698,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=20">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=21">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=42">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=43">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -3793,6 +3799,7 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	if !strings.Contains(stylesResponse.Body.String(), ".group-tree-entry") ||
 		!strings.Contains(stylesResponse.Body.String(), ".group-tree-toggle") ||
 		!strings.Contains(stylesResponse.Body.String(), ".group-tree-children") ||
+		!strings.Contains(stylesResponse.Body.String(), ".group-child-count") ||
 		!strings.Contains(stylesResponse.Body.String(), `transform: rotate(90deg)`) {
 		t.Fatal("theme styles do not present the expandable group hierarchy")
 	}
@@ -3954,6 +3961,10 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), `toggle.className = "group-tree-toggle"`) ||
 		!strings.Contains(assetResponse.Body.String(), `type.className = "sr-only"`) ||
 		!strings.Contains(assetResponse.Body.String(), `status.setAttribute("role", "status")`) ||
+		!strings.Contains(assetResponse.Body.String(), `count.className = "count-badge group-child-count"`) ||
+		!strings.Contains(assetResponse.Body.String(), `subgroup.childCount`) ||
+		!strings.Contains(assetResponse.Body.String(), `isRootGroup ? [groupRoleBadge(data.role)] : []`) ||
+		strings.Contains(assetResponse.Body.String(), `subgroup.role`) ||
 		strings.Contains(assetResponse.Body.String(), `sectionHeading("Subgroups",`) ||
 		strings.Contains(assetResponse.Body.String(), `sectionHeading("Repositories",`) {
 		t.Fatal("served UI does not combine subgroups and repositories in an expandable hierarchy")

@@ -49,6 +49,7 @@ type groupSummary struct {
 	Description string       `json:"description"`
 	Role        control.Role `json:"role"`
 	HasChildren bool         `json:"hasChildren"`
+	ChildCount  int          `json:"childCount"`
 }
 
 type listGroupsInput struct {
@@ -355,7 +356,7 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 	if listErr != nil {
 		return nil, huma.Error500InternalServerError("could not list groups", listErr)
 	}
-	childBearing := childBearingGroups(groups)
+	childCounts := directChildCounts(groups)
 
 	output := &listGroupsOutput{}
 	output.Body.Groups = []groupSummary{}
@@ -389,12 +390,14 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 		if document, loadErr := a.Resolver.Controls.Load(ctx, group.Path); loadErr == nil {
 			description = document.Description
 		}
+		childCount := childCounts[group.Path]
 		output.Body.Groups = append(output.Body.Groups, groupSummary{
 			Name:        group.Path,
 			Path:        group.Path,
 			Description: description,
 			Role:        principal.Role,
-			HasChildren: childBearing[group.Path],
+			HasChildren: childCount > 0,
+			ChildCount:  childCount,
 		})
 	}
 	if !authenticated {
@@ -416,7 +419,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	if listErr != nil {
 		return nil, huma.Error500InternalServerError("could not list groups", listErr)
 	}
-	childBearing := childBearingGroups(groups)
+	childCounts := directChildCounts(groups)
 
 	var current *storage.GroupInfo
 	output := &groupDetailOutput{}
@@ -453,12 +456,14 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		if authErr != nil {
 			continue
 		}
+		childCount := childCounts[group.Path]
 		output.Body.Subgroups = append(output.Body.Subgroups, groupSummary{
 			Name:        name,
 			Path:        group.Path,
 			Description: "",
 			Role:        subgroupPrincipal.Role,
-			HasChildren: childBearing[group.Path],
+			HasChildren: childCount > 0,
+			ChildCount:  childCount,
 		})
 	}
 	if current == nil {
@@ -480,17 +485,15 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	return output, nil
 }
 
-func childBearingGroups(groups []storage.GroupInfo) map[string]bool {
-	childBearing := make(map[string]bool, len(groups))
+func directChildCounts(groups []storage.GroupInfo) map[string]int {
+	childCounts := make(map[string]int, len(groups))
 	for _, group := range groups {
-		if len(group.Repositories) > 0 {
-			childBearing[group.Path] = true
-		}
+		childCounts[group.Path] += len(group.Repositories)
 		if parent := parentGroup(group.Path); parent != "" {
-			childBearing[parent] = true
+			childCounts[parent]++
 		}
 	}
-	return childBearing
+	return childCounts
 }
 
 func (a API) getGroupSettings(ctx context.Context, input *GroupPathInput) (*groupSettingsOutput, error) {

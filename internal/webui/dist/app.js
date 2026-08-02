@@ -881,7 +881,7 @@ function groupTreeSpacer() {
     spacer.setAttribute("aria-hidden", "true");
     return spacer;
 }
-function groupTreeLink(href, name, kind, description, role, showArrow = true) {
+function groupTreeLink(href, name, kind, description, childCount, showArrow = true) {
     const link = element("a");
     link.href = href;
     link.className = "resource-link group-tree-link";
@@ -895,8 +895,11 @@ function groupTreeLink(href, name, kind, description, role, showArrow = true) {
     const type = element("span", `${kind === "subgroup" ? "Subgroup" : "Repository"}: `);
     type.className = "sr-only";
     title.append(type, element("strong", name));
-    if (role) {
-        title.append(groupRoleBadge(role));
+    if (kind === "subgroup" && childCount !== undefined) {
+        const count = element("span");
+        count.className = "count-badge group-child-count";
+        title.append(count);
+        setGroupTreeChildCount(link, childCount, count);
     }
     content.append(title);
     if (kind === "repository") {
@@ -911,6 +914,15 @@ function groupTreeLink(href, name, kind, description, role, showArrow = true) {
         link.append(arrow);
     }
     return link;
+}
+function setGroupTreeChildCount(link, childCount, count = link.querySelector(".group-child-count")) {
+    if (!count) {
+        return;
+    }
+    const label = `${childCount} ${childCount === 1 ? "item" : "items"}`;
+    count.textContent = label;
+    count.title = `${label} directly inside`;
+    count.setAttribute("aria-label", `${childCount} direct ${childCount === 1 ? "item" : "items"}`);
 }
 function setGroupTreeLeafEntry(entry, link) {
     if (!link.querySelector(".resource-arrow")) {
@@ -939,8 +951,8 @@ function groupTreeItems(data) {
         const entry = element("div");
         entry.className = "group-tree-entry";
         const subgroup = resource.subgroup;
-        const link = groupTreeLink(groupURL(subgroup.path), subgroup.name, "subgroup", undefined, subgroup.role, !subgroup.hasChildren);
-        if (!subgroup.hasChildren) {
+        const link = groupTreeLink(groupURL(subgroup.path), subgroup.name, "subgroup", undefined, subgroup.childCount, subgroup.childCount === 0);
+        if (subgroup.childCount === 0) {
             setGroupTreeLeafEntry(entry, link);
             item.append(entry);
             return item;
@@ -989,6 +1001,8 @@ function groupTreeItems(data) {
                     return;
                 }
                 const nestedItems = groupTreeItems(nested);
+                subgroup.childCount = nestedItems.length;
+                setGroupTreeChildCount(link, subgroup.childCount);
                 if (nestedItems.length === 0) {
                     const transferFocus = document.activeElement === toggle;
                     children.remove();
@@ -5158,7 +5172,7 @@ async function renderGroup(path, message) {
             ]
             : []),
     ];
-    app.append(pageHeader("Group", data.path, data.description, pageActions, [groupRoleBadge(data.role)]), contents, ...(canManageGroup
+    app.append(pageHeader("Group", data.path, data.description, pageActions, isRootGroup ? [groupRoleBadge(data.role)] : []), contents, ...(canManageGroup
         ? [
             danger,
             createSubgroup.dialog,

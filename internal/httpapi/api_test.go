@@ -303,7 +303,8 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 		groups.Body.Groups[0].Path != "engineering" ||
 		groups.Body.Groups[0].Description != "Engineering services" ||
 		groups.Body.Groups[0].Role != control.RoleDeveloper ||
-		!groups.Body.Groups[0].HasChildren {
+		!groups.Body.Groups[0].HasChildren ||
+		groups.Body.Groups[0].ChildCount != 2 {
 		t.Fatalf("unexpected group summaries: %#v", groups.Body.Groups)
 	}
 
@@ -319,28 +320,40 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 		group.Body.Subgroups[0].Path != "engineering/platform" ||
 		group.Body.Subgroups[0].Description != "" ||
 		group.Body.Subgroups[0].Role != control.RoleDeveloper ||
-		group.Body.Subgroups[0].HasChildren {
+		group.Body.Subgroups[0].HasChildren ||
+		group.Body.Subgroups[0].ChildCount != 0 {
 		t.Fatalf("unexpected subgroup summaries: %#v", group.Body.Subgroups)
 	}
 }
 
-func TestChildBearingGroupsIncludesRepositoriesAndSubgroups(t *testing.T) {
+func TestDirectChildCountsIncludesOnlyImmediateRepositoriesAndSubgroups(t *testing.T) {
 	groups := []storage.GroupInfo{
 		{Path: "repository-parent", Repositories: []string{"api"}},
 		{Path: "subgroup-parent"},
 		{Path: "subgroup-parent/child"},
+		{Path: "mixed", Repositories: []string{"api", "web"}},
+		{Path: "mixed/child", Repositories: []string{"worker"}},
+		{Path: "mixed/child/grandchild"},
 		{Path: "empty"},
 	}
-	childBearing := childBearingGroups(groups)
-	if !childBearing["repository-parent"] || !childBearing["subgroup-parent"] {
-		t.Fatalf("groups with children were not detected: %#v", childBearing)
+	counts := directChildCounts(groups)
+	want := map[string]int{
+		"repository-parent":      1,
+		"subgroup-parent":        1,
+		"subgroup-parent/child":  0,
+		"mixed":                  3,
+		"mixed/child":            2,
+		"mixed/child/grandchild": 0,
+		"empty":                  0,
 	}
-	if childBearing["subgroup-parent/child"] || childBearing["empty"] {
-		t.Fatalf("empty groups were reported as having children: %#v", childBearing)
+	for group, count := range want {
+		if counts[group] != count {
+			t.Fatalf("direct child count for %q = %d, want %d (%#v)", group, counts[group], count, counts)
+		}
 	}
 }
 
-func TestGroupSummariesReportChildBearingSubgroups(t *testing.T) {
+func TestGroupSummariesReportDirectChildCounts(t *testing.T) {
 	service, credentials, _ := repositoryAPIFixture(t)
 	for _, group := range []string{
 		"engineering/repository-parent",
@@ -369,17 +382,20 @@ func TestGroupSummariesReportChildBearingSubgroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	childBearing := make(map[string]bool, len(group.Body.Subgroups))
+	childCounts := make(map[string]int, len(group.Body.Subgroups))
 	for _, subgroup := range group.Body.Subgroups {
-		childBearing[subgroup.Name] = subgroup.HasChildren
+		if subgroup.HasChildren != (subgroup.ChildCount > 0) {
+			t.Fatalf("inconsistent child summary: %#v", subgroup)
+		}
+		childCounts[subgroup.Name] = subgroup.ChildCount
 	}
-	want := map[string]bool{
-		"repository-parent": true,
-		"subgroup-parent":   true,
-		"empty":             false,
+	want := map[string]int{
+		"repository-parent": 1,
+		"subgroup-parent":   1,
+		"empty":             0,
 	}
-	if !maps.Equal(childBearing, want) {
-		t.Fatalf("subgroup child markers = %#v, want %#v", childBearing, want)
+	if !maps.Equal(childCounts, want) {
+		t.Fatalf("subgroup child counts = %#v, want %#v", childCounts, want)
 	}
 }
 
