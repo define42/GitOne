@@ -208,11 +208,11 @@ func (s Store) stageRepositoryArchive(
 }
 
 func (s Store) prepareImportDestination(r repopath.Repository) (importDestination, error) {
-	groupPath, err := s.GroupPath(r.Group())
+	exists, err := s.groupExists(r.Group())
 	if err != nil {
 		return importDestination{}, err
 	}
-	if _, err = os.Stat(filepath.Join(groupPath, "control.git")); err != nil {
+	if !exists {
 		return importDestination{}, errors.New("group does not exist")
 	}
 	gitPath, err := s.GitPath(r)

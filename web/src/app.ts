@@ -1236,6 +1236,104 @@ function groupDeleteControl(groupPath: string, empty: boolean): HTMLElement {
   return section;
 }
 
+function subgroupRenameControl(
+  groupPath: string,
+): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
+  const parts = groupPath.split("/");
+  const currentName = parts.pop() ?? groupPath;
+  const parentPath = parts.join("/");
+  const trigger = actionButton("Rename", "pencil", "secondary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog";
+  const form = element("form");
+  form.className = "dialog-form";
+
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", "Rename subgroup");
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+
+  const name = element("input");
+  name.name = "name";
+  name.required = true;
+  name.maxLength = 100;
+  name.autocomplete = "off";
+  name.spellcheck = false;
+  const actions = element("div");
+  actions.className = "dialog-actions";
+  const cancel = actionButton("Cancel", undefined, "secondary");
+  const submit = actionButton("Rename subgroup", "pencil", "primary");
+  submit.type = "submit";
+  actions.append(cancel, submit);
+  form.append(header, fieldLabel("New subgroup name", name), actions);
+  dialog.append(form);
+
+  trigger.addEventListener("click", () => {
+    name.value = currentName;
+    name.setCustomValidity("");
+    dialog.showModal();
+    name.select();
+  });
+  close.addEventListener("click", () => dialog.close());
+  cancel.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+  name.addEventListener("input", () => name.setCustomValidity(""));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const renamedName = name.value.trim();
+    if (!renamedName || renamedName.includes("/")) {
+      name.setCustomValidity("Subgroup name must be one path segment.");
+      name.reportValidity();
+      return;
+    }
+    if (renamedName === currentName) {
+      name.setCustomValidity("Enter a different subgroup name.");
+      name.reportValidity();
+      return;
+    }
+
+    const renamedPath = `${parentPath}/${renamedName}`;
+    submit.disabled = true;
+    cancel.disabled = true;
+    close.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    try {
+      await request<void>(apiGroupURL(groupPath), {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({newPath: renamedPath}),
+      });
+      dialog.close();
+      window.history.replaceState({}, "", groupURL(renamedPath));
+      await renderGroup(renamedPath, "Subgroup renamed.");
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "Could not rename the subgroup.",
+        true,
+      );
+      submit.disabled = false;
+      cancel.disabled = false;
+      close.disabled = false;
+      form.removeAttribute("aria-busy");
+      name.focus();
+    }
+  });
+
+  return {trigger, dialog};
+}
+
 function emptyState(message: string): HTMLElement {
   const empty = element("div");
   empty.className = "empty-state";
@@ -1251,7 +1349,11 @@ function groupRoleBadge(role: GroupRole): HTMLElement {
   return badge;
 }
 
-function groupList(groups: GroupSummary[], emptyMessage = "No groups yet."): HTMLElement {
+function groupList(
+  groups: GroupSummary[],
+  emptyMessage = "No groups yet.",
+  showDescriptions = true,
+): HTMLElement {
   if (groups.length === 0) {
     return emptyState(emptyMessage);
   }
@@ -1271,9 +1373,12 @@ function groupList(groups: GroupSummary[], emptyMessage = "No groups yet."): HTM
     title.className = "resource-title";
     const name = element("strong", group.name);
     title.append(name, groupRoleBadge(group.role));
-    const description = element("span", group.description || "No description");
-    description.className = "resource-description";
-    content.append(title, description);
+    content.append(title);
+    if (showDescriptions) {
+      const description = element("span", group.description || "No description");
+      description.className = "resource-description";
+      content.append(description);
+    }
     const arrow = icon("chevron-right");
     arrow.classList.add("resource-arrow");
     link.append(iconContainer, content, arrow);
@@ -1890,21 +1995,11 @@ function groupSettingsControl(
   const description = element("textarea");
   description.rows = 4;
   description.value = settings.description;
-  const inherit = element("input");
-  inherit.type = "checkbox";
-  inherit.checked = settings.inherit;
-  const inheritLabel = element("label");
-  inheritLabel.className = "checkbox-label settings-checkbox";
-  inheritLabel.append(
-    inherit,
-    document.createTextNode("Inherit access from the parent group"),
-  );
   generalGrid.append(
     fieldLabel("Group name", name),
     fieldLabel("Current path", currentPath),
     fieldLabel("Control version", version),
     fieldLabel("Description", description),
-    inheritLabel,
   );
   generalPanel.append(generalGrid);
 
@@ -2241,7 +2336,7 @@ function groupSettingsControl(
           body: JSON.stringify({
             name: name.value.trim(),
             description: description.value,
-            inherit: inherit.checked,
+            inherit: settings.inherit,
             visibility: visibility.value,
             lfs: {
               enabled: lfsEnabled.checked,
@@ -6266,27 +6361,23 @@ async function renderGroup(path: string, message?: string): Promise<void> {
   stopRepositoryBuildPolling();
   setGroupLocation(path);
   const data = await request<GroupDetail>(apiGroupURL(path));
+  const isRootGroup = !data.path.includes("/");
   const canManageGroup = data.role === "maintainer" || data.role === "owner";
-  const controlSettings = canManageGroup
+  const controlSettings = canManageGroup && isRootGroup
     ? await request<GroupControlSettings>(groupSettingsAPIURL(path)).catch(() => null)
     : null;
   document.title = `${data.path} · GitOne`;
   app.replaceChildren();
 
-  const subgroupDescription = descriptionField();
   const createSubgroup = createForm(
     "New subgroup",
     "Subgroup name",
     "backend",
     "New subgroup",
     async (name) => {
-      await request(
-        `${apiGroupURL(`${data.path}/${name}`)}?description=${encodeURIComponent(subgroupDescription.input.value)}`,
-        {method: "POST"},
-      );
+      await request(apiGroupURL(`${data.path}/${name}`), {method: "POST"});
       await renderGroup(data.path, "Subgroup created.");
     },
-    [subgroupDescription.label],
   );
 
   const initializeReadme = element("input");
@@ -6321,12 +6412,15 @@ async function renderGroup(path: string, message?: string): Promise<void> {
   const settingsControl = controlSettings
     ? groupSettingsControl(data.path, controlSettings, data.role)
     : null;
+  const renameControl = canManageGroup && !isRootGroup
+    ? subgroupRenameControl(data.path)
+    : null;
 
   const subgroups = element("section");
   subgroups.className = "content-section";
   subgroups.append(
     sectionHeading("Subgroups", data.subgroups.length),
-    groupList(data.subgroups, "No subgroups yet."),
+    groupList(data.subgroups, "No subgroups yet.", false),
   );
 
   const repositories = element("section");
@@ -6391,6 +6485,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
 
   const pageActions = [
     ...(settingsControl ? [settingsControl.trigger] : []),
+    ...(renameControl ? [renameControl.trigger] : []),
     ...(canManageGroup
       ? [
         createSubgroup.trigger,
@@ -6419,6 +6514,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
       ]
       : []),
     ...(settingsControl ? [settingsControl.dialog] : []),
+    ...(renameControl ? [renameControl.dialog] : []),
   );
   if (message) {
     showStatus(message);

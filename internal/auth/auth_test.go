@@ -132,7 +132,7 @@ func TestGenerateTokenSecretReturns32RandomURLSafeCharacters(t *testing.T) {
 	}
 }
 
-func TestResolverUsesLDAPIdentityAndTokenKeys(t *testing.T) {
+func TestResolverUsesRootMemberAndTokenRolesForDeepGroups(t *testing.T) {
 	root := t.TempDir()
 	store := storage.Store{Root: root}
 	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
@@ -143,6 +143,7 @@ func TestResolverUsesLDAPIdentityAndTokenKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	document.Inherit = false
 	tokenHash, err := auth.HashSecret("ci-secret")
 	if err != nil {
 		t.Fatal(err)
@@ -166,53 +167,66 @@ func TestResolverUsesLDAPIdentityAndTokenKeys(t *testing.T) {
 			canonical: "bob",
 		},
 	}
+	deepGroup := "engineering/backend/platform"
 
-	if _, err = resolver.Authenticate(context.Background(), "engineering", "bob-login", "wrong"); err == nil {
+	if _, err = resolver.Authenticate(context.Background(), deepGroup, "bob-login", "wrong"); err == nil {
 		t.Fatal("member authenticated with an invalid LDAP password")
 	}
 	principal, err := resolver.Authenticate(
 		context.Background(),
-		"engineering",
+		deepGroup,
 		"bob-login",
 		"bob-secret",
 	)
 	if err != nil {
 		t.Fatalf("LDAP member did not authenticate: %v", err)
 	}
-	if principal.Name != "bob" || principal.Role != control.RoleRead {
+	if principal.Name != "bob" || principal.Role != control.RoleRead ||
+		principal.Group != "engineering" {
 		t.Fatalf("canonical LDAP username was not authorized: %#v", principal)
 	}
-	if _, err = resolver.Authenticate(context.Background(), "engineering", "deploy", "ci-secret"); err == nil {
+	principal, err = resolver.AuthorizeIdentity(
+		context.Background(),
+		deepGroup,
+		auth.Principal{Name: "bob"},
+	)
+	if err != nil {
+		t.Fatalf("deep session identity was not authorized: %v", err)
+	}
+	if principal.Role != control.RoleRead || principal.Group != "engineering" {
+		t.Fatalf("deep session identity did not receive the root role: %#v", principal)
+	}
+	if _, err = resolver.Authenticate(context.Background(), deepGroup, "deploy", "ci-secret"); err == nil {
 		t.Fatal("token display name was accepted as its login key")
 	}
-	principal, err = resolver.Authenticate(context.Background(), "engineering", "ci", "ci-secret")
+	principal, err = resolver.Authenticate(context.Background(), deepGroup, "ci", "ci-secret")
 	if err != nil {
-		t.Fatalf("token key did not authenticate: %v", err)
+		t.Fatalf("root token key did not authenticate for a deep group: %v", err)
 	}
 	if principal.Group != "engineering" || principal.Role != control.RoleDeveloper {
-		t.Fatalf("token did not receive its group role: %#v", principal)
+		t.Fatalf("token did not receive its root group role: %#v", principal)
 	}
 }
 
-func TestResolverFailsClosedWhenChildControlCannotBeLoaded(t *testing.T) {
+func TestResolverFailsClosedWhenRootControlCannotBeLoaded(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		disrupt func(*testing.T, string)
 	}{
 		{
 			name: "missing",
-			disrupt: func(t *testing.T, childControlPath string) {
+			disrupt: func(t *testing.T, rootControlPath string) {
 				t.Helper()
-				if err := os.RemoveAll(childControlPath); err != nil {
+				if err := os.RemoveAll(rootControlPath); err != nil {
 					t.Fatal(err)
 				}
 			},
 		},
 		{
 			name: "corrupt",
-			disrupt: func(t *testing.T, childControlPath string) {
+			disrupt: func(t *testing.T, rootControlPath string) {
 				t.Helper()
-				referencePath := filepath.Join(childControlPath, "refs", "heads", "main")
+				referencePath := filepath.Join(rootControlPath, "refs", "heads", "main")
 				if err := os.WriteFile(referencePath, []byte("not-a-git-hash\n"), 0o640); err != nil {
 					t.Fatal(err)
 				}
@@ -220,8 +234,8 @@ func TestResolverFailsClosedWhenChildControlCannotBeLoaded(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, controls := inheritedControlFixture(t, false)
-			test.disrupt(t, filepath.Join(root, "engineering", "backend", "control.git"))
+			root, controls := rootControlFixture(t)
+			test.disrupt(t, filepath.Join(root, "engineering", "control.git"))
 			controls.Invalidate("engineering/backend")
 
 			resolver := auth.Resolver{
@@ -232,18 +246,18 @@ func TestResolverFailsClosedWhenChildControlCannotBeLoaded(t *testing.T) {
 					canonical: "alice",
 				},
 			}
-			assertControlLoadDenied(t, &resolver)
+			assertRootControlLoadDenied(t, &resolver)
 		})
 	}
 }
 
-func TestResolverFailsClosedDuringTemporaryChildControlFailure(t *testing.T) {
-	_, controls := inheritedControlFixture(t, true)
+func TestResolverFailsClosedDuringTemporaryRootControlFailure(t *testing.T) {
+	_, controls := rootControlFixture(t)
 	temporaryErr := errors.New("control storage temporarily unavailable")
 	controlled := &controllableControlStore{
 		store: controls,
 		unavailable: map[string]error{
-			"engineering/backend": temporaryErr,
+			"engineering": temporaryErr,
 		},
 	}
 	resolver := auth.Resolver{
@@ -255,12 +269,12 @@ func TestResolverFailsClosedDuringTemporaryChildControlFailure(t *testing.T) {
 		},
 	}
 
-	assertControlLoadDenied(t, &resolver)
+	assertRootControlLoadDenied(t, &resolver)
 
-	delete(controlled.unavailable, "engineering/backend")
+	delete(controlled.unavailable, "engineering")
 	principal, err := resolver.Authenticate(
 		context.Background(),
-		"engineering/backend",
+		"engineering/backend/platform",
 		"alice-login",
 		"alice-secret",
 	)
@@ -273,7 +287,7 @@ func TestResolverFailsClosedDuringTemporaryChildControlFailure(t *testing.T) {
 	}
 	principal, err = resolver.AuthorizeIdentity(
 		context.Background(),
-		"engineering/backend",
+		"engineering/backend/platform",
 		auth.Principal{Name: "alice"},
 	)
 	if err != nil {
@@ -284,48 +298,36 @@ func TestResolverFailsClosedDuringTemporaryChildControlFailure(t *testing.T) {
 	}
 }
 
-func inheritedControlFixture(t *testing.T, inherit bool) (string, *control.Store) {
+func rootControlFixture(t *testing.T) (string, *control.Store) {
 	t.Helper()
 	root := t.TempDir()
 	store := storage.Store{Root: root}
 	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateGroup("engineering/backend", "bob", ""); err != nil {
-		t.Fatal(err)
-	}
 	controls := control.NewStore(root)
-	document, err := controls.Load(context.Background(), "engineering/backend")
-	if err != nil {
-		t.Fatal(err)
-	}
-	document.Inherit = inherit
-	if err = store.UpdateGroupControl("engineering/backend", document, "bob"); err != nil {
-		t.Fatal(err)
-	}
-	controls.Invalidate("engineering/backend")
 	return root, controls
 }
 
-func assertControlLoadDenied(t *testing.T, resolver *auth.Resolver) {
+func assertRootControlLoadDenied(t *testing.T, resolver *auth.Resolver) {
 	t.Helper()
 	if _, err := resolver.Authenticate(
 		context.Background(),
-		"engineering/backend",
+		"engineering/backend/platform",
 		"alice-login",
 		"alice-secret",
 	); err == nil {
-		t.Fatal("LDAP authentication accepted parent access after the child control load failed")
-	} else if !strings.Contains(err.Error(), `load group control "engineering/backend"`) {
+		t.Fatal("LDAP authentication succeeded after the root control load failed")
+	} else if !strings.Contains(err.Error(), `load root group control "engineering"`) {
 		t.Fatalf("LDAP authentication returned an unexpected error: %v", err)
 	}
 	if _, err := resolver.AuthorizeIdentity(
 		context.Background(),
-		"engineering/backend",
+		"engineering/backend/platform",
 		auth.Principal{Name: "alice"},
 	); err == nil {
-		t.Fatal("session authorization accepted parent access after the child control load failed")
-	} else if !strings.Contains(err.Error(), `load group control "engineering/backend"`) {
+		t.Fatal("session authorization succeeded after the root control load failed")
+	} else if !strings.Contains(err.Error(), `load root group control "engineering"`) {
 		t.Fatalf("session authorization returned an unexpected error: %v", err)
 	}
 }

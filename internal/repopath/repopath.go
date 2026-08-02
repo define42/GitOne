@@ -13,6 +13,21 @@ type Repository struct {
 
 func (r Repository) Group() string { return strings.Join(r.Groups, "/") }
 func (r Repository) Full() string  { return r.Group() + "/" + r.Name }
+func (r Repository) RootGroup() string {
+	if len(r.Groups) == 0 {
+		return ""
+	}
+	return r.Groups[0]
+}
+
+// RootGroup returns the top-level group that owns the settings for group.
+func RootGroup(group string) (string, error) {
+	parts, err := ParseGroup(group)
+	if err != nil {
+		return "", err
+	}
+	return parts[0], nil
+}
 
 func ParseGitRequestPath(p string) (Repository, string, error) {
 	p = strings.TrimPrefix(p, "/")

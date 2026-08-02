@@ -889,6 +889,31 @@ func TestSubgroupNeedsParent(t *testing.T) {
 	}
 }
 
+func TestRepositorySidecarsCannotBeManagedAsGroups(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repository, CreateRepositoryOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateGroup("engineering/api.git/team", "alice", ""); err == nil {
+		t.Fatal("subgroup was created inside a bare repository")
+	}
+	if err := store.RenameGroup("engineering/api.git", "engineering/moved"); err == nil {
+		t.Fatal("bare repository was renamed as a group")
+	}
+	gitPath, err := store.GitPath(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = git.PlainOpen(gitPath); err != nil {
+		t.Fatalf("rejected group operations changed the repository: %v", err)
+	}
+}
+
 func TestCreateTopLevelGroupWithRelativeRoot(t *testing.T) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
@@ -915,6 +940,24 @@ func TestListGroupsAndRepositories(t *testing.T) {
 	}
 	if err := s.CreateGroup("engineering/backend", "alice", ""); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(
+		s.Root,
+		"engineering",
+		"backend",
+		"control.git",
+	)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("subgroup control repository exists: %v", err)
+	}
+	shared, err := control.NewStore(s.Root).Load(
+		context.Background(),
+		"engineering/backend",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared.Group != "engineering" || shared.Members["alice"] != control.RoleOwner {
+		t.Fatalf("subgroup did not resolve root control: %#v", shared)
 	}
 	if err := s.CreateRepository(repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "api"}, CreateRepositoryOptions{}); err != nil {
 		t.Fatal(err)

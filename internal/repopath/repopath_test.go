@@ -14,6 +14,13 @@ func TestParseNestedRepository(t *testing.T) {
 	if r.Group() != "engineering/backend" || r.Name != "api" || s != "/git-upload-pack" {
 		t.Fatalf("unexpected: %#v %q", r, s)
 	}
+	if r.RootGroup() != "engineering" {
+		t.Fatalf("root group = %q", r.RootGroup())
+	}
+	root, err := RootGroup(r.Group())
+	if err != nil || root != "engineering" {
+		t.Fatalf("RootGroup(%q) = %q, %v", r.Group(), root, err)
+	}
 }
 
 func TestRejectRootRepository(t *testing.T) {

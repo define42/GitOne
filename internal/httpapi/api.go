@@ -152,7 +152,7 @@ type createGroupOutput struct {
 
 type createGroupInput struct {
 	GroupPathInput
-	Description string `query:"description" doc:"Group description stored in control.json"`
+	Description string `query:"description" doc:"Root-group description stored in control.json; ignored for subgroups"`
 }
 
 type renameGroupBody struct {
@@ -260,7 +260,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 		OperationID: "get-group-settings",
 		Method:      http.MethodGet,
 		Path:        "/api/groups/{path}/settings",
-		Summary:     "Get complete group control settings",
+		Summary:     "Get complete root-group control settings",
 		Tags:        []string{"Groups"},
 	}), service.getGroupSettings)
 
@@ -286,7 +286,7 @@ func Register(mux *http.ServeMux, service API) huma.API {
 		OperationID: "update-group-settings",
 		Method:      http.MethodPut,
 		Path:        "/api/groups/{path}/settings",
-		Summary:     "Update complete group control settings",
+		Summary:     "Update complete root-group control settings",
 		Tags:        []string{"Groups"},
 	}), service.updateGroupSettings)
 
@@ -363,6 +363,9 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 	}
 	authenticated := identityErr == nil
 	for _, group := range groups {
+		if strings.Contains(group.Path, "/") {
+			continue
+		}
 		var principal auth.Principal
 		var resolveErr error
 		if identityErr == nil {
@@ -377,7 +380,7 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 			continue
 		}
 		authenticated = true
-		if strings.Contains(group.Path, "/") || !principal.Role.Allows(control.RoleRead) {
+		if !principal.Role.Allows(control.RoleRead) {
 			continue
 		}
 		description := ""
@@ -416,8 +419,11 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	output.Body.Path = path
 	output.Body.Username = principal.Name
 	output.Body.Role = principal.Role
-	if document, loadErr := a.Resolver.Controls.Load(ctx, path); loadErr == nil {
-		output.Body.Description = document.Description
+	if !strings.Contains(path, "/") {
+		document, loadErr := a.Resolver.Controls.Load(ctx, path)
+		if loadErr == nil {
+			output.Body.Description = document.Description
+		}
 	}
 	output.Body.Subgroups = []groupSummary{}
 	output.Body.Repositories = []repositorySummary{}
@@ -443,14 +449,10 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		if authErr != nil {
 			continue
 		}
-		description := ""
-		if document, loadErr := a.Resolver.Controls.Load(ctx, group.Path); loadErr == nil {
-			description = document.Description
-		}
 		output.Body.Subgroups = append(output.Body.Subgroups, groupSummary{
 			Name:        name,
 			Path:        group.Path,
-			Description: description,
+			Description: "",
 			Role:        subgroupPrincipal.Role,
 		})
 	}
@@ -478,6 +480,9 @@ func (a API) getGroupSettings(ctx context.Context, input *GroupPathInput) (*grou
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
+	if strings.Contains(path, "/") {
+		return nil, huma.Error404NotFound("settings exist only for root groups")
+	}
 	if _, err = a.authorize(ctx, input.AuthInput, path, control.RoleMaintainer); err != nil {
 		return nil, err
 	}
@@ -495,6 +500,9 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 	path, err := canonicalGroup(input.Path)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
+	}
+	if strings.Contains(path, "/") {
+		return nil, huma.Error404NotFound("settings exist only for root groups")
 	}
 	name := strings.TrimSpace(input.Body.Name)
 	if name == "" || strings.Contains(name, "/") {
@@ -600,7 +608,7 @@ func (a API) updateGroupSettings(ctx context.Context, input *updateGroupSettings
 			return nil, huma.Error500InternalServerError("could not update group settings", err)
 		}
 		a.Resolver.Controls.Invalidate(path)
-	} else if err = a.renameGroupControlsLocked(ctx, path, target, document, author); err != nil {
+	} else if err = a.renameRootGroupControlLocked(ctx, path, target, document, author); err != nil {
 		return nil, huma.Error409Conflict("could not rename group", err)
 	}
 
@@ -680,100 +688,41 @@ func tokensEqual(left, right control.Token) bool {
 	return left.ExpiresAt.Equal(*right.ExpiresAt)
 }
 
-type groupControlRename struct {
-	oldPath  string
-	newPath  string
-	original control.Document
-	updated  control.Document
-}
-
-func (a API) renameGroupControls(
+func (a API) renameRootGroupControlLocked(
 	ctx context.Context,
 	path string,
 	target string,
 	current control.Document,
 	author string,
 ) error {
-	releaseOperation, err := a.acquireGroupOperationLocks(path, target)
+	if strings.Contains(path, "/") || strings.Contains(target, "/") {
+		return errors.New("only root groups have control settings")
+	}
+	original, err := a.Resolver.Controls.Load(ctx, path)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = releaseOperation()
-	}()
-	return a.renameGroupControlsLocked(ctx, path, target, current, author)
-}
-
-func (a API) renameGroupControlsLocked(
-	ctx context.Context,
-	path string,
-	target string,
-	current control.Document,
-	author string,
-) error {
-	groups, err := a.Storage.ListGroups()
-	if err != nil {
+	if err = control.Validate(target, current); err != nil {
 		return err
-	}
-	renames := make([]groupControlRename, 0)
-	for _, group := range groups {
-		if group.Path != path && !strings.HasPrefix(group.Path, path+"/") {
-			continue
-		}
-		original, loadErr := a.Resolver.Controls.Load(ctx, group.Path)
-		if loadErr != nil {
-			return loadErr
-		}
-		newPath := target + strings.TrimPrefix(group.Path, path)
-		updated := original
-		updated.Group = newPath
-		if group.Path == path {
-			updated = current
-		}
-		if validateErr := control.Validate(newPath, updated); validateErr != nil {
-			return validateErr
-		}
-		renames = append(renames, groupControlRename{
-			oldPath:  group.Path,
-			newPath:  newPath,
-			original: original,
-			updated:  updated,
-		})
-	}
-	if len(renames) == 0 {
-		return fmt.Errorf("group not found")
 	}
 	if err = a.Storage.RenameGroupLocked(path, target); err != nil {
 		return err
 	}
-	for _, rename := range renames {
-		if err = a.Storage.UpdateGroupControlLocked(rename.newPath, rename.updated, author); err != nil {
-			rollbackErr := a.Storage.RenameGroupLocked(target, path)
-			if rollbackErr == nil {
-				for _, rollback := range renames {
-					_ = a.Storage.UpdateGroupControlLocked(
-						rollback.oldPath,
-						rollback.original,
-						author,
-					)
-				}
-			}
-			a.invalidateGroupRenames(renames)
-			if rollbackErr != nil {
-				return errors.Join(err, fmt.Errorf("rollback failed: %w", rollbackErr))
-			}
-			return err
+	if err = a.Storage.UpdateGroupControlLocked(target, current, author); err != nil {
+		rollbackErr := a.Storage.RenameGroupLocked(target, path)
+		if rollbackErr == nil {
+			_ = a.Storage.UpdateGroupControlLocked(path, original, author)
 		}
+		a.Resolver.Controls.Invalidate(path)
+		a.Resolver.Controls.Invalidate(target)
+		if rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("rollback failed: %w", rollbackErr))
+		}
+		return err
 	}
-	a.invalidateGroupRenames(renames)
+	a.Resolver.Controls.Invalidate(path)
+	a.Resolver.Controls.Invalidate(target)
 	return nil
-}
-
-func (a API) invalidateGroupRenames(renames []groupControlRename) {
-	for _, rename := range renames {
-		a.Resolver.Controls.Invalidate(rename.oldPath)
-		a.Resolver.Controls.Invalidate(rename.newPath)
-	}
 }
 
 func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createGroupOutput, error) {
@@ -790,10 +739,9 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 	}()
 	a.Resolver.Controls.Invalidate(path)
 	owner := ""
-	author := ""
 	if strings.Contains(path, "/") {
 		parent := path[:strings.LastIndex(path, "/")]
-		author, err = a.authorize(ctx, input.AuthInput, parent, control.RoleMaintainer)
+		_, err = a.authorize(ctx, input.AuthInput, parent, control.RoleMaintainer)
 		if err != nil {
 			return nil, err
 		}
@@ -803,10 +751,9 @@ func (a API) createGroup(ctx context.Context, input *createGroupInput) (*createG
 			return nil, authErr
 		}
 		owner = identity.Name
-		author = owner
 	}
 	if owner == "" {
-		err = a.Storage.CreateInheritedGroupLocked(path, author, input.Description)
+		err = a.Storage.CreateSubgroupLocked(path)
 	} else {
 		err = a.Storage.CreateGroupLocked(path, owner, input.Description)
 	}
@@ -827,6 +774,13 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 	newPath, err := canonicalGroup(input.Body.NewPath)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
+	}
+	pathIsRoot := !strings.Contains(path, "/")
+	targetIsRoot := !strings.Contains(newPath, "/")
+	if pathIsRoot != targetIsRoot {
+		return nil, huma.Error400BadRequest(
+			"cannot move a root group into or out of a subgroup",
+		)
 	}
 	releaseOperation, err := a.acquireGroupOperationLocks(path, newPath)
 	if err != nil {
@@ -858,13 +812,30 @@ func (a API) renameGroup(ctx context.Context, input *renameGroupInput) (*emptyOu
 			}
 		}
 	}
-	document, err := a.Resolver.Controls.Load(ctx, path)
-	if err != nil {
-		return nil, huma.Error500InternalServerError("could not load group settings", err)
-	}
-	document.Group = newPath
-	if err = a.renameGroupControlsLocked(ctx, path, newPath, document, author); err != nil {
-		return nil, huma.Error409Conflict(err.Error())
+	if pathIsRoot {
+		document, loadErr := a.Resolver.Controls.Load(ctx, path)
+		if loadErr != nil {
+			return nil, huma.Error500InternalServerError(
+				"could not load group settings",
+				loadErr,
+			)
+		}
+		document.Group = newPath
+		if err = a.renameRootGroupControlLocked(
+			ctx,
+			path,
+			newPath,
+			document,
+			author,
+		); err != nil {
+			return nil, huma.Error409Conflict(err.Error())
+		}
+	} else {
+		if err = a.Storage.RenameGroupLocked(path, newPath); err != nil {
+			return nil, huma.Error409Conflict(err.Error())
+		}
+		a.Resolver.Controls.Invalidate(path)
+		a.Resolver.Controls.Invalidate(newPath)
 	}
 	return &emptyOutput{}, nil
 }

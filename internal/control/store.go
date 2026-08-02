@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strings"
 	"sync"
 
+	"github.com/define42/GitOne/internal/repopath"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
@@ -27,7 +27,11 @@ type cached struct {
 func NewStore(root string) *Store { return &Store{Root: root, cache: map[string]cached{}} }
 func (s *Store) Load(ctx context.Context, group string) (Document, error) {
 	_ = ctx
-	p := filepath.Join(s.Root, filepath.FromSlash(group), "control.git")
+	rootGroup, err := repopath.RootGroup(group)
+	if err != nil {
+		return Document{}, err
+	}
+	p := filepath.Join(s.Root, filepath.FromSlash(rootGroup), "control.git")
 	r, e := git.PlainOpen(p)
 	if e != nil {
 		return Document{}, e
@@ -37,17 +41,17 @@ func (s *Store) Load(ctx context.Context, group string) (Document, error) {
 		return Document{}, e
 	}
 	s.mu.RLock()
-	c, ok := s.cache[group]
+	c, ok := s.cache[rootGroup]
 	s.mu.RUnlock()
 	if ok && c.hash == ref.Hash() {
 		return c.doc.clone(), nil
 	}
-	d, e := ReadDocument(r, ref.Hash(), group)
+	d, e := ReadDocument(r, ref.Hash(), rootGroup)
 	if e != nil {
 		return Document{}, e
 	}
 	s.mu.Lock()
-	s.cache[group] = cached{ref.Hash(), d}
+	s.cache[rootGroup] = cached{ref.Hash(), d}
 	s.mu.Unlock()
 	return d.clone(), nil
 }
@@ -88,6 +92,13 @@ func ReadDocument(repository *git.Repository, hash plumbing.Hash, group string) 
 }
 
 func Validate(group string, d Document) error {
+	rootGroup, err := repopath.RootGroup(group)
+	if err != nil {
+		return err
+	}
+	if rootGroup != group {
+		return errors.New("control settings belong to root groups only")
+	}
 	if d.Version != CurrentVersion {
 		return fmt.Errorf("unsupported version %d (expected %d)", d.Version, CurrentVersion)
 	}
@@ -103,7 +114,7 @@ func Validate(group string, d Document) error {
 			return fmt.Errorf("invalid role")
 		}
 	}
-	if owners == 0 && (!strings.Contains(group, "/") || !d.Inherit) {
+	if owners == 0 {
 		return errors.New("at least one owner required")
 	}
 	return ValidateSettings(d)
@@ -112,4 +123,13 @@ func Validate(group string, d Document) error {
 func validRole(r Role) bool {
 	return r == RoleRead || r == RoleDeveloper || r == RoleMaintainer || r == RoleOwner
 }
-func (s *Store) Invalidate(group string) { s.mu.Lock(); delete(s.cache, group); s.mu.Unlock() }
+
+func (s *Store) Invalidate(group string) {
+	rootGroup, err := repopath.RootGroup(group)
+	if err != nil {
+		rootGroup = group
+	}
+	s.mu.Lock()
+	delete(s.cache, rootGroup)
+	s.mu.Unlock()
+}

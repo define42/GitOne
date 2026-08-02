@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
@@ -708,6 +709,224 @@ func TestUploadEnforcesStorageLimitAcrossGroupRepositories(t *testing.T) {
 	}
 }
 
+func TestGroupStorageUsageIncludesDescendantRepositories(t *testing.T) {
+	root := t.TempDir()
+	writeObject := func(relativePath string, size int) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(relativePath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, size), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeObject("g/root.lfs/objects/aa/bb/"+strings.Repeat("1", 64), 1)
+	writeObject("g/platform/api.lfs/objects/aa/bb/"+strings.Repeat("2", 64), 2)
+	writeObject("g/platform/backend/assets.lfs/objects/aa/bb/"+strings.Repeat("3", 64), 3)
+	writeObject("g/repository.git/nested.lfs/objects/aa/bb/"+strings.Repeat("4", 64), 8)
+	writeObject("g/platform/job.build/nested.lfs/objects/aa/bb/"+strings.Repeat("5", 64), 8)
+	writeObject("g/platform/api.lfs/objects/aa/bb/not-an-object", 8)
+
+	usage, err := (Handler{Storage: storage.Store{Root: root}}).groupStorageUsage("g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage != 6 {
+		t.Fatalf("root group LFS usage = %d, want 6", usage)
+	}
+}
+
+func TestUploadEnforcesRootGroupStorageLimitAcrossSubgroups(t *testing.T) {
+	root := t.TempDir()
+	target := repopath.Repository{Groups: []string{"g", "backend"}, Name: "api"}
+	initializeLFSRepositoryAt(t, root, target)
+	existing := []byte("1234")
+	existingHash := sha256.Sum256(existing)
+	existingOID := hex.EncodeToString(existingHash[:])
+	existingPath := filepath.Join(
+		root,
+		"g",
+		"frontend",
+		"web.lfs",
+		"objects",
+		existingOID[:2],
+		existingOID[2:4],
+		existingOID,
+	)
+	if err := os.MkdirAll(filepath.Dir(existingPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(existingPath, existing, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: 6}, nil
+		},
+	}
+	upload := func(data string) *httptest.ResponseRecorder {
+		t.Helper()
+		sum := sha256.Sum256([]byte(data))
+		request := httptest.NewRequest(
+			http.MethodPut,
+			"/g/backend/api.git/info/lfs/objects/"+hex.EncodeToString(sum[:]),
+			strings.NewReader(data),
+		)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	if response := upload("567"); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("root group storage overflow returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := upload("56"); response.Code != http.StatusOK {
+		t.Fatalf("upload at root group storage limit returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConcurrentSubgroupUploadsShareRootQuotaReservation(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepositoryAt(t, root, repopath.Repository{
+		Groups: []string{"g", "one"},
+		Name:   "r",
+	})
+	initializeLFSRepositoryAt(t, root, repopath.Repository{
+		Groups: []string{"g", "two"},
+		Name:   "r",
+	})
+	const quota = int64(8)
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			return true, true
+		},
+		Policy: func(*http.Request, repopath.Repository) (control.LFSPolicy, error) {
+			return control.LFSPolicy{Enabled: true, MaximumStorageBytes: quota}, nil
+		},
+	}
+
+	firstData := []byte("12345678")
+	firstSum := sha256.Sum256(firstData)
+	firstStaged := make(chan struct{}, 1)
+	firstRelease := make(chan struct{})
+	var releaseFirst sync.Once
+	unblockFirst := func() { releaseFirst.Do(func() { close(firstRelease) }) }
+	defer unblockFirst()
+	firstRequest := httptest.NewRequest(
+		http.MethodPut,
+		"/g/one/r.git/info/lfs/objects/"+hex.EncodeToString(firstSum[:]),
+		&stagedUploadReader{data: firstData, staged: firstStaged, release: firstRelease},
+	)
+	firstRequest.ContentLength = int64(len(firstData))
+	firstResponse := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, firstRequest)
+		firstResponse <- response
+	}()
+	select {
+	case <-firstStaged:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first subgroup upload did not reach staging")
+	}
+
+	secondData := []byte("abcdefgh")
+	secondSum := sha256.Sum256(secondData)
+	secondResponse := httptest.NewRecorder()
+	handler.ServeHTTP(
+		secondResponse,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/g/two/r.git/info/lfs/objects/"+hex.EncodeToString(secondSum[:]),
+			bytes.NewReader(secondData),
+		),
+	)
+	if secondResponse.Code != http.StatusUnprocessableEntity {
+		t.Fatalf(
+			"sibling subgroup bypassed root quota reservation: %d: %s",
+			secondResponse.Code,
+			secondResponse.Body.String(),
+		)
+	}
+
+	unblockFirst()
+	select {
+	case response := <-firstResponse:
+		if response.Code != http.StatusOK {
+			t.Fatalf("first subgroup upload returned %d: %s", response.Code, response.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first subgroup upload did not finish")
+	}
+}
+
+func TestSubgroupUploadUsesRootGroupLFSLock(t *testing.T) {
+	root := t.TempDir()
+	initializeLFSRepositoryAt(t, root, repopath.Repository{
+		Groups: []string{"g", "backend"},
+		Name:   "api",
+	})
+	release, err := lockmgr.Process.Acquire(lockmgr.LFSRequests(root, "g")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	authorized := make(chan struct{}, 1)
+	handler := Handler{
+		Storage: storage.Store{Root: root},
+		Authorize: func(*http.Request, repopath.Repository, bool) (bool, bool) {
+			select {
+			case authorized <- struct{}{}:
+			default:
+			}
+			return true, true
+		},
+	}
+	data := []byte("locked")
+	sum := sha256.Sum256(data)
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(
+			recorder,
+			httptest.NewRequest(
+				http.MethodPut,
+				"/g/backend/api.git/info/lfs/objects/"+hex.EncodeToString(sum[:]),
+				bytes.NewReader(data),
+			),
+		)
+		response <- recorder
+	}()
+	select {
+	case <-authorized:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subgroup upload did not reach authorization")
+	}
+	select {
+	case recorder := <-response:
+		t.Fatalf("subgroup upload bypassed root LFS lock: %d", recorder.Code)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("subgroup upload returned %d: %s", recorder.Code, recorder.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("subgroup upload did not resume after root LFS lock release")
+	}
+}
+
 func TestUploadWaitsForRepositoryOperationLockBeforeStaging(t *testing.T) {
 	root := t.TempDir()
 	initializeLFSRepository(t, root)
@@ -855,10 +1074,15 @@ func TestUploadReopensRepositoryAfterOperationLock(t *testing.T) {
 
 func initializeLFSRepository(t *testing.T, root string) {
 	t.Helper()
-	path, err := (storage.Store{Root: root}).GitPath(repopath.Repository{
+	initializeLFSRepositoryAt(t, root, repopath.Repository{
 		Groups: []string{"g"},
 		Name:   "r",
 	})
+}
+
+func initializeLFSRepositoryAt(t *testing.T, root string, repository repopath.Repository) {
+	t.Helper()
+	path, err := (storage.Store{Root: root}).GitPath(repository)
 	if err != nil {
 		t.Fatal(err)
 	}

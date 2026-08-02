@@ -53,28 +53,23 @@ func TestRoleAllows(t *testing.T) {
 	}
 }
 
-func TestValidateRequiresOwner(t *testing.T) {
+func TestValidateRequiresRootOwner(t *testing.T) {
 	d := Document{
-		Version: CurrentVersion, Group: "g", Visibility: "private",
+		Version: CurrentVersion, Group: "g", Inherit: true, Visibility: "private",
 		Members: map[string]Role{"a": RoleDeveloper},
 	}
 	if Validate("g", d) == nil {
-		t.Fatal("expected owner error")
+		t.Fatal("root control without an owner was accepted")
 	}
 }
 
-func TestValidateAllowsOwnerlessInheritedSubgroup(t *testing.T) {
+func TestValidateRejectsNestedControl(t *testing.T) {
 	d := Document{
 		Version: CurrentVersion, Group: "parent/child", Inherit: true,
-		Visibility: "private", Members: map[string]Role{},
+		Visibility: "private", Members: map[string]Role{"alice": RoleOwner},
 	}
-	if err := Validate("parent/child", d); err != nil {
-		t.Fatalf("validate inherited subgroup: %v", err)
-	}
-
-	d.Inherit = false
 	if Validate("parent/child", d) == nil {
-		t.Fatal("ownerless subgroup was allowed to disable inheritance")
+		t.Fatal("nested control settings were accepted")
 	}
 }
 

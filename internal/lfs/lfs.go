@@ -103,6 +103,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), http.StatusBadRequest)
 		return
 	}
+	if repo.Name == "control" {
+		http.NotFound(w, r)
+		return
+	}
 	if r.ContentLength > maximumBodyBytes {
 		http.Error(w, "LFS request body is too large", http.StatusRequestEntityTooLarge)
 		return
@@ -206,7 +210,7 @@ func (h Handler) batch(w http.ResponseWriter, r *http.Request, repo repopath.Rep
 	var storageBytes int64
 	if q.Operation == "upload" && policy.MaximumStorageBytes > 0 {
 		var usageErr error
-		storageBytes, usageErr = h.groupStorageUsage(repo.Group())
+		storageBytes, usageErr = h.groupStorageUsage(repo.RootGroup())
 		if usageErr != nil {
 			http.Error(w, "could not inspect LFS storage", http.StatusInternalServerError)
 			return
@@ -352,7 +356,7 @@ func (h Handler) object(
 			return
 		}
 		releaseAdmission, err := lockmgr.Process.Acquire(
-			lockmgr.LFSRequests(h.Storage.Root, repo.Group())...,
+			lockmgr.LFSRequests(h.Storage.Root, repo.RootGroup())...,
 		)
 		if err != nil {
 			http.Error(w, "could not lock LFS quota admission", http.StatusInternalServerError)
@@ -375,13 +379,13 @@ func (h Handler) object(
 		limitError := errors.New("object exceeds the group LFS object limit")
 		releaseReservation := func() {}
 		if policy.MaximumStorageBytes > 0 {
-			usage, usageErr := h.groupStorageUsage(repo.Group())
+			usage, usageErr := h.groupStorageUsage(repo.RootGroup())
 			if usageErr != nil {
 				releaseAdmission()
 				http.Error(w, "could not inspect LFS storage", http.StatusInternalServerError)
 				return
 			}
-			groupRoot, pathErr := h.Storage.GroupPath(repo.Group())
+			groupRoot, pathErr := h.Storage.GroupPath(repo.RootGroup())
 			if pathErr != nil {
 				releaseAdmission()
 				http.Error(w, "bad path", http.StatusBadRequest)
@@ -426,7 +430,7 @@ func (h Handler) object(
 			[]repopath.Repository{repo},
 			lockmgr.Shared,
 		)
-		requests = append(requests, lockmgr.LFSRequests(h.Storage.Root, repo.Group())...)
+		requests = append(requests, lockmgr.LFSRequests(h.Storage.Root, repo.RootGroup())...)
 		releaseOperation, err := lockmgr.Process.Acquire(requests...)
 		if err != nil {
 			http.Error(w, "could not lock repository operations", http.StatusInternalServerError)
@@ -614,7 +618,7 @@ func (h Handler) publishUpload(
 		return nil
 	}
 	if policy.MaximumStorageBytes > 0 {
-		usage, usageErr := h.groupStorageUsage(repo.Group())
+		usage, usageErr := h.groupStorageUsage(repo.RootGroup())
 		if usageErr != nil {
 			return usageErr
 		}
@@ -636,38 +640,58 @@ func (h Handler) groupStorageUsage(group string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return 0, err
-	}
 	var total int64
-	for _, repository := range entries {
-		if !repository.IsDir() || !strings.HasSuffix(repository.Name(), ".lfs") {
-			continue
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		objects := filepath.Join(root, repository.Name(), "objects")
-		err = filepath.WalkDir(objects, func(_ string, entry os.DirEntry, walkErr error) error {
-			if errors.Is(walkErr, os.ErrNotExist) {
+		if !entry.IsDir() {
+			return nil
+		}
+		if path != root && strings.HasPrefix(entry.Name(), ".") {
+			return filepath.SkipDir
+		}
+		if strings.HasSuffix(entry.Name(), ".git") ||
+			strings.HasSuffix(entry.Name(), ".build") ||
+			strings.HasSuffix(entry.Name(), ".reviews") {
+			return filepath.SkipDir
+		}
+		if !strings.HasSuffix(entry.Name(), ".lfs") {
+			if path != root {
+				if _, parseErr := repopath.ParseGroup(entry.Name()); parseErr != nil {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		objects := filepath.Join(path, "objects")
+		usageErr := filepath.WalkDir(objects, func(
+			_ string,
+			object os.DirEntry,
+			objectErr error,
+		) error {
+			if errors.Is(objectErr, os.ErrNotExist) {
 				return nil
 			}
-			if walkErr != nil {
-				return walkErr
+			if objectErr != nil {
+				return objectErr
 			}
-			if entry.IsDir() || !validOID(entry.Name()) {
+			if object.IsDir() || !validOID(object.Name()) {
 				return nil
 			}
-			info, infoErr := entry.Info()
+			info, infoErr := object.Info()
 			if infoErr != nil {
 				return infoErr
 			}
 			total += info.Size()
 			return nil
 		})
-		if err != nil {
-			return 0, err
+		if usageErr != nil {
+			return usageErr
 		}
-	}
-	return total, nil
+		return filepath.SkipDir
+	})
+	return total, err
 }
 
 func (h Handler) objectPath(repo repopath.Repository, oid string) (string, error) {

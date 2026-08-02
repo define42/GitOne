@@ -316,59 +316,9 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 	if len(group.Body.Subgroups) != 1 ||
 		group.Body.Role != control.RoleDeveloper ||
 		group.Body.Subgroups[0].Path != "engineering/platform" ||
-		group.Body.Subgroups[0].Description != "Platform services" ||
+		group.Body.Subgroups[0].Description != "" ||
 		group.Body.Subgroups[0].Role != control.RoleDeveloper {
 		t.Fatalf("unexpected subgroup summaries: %#v", group.Body.Subgroups)
-	}
-}
-
-func TestRenameGroupControlsRejectsMissingAndExistingDestination(t *testing.T) {
-	root := t.TempDir()
-	store := storage.Store{Root: root}
-	controls := control.NewStore(root)
-	api := API{
-		Storage:  store,
-		Resolver: &auth.Resolver{Controls: controls},
-	}
-
-	err := api.renameGroupControls(
-		context.Background(),
-		"missing",
-		"target",
-		control.Document{},
-		"alice",
-	)
-	if err == nil || !strings.Contains(err.Error(), "group not found") {
-		t.Fatalf("missing group error = %v", err)
-	}
-
-	if err = store.CreateGroup("source", "alice", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.CreateGroup("destination", "alice", ""); err != nil {
-		t.Fatal(err)
-	}
-	current, err := controls.Load(context.Background(), "source")
-	if err != nil {
-		t.Fatal(err)
-	}
-	current.Group = "destination"
-	err = api.renameGroupControls(
-		context.Background(),
-		"source",
-		"destination",
-		current,
-		"alice",
-	)
-	if err == nil || !strings.Contains(err.Error(), "destination group exists") {
-		t.Fatalf("existing destination error = %v", err)
-	}
-	unchanged, err := controls.Load(context.Background(), "source")
-	if err != nil {
-		t.Fatalf("source group moved after failed rename: %v", err)
-	}
-	if unchanged.Group != "source" {
-		t.Fatalf("source control changed after failed rename: %#v", unchanged)
 	}
 }
 
@@ -655,6 +605,36 @@ func TestUpdateGroupSettingsRequiresOwnerForProtectedFields(t *testing.T) {
 		updated.Body.Settings.Visibility != "internal" ||
 		updated.Body.Settings.LFS.MaximumObjectBytes != 1024 {
 		t.Fatalf("owner settings changes were not retained: %#v", updated.Body.Settings)
+	}
+}
+
+func TestUpdateGroupSettingsRejectsExistingRootDestination(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	ctx := context.Background()
+	if _, err := service.createGroup(ctx, &createGroupInput{
+		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "existing"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.updateGroupSettings(ctx, &updateGroupSettingsInput{
+		GroupPathInput: GroupPathInput{AuthInput: credentials, Path: "engineering"},
+		Body: updateGroupSettingsBody{
+			Name:        "existing",
+			Description: current.Description,
+			Inherit:     current.Inherit,
+			Visibility:  current.Visibility,
+			LFS:         current.LFS,
+			Members:     maps.Clone(current.Members),
+		},
+	})
+	requireStatusError(t, err, http.StatusConflict)
+	unchanged, err := service.Resolver.Controls.Load(ctx, "engineering")
+	if err != nil || unchanged.Group != "engineering" {
+		t.Fatalf("source changed after failed rename: %#v, %v", unchanged, err)
 	}
 }
 
@@ -952,7 +932,7 @@ func TestGroupLifecycleEndpoints(t *testing.T) {
 	}
 }
 
-func TestMaintainerCreatesSubgroupWithInheritedRole(t *testing.T) {
+func TestMaintainerCreatesSubgroupGovernedByRootGroup(t *testing.T) {
 	service, ownerCredentials, _ := repositoryAPIFixture(t)
 	ctx := context.Background()
 
@@ -961,6 +941,12 @@ func TestMaintainerCreatesSubgroupWithInheritedRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	parent.Members["bob"] = control.RoleMaintainer
+	parent.Visibility = "internal"
+	parent.LFS = control.LFSPolicy{
+		Enabled:             true,
+		MaximumObjectBytes:  1024,
+		MaximumStorageBytes: 4096,
+	}
 	if err = service.Storage.UpdateGroupControl("engineering", parent, "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -981,20 +967,29 @@ func TestMaintainerCreatesSubgroupWithInheritedRole(t *testing.T) {
 			AuthInput: maintainerCredentials,
 			Path:      "engineering/backend",
 		},
-		Description: "Backend team",
+		Description: "Ignored subgroup description",
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	child, err := service.Resolver.Controls.Load(ctx, "engineering/backend")
+	childPath, err := service.Storage.GroupPath("engineering/backend")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !child.Inherit {
-		t.Fatal("new subgroup does not inherit access")
+	if _, err = os.Stat(filepath.Join(childPath, "control.git")); !os.IsNotExist(err) {
+		t.Fatalf("subgroup control repository exists: %v", err)
 	}
-	if len(child.Members) != 0 {
-		t.Fatalf("new subgroup has direct members: %#v", child.Members)
+
+	shared, err := service.Resolver.Controls.Load(ctx, "engineering/backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared.Group != "engineering" ||
+		shared.Members["bob"] != control.RoleMaintainer ||
+		shared.Visibility != "internal" ||
+		shared.LFS.MaximumObjectBytes != 1024 ||
+		shared.LFS.MaximumStorageBytes != 4096 {
+		t.Fatalf("subgroup did not use root settings: %#v", shared)
 	}
 
 	creator, err := service.authorizePrincipal(
@@ -1009,7 +1004,7 @@ func TestMaintainerCreatesSubgroupWithInheritedRole(t *testing.T) {
 	if creator.Role != control.RoleMaintainer || creator.Group != "engineering" {
 		t.Fatalf("creator role = %#v", creator)
 	}
-	inheritedOwner, err := service.authorizePrincipal(
+	rootOwner, err := service.authorizePrincipal(
 		ctx,
 		ownerCredentials,
 		"engineering/backend",
@@ -1018,30 +1013,109 @@ func TestMaintainerCreatesSubgroupWithInheritedRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inheritedOwner.Role != control.RoleOwner || inheritedOwner.Group != "engineering" {
-		t.Fatalf("owner role = %#v", inheritedOwner)
+	if rootOwner.Role != control.RoleOwner || rootOwner.Group != "engineering" {
+		t.Fatalf("owner role = %#v", rootOwner)
 	}
 
-	if _, err = service.updateGroupSettings(ctx, &updateGroupSettingsInput{
-		GroupPathInput: GroupPathInput{
-			AuthInput: maintainerCredentials,
-			Path:      "engineering/backend",
-		},
-		Body: updateGroupSettingsBody{
-			Name:        "backend",
-			Description: child.Description,
-			Inherit:     false,
-			Visibility:  child.Visibility,
-			LFS:         child.LFS,
-			Members:     map[string]control.Role{},
-			Tokens:      []groupTokenInput{},
-		},
-	}); err == nil {
-		t.Fatal("ownerless subgroup disabled inheritance")
+	detail, err := service.getGroup(ctx, &GroupPathInput{
+		AuthInput: maintainerCredentials,
+		Path:      "engineering/backend",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Body.Description != "" || detail.Body.Role != control.RoleMaintainer {
+		t.Fatalf("subgroup detail = %#v", detail.Body)
 	}
 }
 
-func TestRenameGroupRequiresMaintainerAccessToChangedParents(t *testing.T) {
+func TestSubgroupSettingsEndpointsReturnNotFound(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	ctx := context.Background()
+	if _, err := service.createGroup(ctx, &createGroupInput{
+		GroupPathInput: GroupPathInput{
+			AuthInput: credentials,
+			Path:      "engineering/backend",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := service.getGroupSettings(ctx, &GroupPathInput{
+		AuthInput: credentials,
+		Path:      "engineering/backend",
+	})
+	requireStatusError(t, err, http.StatusNotFound)
+
+	_, err = service.updateGroupSettings(ctx, &updateGroupSettingsInput{
+		GroupPathInput: GroupPathInput{
+			AuthInput: credentials,
+			Path:      "engineering/backend",
+		},
+		Body: updateGroupSettingsBody{
+			Name:       "backend",
+			Visibility: "private",
+			LFS:        control.LFSPolicy{Enabled: true},
+			Members:    map[string]control.Role{"alice": control.RoleOwner},
+		},
+	})
+	requireStatusError(t, err, http.StatusNotFound)
+}
+
+func TestRenameGroupRejectsMovesAcrossRootBoundary(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	ctx := context.Background()
+	for _, group := range []string{"design", "engineering/backend"} {
+		if _, err := service.createGroup(ctx, &createGroupInput{
+			GroupPathInput: GroupPathInput{
+				AuthInput: credentials,
+				Path:      group,
+			},
+		}); err != nil {
+			t.Fatalf("create %s: %v", group, err)
+		}
+	}
+
+	for _, test := range []struct {
+		name    string
+		path    string
+		newPath string
+	}{
+		{
+			name:    "root into subgroup",
+			path:    "engineering",
+			newPath: "design/engineering",
+		},
+		{
+			name:    "subgroup into root",
+			path:    "engineering/backend",
+			newPath: "backend",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := service.renameGroup(ctx, &renameGroupInput{
+				GroupPathInput: GroupPathInput{
+					AuthInput: credentials,
+					Path:      test.path,
+				},
+				Body: renameGroupBody{NewPath: test.newPath},
+			})
+			requireStatusError(t, err, http.StatusBadRequest)
+		})
+	}
+
+	for _, group := range []string{"engineering", "engineering/backend", "design"} {
+		path, err := service.Storage.GroupPath(group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = os.Stat(path); err != nil {
+			t.Fatalf("group %s changed after rejected move: %v", group, err)
+		}
+	}
+}
+
+func TestRenameSubgroupAcrossRootsRequiresBothPermissions(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	store := storage.Store{Root: root}
@@ -1086,6 +1160,23 @@ func TestRenameGroupRequiresMaintainerAccessToChangedParents(t *testing.T) {
 		})
 		return moveErr
 	}
+	sourcePath, err := store.GroupPath("source/team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationPath, err := store.GroupPath("destination/team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSource := func() {
+		t.Helper()
+		if _, statErr := os.Stat(sourcePath); statErr != nil {
+			t.Fatalf("source group changed after denied move: %v", statErr)
+		}
+		if _, statErr := os.Stat(destinationPath); !os.IsNotExist(statErr) {
+			t.Fatalf("destination created after denied move: %v", statErr)
+		}
+	}
 	setRole := func(group, username string, role control.Role) {
 		t.Helper()
 		document, loadErr := controls.Load(ctx, group)
@@ -1107,32 +1198,44 @@ func TestRenameGroupRequiresMaintainerAccessToChangedParents(t *testing.T) {
 	if err = move(); err == nil {
 		t.Fatal("group moved without source-parent maintainer access")
 	}
-	if _, err = controls.Load(ctx, "source/team"); err != nil {
-		t.Fatalf("source group changed after denied move: %v", err)
-	}
+	requireSource()
 
-	setRole("source", "alice", control.RoleMaintainer)
+	setRole("source", "alice", control.RoleOwner)
 	setRole("destination", "alice", "")
 	if err = move(); err == nil {
 		t.Fatal("group moved without destination-parent maintainer access")
 	}
-	if _, err = controls.Load(ctx, "source/team"); err != nil {
-		t.Fatalf("source group changed after denied move: %v", err)
-	}
+	requireSource()
 
 	setRole("destination", "alice", control.RoleMaintainer)
 	if err = move(); err != nil {
 		t.Fatalf("group move with both parent permissions failed: %v", err)
 	}
-	if _, err = controls.Load(ctx, "source/team"); err == nil {
-		t.Fatal("source group still exists after authorized move")
+	if _, err = os.Stat(sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("source group still exists after authorized move: %v", err)
+	}
+	if _, err = os.Stat(destinationPath); err != nil {
+		t.Fatalf("destination group is unavailable after authorized move: %v", err)
 	}
 	moved, err := controls.Load(ctx, "destination/team")
 	if err != nil {
-		t.Fatalf("destination group is unavailable after authorized move: %v", err)
+		t.Fatalf("destination root settings are unavailable: %v", err)
 	}
-	if moved.Group != "destination/team" ||
-		moved.Members["alice"] != control.RoleOwner {
-		t.Fatalf("unexpected moved group control: %#v", moved)
+	if moved.Group != "destination" ||
+		moved.Members["alice"] != control.RoleMaintainer ||
+		moved.Members["carol"] != control.RoleOwner {
+		t.Fatalf("unexpected destination root control: %#v", moved)
+	}
+	principal, err := service.authorizePrincipal(
+		ctx,
+		credentials,
+		"destination/team",
+		control.RoleMaintainer,
+	)
+	if err != nil {
+		t.Fatalf("destination-root authorization failed: %v", err)
+	}
+	if principal.Group != "destination" || principal.Role != control.RoleMaintainer {
+		t.Fatalf("moved subgroup authorization = %#v", principal)
 	}
 }

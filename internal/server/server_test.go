@@ -653,15 +653,22 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 	if err := store.CreateGroup("public-group/public-child", "alice", "Public child"); err != nil {
 		t.Fatal(err)
 	}
-	publicChild, err := controls.Load(context.Background(), "public-group/public-child")
-	if err != nil {
+	if err := store.CreateRepository(
+		repopath.Repository{
+			Groups: []string{"public-group", "public-child"},
+			Name:   "nested-docs",
+		},
+		storage.CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
+	); err != nil {
 		t.Fatal(err)
 	}
-	publicChild.Visibility = "public"
-	if err = store.UpdateGroupControl("public-group/public-child", publicChild, "alice"); err != nil {
+	if err := store.CreateGroup("engineering/backend", "alice", "Backend"); err != nil {
 		t.Fatal(err)
 	}
-	if err = store.CreateGroup("public-group/private-child", "alice", "Private child"); err != nil {
+	if err := store.CreateRepository(
+		repopath.Repository{Groups: []string{"engineering", "backend"}, Name: "service"},
+		storage.CreateRepositoryOptions{InitializeReadme: true, Author: "alice"},
+	); err != nil {
 		t.Fatal(err)
 	}
 	document, err := controls.Load(context.Background(), "engineering")
@@ -709,6 +716,21 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("group visibility did not apply to second repository: %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/public-group/public-child/nested-docs.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"root visibility did not apply to a descendant repository: %d: %s",
+			response.Code,
+			response.Body.String(),
+		)
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/api/groups/public-group", nil)
@@ -835,6 +857,21 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 	}
 
 	request = httptest.NewRequest(
+		http.MethodPost,
+		"/public-group/public-child/nested-docs.git/info/lfs/objects/batch",
+		strings.NewReader(`{"operation":"download","objects":[]}`),
+	)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf(
+			"root LFS policy did not apply to a descendant repository: %d: %s",
+			response.Code,
+			response.Body.String(),
+		)
+	}
+
+	request = httptest.NewRequest(
 		http.MethodGet,
 		"/internal-group/internal.git/info/refs?service=git-upload-pack",
 		nil,
@@ -870,6 +907,18 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 		t.Fatalf("group token could not read web: %d: %s", response.Code, response.Body.String())
 	}
 
+	request = httptest.NewRequest(
+		http.MethodGet,
+		"/engineering/backend/service.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	request.SetBasicAuth("ci", "ci-secret")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("root group token could not read descendant repository: %d: %s", response.Code, response.Body.String())
+	}
+
 	request = httptest.NewRequest(http.MethodGet, "/api/groups/engineering", nil)
 	request.SetBasicAuth("ci", "ci-secret")
 	response = httptest.NewRecorder()
@@ -889,12 +938,20 @@ func TestGroupVisibilityAndTokensAreEnforced(t *testing.T) {
 		t.Fatalf("group token did not see every repository: %#v", detail.Repositories)
 	}
 
-	request = httptest.NewRequest(http.MethodPost, "/api/repositories/engineering%2Fother", nil)
+	request = httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fbackend%2Fother",
+		nil,
+	)
 	request.SetBasicAuth("ci", "ci-secret")
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated {
-		t.Fatalf("group token could not create repository: %d: %s", response.Code, response.Body.String())
+		t.Fatalf(
+			"root group token could not create a descendant repository: %d: %s",
+			response.Code,
+			response.Body.String(),
+		)
 	}
 }
 
@@ -1003,6 +1060,82 @@ func TestControlRepositoryAccessIsRestricted(t *testing.T) {
 	}
 	if after.Members["bob"] != control.RoleDeveloper {
 		t.Fatalf("developer escalated their own role: %#v", after.Members)
+	}
+}
+
+func TestSubgroupSettingsAndLegacyControlRepositoryAreUnreachable(t *testing.T) {
+	root := t.TempDir()
+	store := storage.Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateGroup("engineering/backend", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a subgroup control repository left on disk by an older GitOne
+	// release. It must not become addressable merely because it still exists.
+	legacyControl := filepath.Join(root, "engineering", "backend", "control.git")
+	if _, err := git.PlainInit(legacyControl, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.PlainOpen(legacyControl); err != nil {
+		t.Fatalf("legacy subgroup control fixture is unavailable: %v", err)
+	}
+
+	handler := New(Config{
+		Root:      root,
+		Directory: staticDirectory{"alice": "secret"},
+	})
+	controlRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/engineering/backend/control.git/info/refs?service=git-upload-pack",
+		nil,
+	)
+	controlRequest.SetBasicAuth("alice", "secret")
+	controlResponse := httptest.NewRecorder()
+	handler.ServeHTTP(controlResponse, controlRequest)
+	if controlResponse.Code != http.StatusNotFound {
+		t.Fatalf(
+			"legacy subgroup control repository returned %d: %s",
+			controlResponse.Code,
+			controlResponse.Body.String(),
+		)
+	}
+
+	settingsBody := `{
+		"name": "backend",
+		"description": "",
+		"inherit": false,
+		"visibility": "private",
+		"lfs": {"enabled": true},
+		"members": {"alice": "owner"},
+		"tokens": []
+	}`
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		var body io.Reader
+		if method == http.MethodPut {
+			body = strings.NewReader(settingsBody)
+		}
+		request := httptest.NewRequest(
+			method,
+			"/api/groups/engineering%2Fbackend/settings",
+			body,
+		)
+		if method == http.MethodPut {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		request.SetBasicAuth("alice", "secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf(
+				"%s subgroup settings returned %d: %s",
+				method,
+				response.Code,
+				response.Body.String(),
+			)
+		}
 	}
 }
 
@@ -1381,7 +1514,7 @@ func TestInternalRepositoryBrowserRequiresLDAPIdentity(t *testing.T) {
 	}
 }
 
-func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
+func TestRootGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 	root := t.TempDir()
 	handler := New(Config{
 		Root: root,
@@ -1521,8 +1654,19 @@ func TestGroupSettingsUpdateControlAndRenameDescendants(t *testing.T) {
 		updated.LFS.MaximumStorageBytes != 4096 {
 		t.Fatalf("unexpected updated settings: %#v", updated)
 	}
-	if descendant.Group != "product/backend" {
-		t.Fatalf("descendant control group was not renamed: %#v", descendant)
+	if descendant.Group != updated.Group ||
+		descendant.Description != updated.Description ||
+		descendant.Visibility != updated.Visibility ||
+		descendant.LFS != updated.LFS ||
+		descendant.Members["bob"] != updated.Members["bob"] ||
+		len(descendant.Tokens) != len(updated.Tokens) ||
+		descendant.Tokens[0].Hash != updated.Tokens[0].Hash {
+		t.Fatalf("descendant did not resolve the renamed root settings: %#v", descendant)
+	}
+	if _, statErr := os.Stat(
+		filepath.Join(root, "product", "backend", "control.git"),
+	); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("renamed subgroup has a control repository: %v", statErr)
 	}
 	redactedRequest := httptest.NewRequest(http.MethodGet, "/api/groups/product/settings", nil)
 	redactedRequest.SetBasicAuth("alice", "secret")
@@ -3475,7 +3619,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 		parent.Description != "Product engineering" ||
 		parent.Username != "alice" ||
 		parent.Subgroups[0].Path != "engineering/backend" ||
-		parent.Subgroups[0].Description != "Backend services" ||
+		parent.Subgroups[0].Description != "" ||
 		len(parent.Repositories) != 1 ||
 		parent.Repositories[0].Name != "web" ||
 		parent.Repositories[0].Description != "Engineering web portal" {
@@ -3502,7 +3646,7 @@ func TestHumaGroupNavigationAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if detail.Path != "engineering/backend" ||
-		detail.Description != "Backend services" ||
+		detail.Description != "" ||
 		detail.Username != "alice" ||
 		len(detail.Repositories) != 1 ||
 		detail.Repositories[0].Name != "api" ||
@@ -3786,8 +3930,8 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		t.Fatal("served UI does not restrict group deletion to confirmed empty groups")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "description.input.value") ||
-		!strings.Contains(assetResponse.Body.String(), "subgroupDescription.input.value") {
-		t.Fatal("served UI does not provide group and subgroup descriptions")
+		strings.Contains(assetResponse.Body.String(), "subgroupDescription.input.value") {
+		t.Fatal("served UI does not limit descriptions to root groups")
 	}
 	if !strings.Contains(
 		assetResponse.Body.String(),
@@ -3801,10 +3945,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	) ||
 		!strings.Contains(
 			assetResponse.Body.String(),
-			"const controlSettings = canManageGroup",
+			"const controlSettings = canManageGroup && isRootGroup",
 		) ||
+		!strings.Contains(assetResponse.Body.String(), "subgroupRenameControl") ||
+		strings.Contains(assetResponse.Body.String(), "Inherit access from the parent group") ||
 		strings.Count(assetResponse.Body.String(), "...(canManageGroup") < 2 {
-		t.Fatal("served UI does not hide group management controls from read-only roles")
+		t.Fatal("served UI does not separate root settings from subgroup management")
 	}
 	if !strings.Contains(assetResponse.Body.String(), "groupSettingsControl") ||
 		!strings.Contains(assetResponse.Body.String(), "groupSettingsAPIURL") ||

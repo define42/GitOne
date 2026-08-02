@@ -4,7 +4,7 @@ Implemented:
 
 - Pure-Go HTTP server structure
 - Nested group/repository path parsing and traversal protection
-- Mandatory `control.git` creation for every group
+- One active `control.git` for each top-level root group, with structural subgroups
 - Initial `control.json` commit on `main`
 - Main-only receive-pack ref validation for `control.git`
 - Git Smart HTTP discovery, upload-pack, and receive-pack handlers using go-git
@@ -16,11 +16,11 @@ Implemented:
 - Repository create/delete/rename endpoints
 - Huma administration API with generated OpenAPI and interactive documentation
 - Embedded TypeScript UI for browsing and creating groups and repositories
-- LDAP user authentication with Git-backed username roles and inheritance
+- LDAP user authentication with Git-backed root-group roles shared across the complete subgroup tree
 - LDAP login with signed and encrypted Gorilla securecookie browser sessions
-- Git-backed Argon2id automation tokens with repository scopes
+- Git-backed PBKDF2 automation tokens scoped to complete root-group trees
 - Stale-ref rejection and validated fast-forward-only control updates
-- Group-wide repository visibility and LFS policy enforcement
+- Root-group-wide repository visibility and LFS policy enforcement, including subtree-wide LFS quotas
 - Go and TypeScript build validation plus a multi-stage Dockerfile
 - Separate `gitone` web and `gitone-runner` applications and container images, connected through an authenticated build API with multiple named jobs, dependency ordering, manual starts, cancellation, reruns, durable leases, exact-commit source archives, remote log streaming, branch filters, timeouts, build APIs, and a live Builds UI
 - Libvirt runner execution in disposable KVM guests, with per-VM in-memory Ed25519 client identities and native Go SSH transport, atomic download and SHA-512 verification of a pinned Flatcar base image, Flatcar Ignition, qcow2 overlays, guest-only Docker, pre-claim capacity reservation, and a replenished pool of pre-heated SSH-and-Docker-ready VMs

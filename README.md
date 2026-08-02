@@ -7,14 +7,24 @@ Pure-Go Git and Git LFS server with a Huma administration API and a small TypeSc
 ## Storage
 
 ```text
-<root>/<group>/control.git
-<root>/<group>/<subgroup>/control.git
-<root>/<group>/<subgroup>/<repo>.git
-<root>/<group>/<subgroup>/<repo>.lfs/objects/aa/bb/<sha256>
-<root>/<group>/<subgroup>/<repo>.reviews/<merge-request-id>.json
+<root>/<root-group>/control.git
+<root>/<root-group>/<repo>.git
+<root>/<root-group>/<subgroup>/<repo>.git
+<root>/<root-group>/<subgroup>/<repo>.lfs/objects/aa/bb/<sha256>
+<root>/<root-group>/<subgroup>/<repo>.reviews/<merge-request-id>.json
 ```
 
-Every repository belongs to at least one group. Every group must contain `control.git` and is the authorization source for that group.
+Every repository belongs to one top-level root group. Each root group contains
+one active `control.git`, which is the authorization and policy source for the
+entire group tree. Subgroups are structural directories: they do not contain a
+`control.git` or have independent settings, members, tokens, visibility, LFS
+policy, or descriptions.
+
+When upgrading an existing storage root, nested legacy `control.git`
+repositories remain on disk but are no longer consulted or reachable over Git.
+After preserving any child policy that is still needed in the root group's
+settings, operators may archive or remove those repositories. GitOne does not
+delete them automatically.
 
 Git repositories use Git's SHA-1 object format through go-git v5 for broad
 tooling compatibility. Git LFS object IDs remain SHA-256. Existing repositories
@@ -70,8 +80,8 @@ enabling the validated module alone is not a certification of the complete
 deployment.
 
 Group token hashes created before the FIPS migration used Argon2id and are not
-accepted by the FIPS-enabled server. Regenerate those tokens through the group
-settings API after upgrading.
+accepted by the FIPS-enabled server. Regenerate those tokens through the root
+group settings API after upgrading.
 
 The native libvirt SSH transport is restricted to NIST-curve ECDH, AES-CTR,
 HMAC-SHA-2, and approved EdDSA, ECDSA, or RSA host-key signatures. CI runs the
@@ -136,9 +146,9 @@ supported because they mutate server state only through the web API.
 
 ## Web UI
 
-Open [http://localhost:8080](http://localhost:8080) and sign in with a full-domain LDAP identity such as `alice@example.com`. After LDAP validation, GitOne stores only the canonical directory identity in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level group and becomes its owner. Creating a subgroup requires maintainer access inherited from its parent; the subgroup starts without direct members, so its creator and all other users keep the roles they inherit from parent groups. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser.
+Open [http://localhost:8080](http://localhost:8080) and sign in with a full-domain LDAP identity such as `alice@example.com`. After LDAP validation, GitOne stores only the canonical directory identity in a Gorilla securecookie that is signed, encrypted, `HttpOnly`, and `SameSite=Strict`; the password is not retained. Every authenticated LDAP user can create a top-level root group and becomes its owner. Creating a structural subgroup requires maintainer access to its root group. The root group's roles apply unchanged at every subgroup depth. The GitOne-branded TypeScript UI uses the Huma API to list and create groups, subgroups, and repositories. Dark is the default color theme; the header selector persists Light, Dark, Steampunk, Windows, Mac OS X, Ubuntu, Solaris, GitHub, and GitLab palettes in the browser.
 
-The main page lists only top-level groups and their descriptions. Select a group to see its immediate subgroups and repositories. Group maintainers can create repositories, mirror every Git ref and tag plus every reachable Git LFS object from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository. Archive uploads contain Git data only. Group maintainers can open Settings to change the group name and description, inheritance, and non-owner group tokens. Only group owners can change members and roles, repository visibility, the LFS policy, or owner tokens. Every save creates a commit in `control.git`, and renaming a group updates descendant control documents. Repository pages let maintainers rename the repository, provide a copyable `git clone` command containing the authenticated identity, such as `git clone http://alice%40example.com@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
+The main page lists only root groups and their descriptions. Select a group to see its immediate structural subgroups and repositories. Group maintainers can create repositories, mirror every Git ref and tag plus every reachable Git LFS object from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository. Archive uploads contain Git data only. Settings are available only on a root group: maintainers can change its name, description, and non-owner group tokens, while only owners can change members and roles, repository visibility, the LFS policy, or owner tokens. Every save creates a commit in the root group's `control.git`; all descendants immediately use the updated settings. Repository pages let maintainers rename the repository, provide a copyable `git clone` command containing the authenticated identity, such as `git clone http://alice%40example.com@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
 
 The repository viewer follows each repository's symbolic `HEAD`, can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Its branch manager lists every branch with ahead/behind counts relative to the default reference and lets developers delete non-default branches after confirmation. Maintainers can select an existing branch as the repository default. Its Builds tab shows manual, queued, running, successful, failed, and canceled jobs, polls active jobs automatically, and exposes expandable live logs. Developers can start manual jobs, cancel queued or running jobs, and rerun terminal jobs at the original commit. Users with developer access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Repositories can be deleted from the group danger zone only after entering the exact repository name. Groups can be deleted after all repositories and subgroups have been removed and the exact full group path is entered.
 
@@ -402,7 +412,7 @@ reclaim work after a runner failure or network loss.
 
 ## Endpoint reference
 
-`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. Browser administration requests use the secure session cookie. The API also accepts HTTP Basic authentication for scripts and group automation tokens. Native Git and LFS operations continue to use HTTP Basic authentication. Git and LFS reads follow group visibility: `public` permits anonymous reads, `internal` accepts any authenticated LDAP identity, and `private` requires group access. Writes always require group developer access. A group's `control.git` remains private regardless of group visibility. Health and Huma documentation endpoints are public.
+`{path...}` and `{group...}` may contain multiple slash-separated group levels. Huma `{path}` parameters contain an entire group or repository path encoded as one URL segment, for example `engineering%2Fbackend`. Browser administration requests use the secure session cookie. The API also accepts HTTP Basic authentication for scripts and root-group automation tokens. Native Git and LFS operations continue to use HTTP Basic authentication. Git and LFS reads follow the root group's visibility throughout its subtree: `public` permits anonymous reads, `internal` accepts any authenticated LDAP identity, and `private` requires root-group access. Writes always require root-group developer access. The root group's `control.git` remains private regardless of visibility. Health and Huma documentation endpoints are public.
 
 ### Health
 
@@ -450,11 +460,11 @@ These endpoints require `Authorization: Bearer <GITONE_RUNNER_TOKEN>`.
 | `GET` | `/api/session` | Return the username from the current browser session. |
 | `DELETE` | `/api/session` | Clear the current browser session. |
 | `GET` | `/api/groups` | List accessible top-level groups. |
-| `GET` | `/api/groups/{path}` | Get a group’s description, immediate subgroups, and repositories with their descriptions. |
-| `GET` | `/api/groups/{path}/settings` | Get editable group settings for a maintainer-authorized group. Token hashes and secrets are omitted. |
-| `POST` | `/api/groups/{path}` | Create a group. Any LDAP user may create a top-level group; nested groups require parent maintainer access. Optional query parameter: `description`. |
-| `PUT` | `/api/groups/{path}/settings` | Replace group control settings and optionally rename the group through the `name` field. Changing members, visibility, LFS policy, or owner tokens requires owner access. |
-| `PATCH` | `/api/groups/{path}` | Rename or move a group. JSON field: `newPath`. A cross-parent move requires maintainer access to the source group and both non-root parent groups. |
+| `GET` | `/api/groups/{path}` | Get a group, its immediate structural subgroups, and its repositories. Root groups and repositories include descriptions; subgroups do not. |
+| `GET` | `/api/groups/{path}/settings` | Get editable root-group settings. The path must identify a root group; token hashes and secrets are omitted. |
+| `POST` | `/api/groups/{path}` | Create a group. Any LDAP user may create a top-level root group; nested structural groups require root-group maintainer access. The optional `description` query parameter applies only to a root group. |
+| `PUT` | `/api/groups/{path}/settings` | Replace root-group control settings and optionally rename the root group through the `name` field. The path must identify a root group; changing members, visibility, LFS policy, or owner tokens requires owner access. |
+| `PATCH` | `/api/groups/{path}` | Rename or move a group. JSON field: `newPath`. Root groups can be renamed only to another root path, and subgroups only to another subgroup path. A cross-root subgroup move requires maintainer access to both roots and adopts the destination root's settings. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.yaml`. |
 | `POST` | `/api/repositories/{path}/import` | Mirror all Git refs and tags plus every reachable Git LFS object from an HTTP or HTTPS remote into a new bare repository. LFS objects are authenticated with the supplied credentials, downloaded through the same network policy as Git, and verified by size and SHA-256 before the repository is published. A missing or corrupt object fails the complete import. Non-public network destinations are blocked unless administratively allowlisted. JSON fields: `url`, optional `username`, and optional `password` or access token. |
@@ -521,6 +531,11 @@ fall back to v0; this compatibility path is exercised with the native Git client
 Every successfully applied branch update triggers its build scheduling callback,
 even when another reference update in the same non-atomic push fails.
 
+The only control-repository URL is
+`/<root-group>/control.git`. A subgroup URL such as
+`/<root-group>/<subgroup>/control.git` is not served, including when a legacy
+nested control repository remains on disk.
+
 ### Git LFS
 
 | Method | Path | Description |
@@ -545,11 +560,11 @@ curl -u 'alice@example.com:directory-password' -X POST \
   'http://localhost:8080/api/groups/engineering?description=Engineering%20projects'
 ```
 
-Create a subgroup as its parent owner:
+Create a structural subgroup as a root-group maintainer or owner:
 
 ```bash
 curl -u 'alice@example.com:directory-password' -X POST \
-  'http://localhost:8080/api/groups/engineering%2Fbackend?description=Backend%20services'
+  'http://localhost:8080/api/groups/engineering%2Fbackend'
 ```
 
 Create a repository:
@@ -594,9 +609,9 @@ curl -u 'alice@example.com:directory-password' \
 ```json
 {
   "version": 4,
-  "group": "engineering/backend",
-  "description": "Backend services",
-  "inherit": true,
+  "group": "engineering",
+  "description": "Engineering projects",
+  "inherit": false,
   "visibility": "private",
   "lfs": {
     "enabled": true,
@@ -617,9 +632,9 @@ curl -u 'alice@example.com:directory-password' \
 }
 ```
 
-Member entries contain canonical LDAP identities and roles. GitOne requires the submitted login to include `LDAP_USER_DOMAIN`, binds and searches with its normalized full-domain form, then reads the unique `LDAP_CANONICAL_ATTRIBUTE` value from the matched entry. Only that directory-supplied value is used for member authorization, sessions, merge-request identity, and audit authorship; member passwords are never stored in `control.json`.
+Member entries contain canonical LDAP identities and roles. GitOne requires the submitted login to include `LDAP_USER_DOMAIN`, binds and searches with its normalized full-domain form, then reads the unique `LDAP_CANONICAL_ATTRIBUTE` value from the matched entry. Only that directory-supplied value is used for member authorization, sessions, merge-request identity, and audit authorship; member passwords are never stored in `control.json`. Each member role applies to the root group and every subgroup below it.
 
-Group tokens are available for automation and use the validated Go Cryptographic Module's PBKDF2-HMAC-SHA-256 service with a random 128-bit salt. GitOne generates every token secret from cryptographically secure randomness as exactly 32 URL-safe characters, returns it only in the successful create or regeneration response, and never accepts a user-chosen secret. Set `regenerate` to `true` on an existing token to rotate it. Legacy Argon2id hashes are deliberately rejected and their tokens must be regenerated. Direct `control.git` pushes may preserve or delete existing token hashes, but cannot add or replace one; token creation and rotation must use the settings API. A token's `key` is its HTTP Basic username, while `name` is only its display label. Its role applies to the whole group and follows the same `inherit` boundary as member access for subgroups.
+Root-group tokens are available for automation and use the validated Go Cryptographic Module's PBKDF2-HMAC-SHA-256 service with a random 128-bit salt. GitOne generates every token secret from cryptographically secure randomness as exactly 32 URL-safe characters, returns it only in the successful create or regeneration response, and never accepts a user-chosen secret. Set `regenerate` to `true` on an existing token to rotate it. Legacy Argon2id hashes are deliberately rejected and their tokens must be regenerated. Direct `control.git` pushes may preserve or delete existing token hashes, but cannot add or replace one; token creation and rotation must use the root-group settings API. A token's `key` is its HTTP Basic username, while `name` is only its display label. Its role applies to the root group and its entire subgroup tree.
 
 ### Role permissions
 
@@ -638,19 +653,21 @@ Roles are cumulative: `owner` includes `maintainer`, `maintainer` includes `deve
 | Resolve any review thread | — | ✓ | ✓ | ✓ |
 | Create subgroups and repositories; import repository archives or mirrors | — | — | ✓ | ✓ |
 | Rename repositories or groups; delete repositories or empty groups | — | — | ✓ | ✓ |
-| Change group name, description, inheritance, and non-owner tokens | — | — | ✓ | ✓ |
-| Move a group to a different parent[^cross-parent-move] | — | — | Conditional | Conditional |
-| Change members and their roles | — | — | — | ✓ |
-| Change repository visibility or LFS policy | — | — | — | ✓ |
-| Create, modify, or delete owner tokens | — | — | — | ✓ |
-| Push directly to the private `control.git` repository | — | — | — | ✓ |
+| Change root-group name, description, and non-owner tokens | — | — | ✓ | ✓ |
+| Move a subgroup to a different parent or root[^cross-parent-move] | — | — | Conditional | Conditional |
+| Change root-group members and their roles | — | — | — | ✓ |
+| Change root-group repository visibility or LFS policy | — | — | — | ✓ |
+| Create, modify, or delete root-group owner tokens | — | — | — | ✓ |
+| Push directly to the private root `control.git` repository | — | — | — | ✓ |
 | Approve one's own merge request | — | — | ✓ | ✓ |
 
-[^cross-parent-move]: A cross-parent move requires maintainer-or-higher access to the source group and to both non-root parent groups.
+[^cross-parent-move]: A move within one root requires maintainer-or-higher access to that root. A cross-root subgroup move requires it on both roots and makes the subgroup use the destination root's roles, tokens, visibility, and LFS policy. A root group cannot become a subgroup, and a subgroup cannot become a root group.
 
-The closest explicit group assignment wins. When `inherit` is enabled, GitOne searches parent groups until it finds an assignment; disabling inheritance stops that search. The same matrix applies to group tokens. Top-level groups and groups with inheritance disabled must retain at least one owner in `members`; inherited subgroups may have no direct members. Creating a top-level group is separate from this matrix: any authenticated LDAP user may create one and becomes its owner. Repository visibility can grant browsing and Git clone/fetch access to ordinary repositories without an explicit role—`public` permits anonymous reads and `internal` permits authenticated LDAP users—but never grants developer, maintainer, owner, or access to `control.git`.
+There are no subgroup assignments or inheritance boundaries. The root group's member and token roles apply unchanged to every repository and subgroup in its tree, and every root group must retain at least one owner in `members`. Creating a root group is separate from this matrix: any authenticated LDAP user may create one and becomes its owner. Repository visibility can grant browsing and Git clone/fetch access to ordinary repositories without an explicit role—`public` permits anonymous reads and `internal` permits authenticated LDAP users—but never grants developer, maintainer, owner, or access to the root `control.git`.
 
-New groups are private with Git LFS enabled and unlimited quotas. The group policy applies to every ordinary repository in the group. `maximumObjectBytes` limits each object, `maximumStorageBytes` limits aggregate LFS storage across the group's repositories, and zero means unlimited within the server's absolute upload guard.
+New root groups are private with Git LFS enabled and unlimited quotas. The root policy applies to every ordinary repository in the complete group tree. `maximumObjectBytes` limits each object, `maximumStorageBytes` limits aggregate LFS storage across all repositories in the root group and every subgroup, and zero means unlimited within the server's absolute upload guard.
+
+The schema-version-4 `inherit` field is retained in `control.json` for compatibility but has no operational effect. Settings clients preserve it; GitOne always uses the root group's roles and policies for the complete subtree.
 
 Control schema version 4 renames the `write` role to `developer`. Before upgrading a populated version-3 server, replace every `write` member or token role with `developer` and set each document's `version` to `4`. When upgrading from version 2, also replace every `admin` role with `maintainer`. When upgrading from version 1, additionally add explicit group `visibility` and `lfs` policies, remove `repositories` from every token, and remove the top-level `repositories` map. Earlier schema versions are rejected rather than interpreted with potentially unsafe defaults.
 

@@ -73,6 +73,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if repo.Name == "control" && len(repo.Groups) != 1 {
+		// Only a root group owns a control repository. Keep legacy nested
+		// control.git directories unreachable if they remain on disk.
+		http.NotFound(w, r)
+		return
+	}
 	if r.ContentLength > maximumBodyBytes {
 		http.Error(w, "Git request body is too large", http.StatusRequestEntityTooLarge)
 		return

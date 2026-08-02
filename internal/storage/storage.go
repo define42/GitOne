@@ -71,6 +71,13 @@ type GroupInfo struct {
 	Repositories []string
 }
 
+func reservedGroupDirectory(name string) bool {
+	return strings.HasSuffix(name, ".git") ||
+		strings.HasSuffix(name, ".lfs") ||
+		strings.HasSuffix(name, ".build") ||
+		strings.HasSuffix(name, ".reviews")
+}
+
 func pathEntryExists(path string) (bool, error) {
 	_, err := os.Lstat(path)
 	if err == nil {
@@ -106,6 +113,44 @@ func (s Store) GroupPath(group string) (string, error) {
 	return repopath.SafeJoin(s.Root, parts...)
 }
 
+func (s Store) groupExists(group string) (bool, error) {
+	parts, err := repopath.ParseGroup(group)
+	if err != nil {
+		return false, err
+	}
+	for _, part := range parts {
+		if reservedGroupDirectory(part) {
+			return false, nil
+		}
+	}
+	groupPath, err := repopath.SafeJoin(s.Root, parts...)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Stat(groupPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	controlPath, err := repopath.SafeJoin(s.Root, parts[0], "control.git")
+	if err != nil {
+		return false, err
+	}
+	info, err = os.Stat(controlPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
 func (s Store) ListGroups() ([]GroupInfo, error) {
 	root, err := repopath.SafeJoin(s.Root)
 	if err != nil {
@@ -118,53 +163,64 @@ func (s Store) ListGroups() ([]GroupInfo, error) {
 	}
 
 	groups := []GroupInfo{}
-	var walk func(string, []string) error
-	walk = func(directory string, parts []string) error {
+	var walkGroup func(string, []string) error
+	walkGroup = func(directory string, parts []string) error {
 		entries, err := os.ReadDir(directory)
 		if err != nil {
 			return err
 		}
 
-		hasControl := false
 		repositories := []string{}
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
 			}
-			switch {
-			case entry.Name() == "control.git":
-				hasControl = true
-			case strings.HasSuffix(entry.Name(), ".git"):
+			if strings.HasSuffix(entry.Name(), ".git") && entry.Name() != "control.git" {
 				repositories = append(repositories, strings.TrimSuffix(entry.Name(), ".git"))
 			}
 		}
-		if hasControl {
-			groups = append(groups, GroupInfo{
-				Path:         strings.Join(parts, "/"),
-				Repositories: repositories,
-			})
-		}
+		groups = append(groups, GroupInfo{
+			Path:         strings.Join(parts, "/"),
+			Repositories: repositories,
+		})
 
 		for _, entry := range entries {
-			if !entry.IsDir() ||
-				strings.HasSuffix(entry.Name(), ".git") ||
-				strings.HasSuffix(entry.Name(), ".lfs") ||
-				strings.HasSuffix(entry.Name(), ".build") ||
-				strings.HasSuffix(entry.Name(), ".reviews") {
+			if !entry.IsDir() || reservedGroupDirectory(entry.Name()) {
 				continue
 			}
 			nextParts := append(append([]string(nil), parts...), entry.Name())
 			if _, err := repopath.ParseGroup(strings.Join(nextParts, "/")); err != nil {
 				continue
 			}
-			if err := walk(filepath.Join(directory, entry.Name()), nextParts); err != nil {
+			if err := walkGroup(filepath.Join(directory, entry.Name()), nextParts); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err = walk(root, nil); err != nil {
+	entries, err := os.ReadDir(root)
+	if err != nil {
 		return nil, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || reservedGroupDirectory(entry.Name()) {
+			continue
+		}
+		if _, parseErr := repopath.ParseGroup(entry.Name()); parseErr != nil {
+			continue
+		}
+		directory := filepath.Join(root, entry.Name())
+		controlInfo, controlErr := os.Stat(filepath.Join(directory, "control.git"))
+		if errors.Is(controlErr, os.ErrNotExist) ||
+			(controlErr == nil && !controlInfo.IsDir()) {
+			continue
+		}
+		if controlErr != nil {
+			return nil, controlErr
+		}
+		if walkErr := walkGroup(directory, []string{entry.Name()}); walkErr != nil {
+			return nil, walkErr
+		}
 	}
 	return groups, nil
 }
@@ -387,7 +443,11 @@ func (s Store) createRepository(r repopath.Repository, options CreateRepositoryO
 	if e != nil {
 		return e
 	}
-	if _, e = os.Stat(filepath.Join(gp, "control.git")); e != nil {
+	exists, e := s.groupExists(r.Group())
+	if e != nil {
+		return e
+	}
+	if !exists {
 		return errors.New("group does not exist")
 	}
 	gitp, e := s.GitPath(r)
@@ -570,17 +630,25 @@ func (s Store) CreateGroupLocked(group, owner, description string) error {
 	})
 }
 
-// CreateInheritedGroupLocked creates an inherited subgroup without assigning
-// its creator a direct role while its caller holds the repository operations
-// lock.
-func (s Store) CreateInheritedGroupLocked(group, author, description string) error {
+// CreateSubgroupLocked creates a structural subgroup governed by its root
+// group's control repository while its caller holds the operation lock.
+func (s Store) CreateSubgroupLocked(group string) error {
 	return review.NewStore(s.Root).WithGroupLocks([]string{group}, func() error {
-		return s.createGroup(group, "", author, description)
+		return s.createGroup(group, "", "", "")
 	})
 }
 
 func (s Store) createGroup(group, owner, author, description string) error {
-	gp, e := s.GroupPath(group)
+	parts, e := repopath.ParseGroup(group)
+	if e != nil {
+		return e
+	}
+	for _, part := range parts {
+		if reservedGroupDirectory(part) {
+			return errors.New("group name uses a reserved storage suffix")
+		}
+	}
+	gp, e := repopath.SafeJoin(s.Root, parts...)
 	if e != nil {
 		return e
 	}
@@ -590,13 +658,26 @@ func (s Store) createGroup(group, owner, author, description string) error {
 	}
 	if _, e = os.Stat(gp); e == nil {
 		return errors.New("group exists")
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return e
 	}
-	if parent := filepath.Dir(gp); parent != root {
-		if _, e = os.Stat(filepath.Join(parent, "control.git")); e != nil {
+	if len(parts) > 1 {
+		parentGroup := strings.Join(parts[:len(parts)-1], "/")
+		parentExists, parentErr := s.groupExists(parentGroup)
+		if parentErr != nil {
+			return parentErr
+		}
+		if !parentExists {
 			return errors.New("parent group does not exist")
 		}
+		// Subgroups are directories only. Their authorization and policy come
+		// from the root group's single control.git repository.
+		return os.Mkdir(gp, 0o750)
 	}
-	if e = os.MkdirAll(gp, 0o750); e != nil {
+	if strings.TrimSpace(owner) == "" {
+		return errors.New("root group owner is required")
+	}
+	if e = os.Mkdir(gp, 0o750); e != nil {
 		return e
 	}
 	tmp, e := os.MkdirTemp(root, ".gitone-control-")
@@ -625,7 +706,6 @@ func (s Store) createGroup(group, owner, author, description string) error {
 		Version:     control.CurrentVersion,
 		Group:       group,
 		Description: description,
-		Inherit:     true,
 		Visibility:  "private",
 		LFS:         control.LFSPolicy{Enabled: true},
 		Members:     members,
@@ -684,6 +764,13 @@ func (s Store) UpdateGroupControlLocked(
 	document control.Document,
 	author string,
 ) error {
+	rootGroup, err := repopath.RootGroup(group)
+	if err != nil {
+		return err
+	}
+	if rootGroup != group {
+		return errors.New("group settings belong to root groups only")
+	}
 	if err := control.Validate(group, document); err != nil {
 		return err
 	}
@@ -1043,6 +1130,13 @@ func (s Store) DeleteGroupLocked(group string) error {
 }
 
 func (s Store) deleteGroup(group string) error {
+	exists, err := s.groupExists(group)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("group does not exist")
+	}
 	gp, err := s.GroupPath(group)
 	if err != nil {
 		return err
@@ -1052,6 +1146,9 @@ func (s Store) deleteGroup(group string) error {
 		return err
 	}
 	for _, e := range entries {
+		// A root control repository is metadata rather than user content. Also
+		// permit a legacy subgroup control repository so an otherwise-empty
+		// subgroup can still be removed after upgrading.
 		if e.Name() != "control.git" {
 			return errors.New("group is not empty")
 		}
@@ -1087,6 +1184,33 @@ func (s Store) RenameGroupLocked(group, newPath string) error {
 	if newPath == group || strings.HasPrefix(newPath, group+"/") {
 		return errors.New("cannot move a group into itself")
 	}
+	sourceExists, err := s.groupExists(group)
+	if err != nil {
+		return err
+	}
+	if !sourceExists {
+		return errors.New("group does not exist")
+	}
+	sourceRoot, err := repopath.RootGroup(group)
+	if err != nil {
+		return err
+	}
+	destinationRoot, err := repopath.RootGroup(newPath)
+	if err != nil {
+		return err
+	}
+	destinationParts, err := repopath.ParseGroup(newPath)
+	if err != nil {
+		return err
+	}
+	for _, part := range destinationParts {
+		if reservedGroupDirectory(part) {
+			return errors.New("group name uses a reserved storage suffix")
+		}
+	}
+	if (sourceRoot == group) != (destinationRoot == newPath) {
+		return errors.New("cannot move a root group into or out of a subgroup")
+	}
 	src, err := s.GroupPath(group)
 	if err != nil {
 		return err
@@ -1113,9 +1237,15 @@ func (s Store) RenameGroupLocked(group, newPath string) error {
 			}
 			parent := filepath.Dir(dst)
 			if parent != root {
-				if _, parentErr := os.Stat(
-					filepath.Join(parent, "control.git"),
-				); parentErr != nil {
+				parentGroup := strings.Join(
+					destinationParts[:len(destinationParts)-1],
+					"/",
+				)
+				parentExists, parentErr := s.groupExists(parentGroup)
+				if parentErr != nil {
+					return parentErr
+				}
+				if !parentExists {
 					return errors.New("destination parent group does not exist")
 				}
 			}

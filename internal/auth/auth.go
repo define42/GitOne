@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/define42/GitOne/internal/control"
+	"github.com/define42/GitOne/internal/repopath"
 )
 
 const (
@@ -58,55 +59,45 @@ func (r *Resolver) Authenticate(ctx context.Context, group, user, secret string)
 		finish(outcome)
 	}()
 
-	type groupControl struct {
-		path     string
-		document control.Document
+	rootGroup, err := repopath.RootGroup(group)
+	if err != nil {
+		return Principal{}, err
 	}
-	documents := make([]groupControl, 0)
-	paths := parents(group)
-	for i := len(paths) - 1; i >= 0; i-- {
-		document, err := r.Controls.Load(ctx, paths[i])
-		if err != nil {
-			return Principal{}, fmt.Errorf("load group control %q: %w", paths[i], err)
+	document, err := r.Controls.Load(ctx, rootGroup)
+	if err != nil {
+		return Principal{}, fmt.Errorf("load root group control %q: %w", rootGroup, err)
+	}
+	for _, token := range document.Tokens {
+		if token.Disabled || token.Key != user ||
+			(token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt)) {
+			continue
 		}
-		documents = append(documents, groupControl{path: paths[i], document: document})
-		for _, token := range document.Tokens {
-			if token.Disabled || token.Key != user ||
-				(token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt)) {
-				continue
-			}
-			matched, verifyErr := verifySecret(r.secretKDFLimiter(), token.Hash, secret)
-			if verifyErr != nil {
-				// KDF admission or execution failed before a credential verdict.
-				// Release the attempt reservation without counting a failure or
-				// clearing any prior failures.
-				outcome = attemptAborted
-				return Principal{}, verifyErr
-			}
-			if matched {
-				outcome = attemptSucceeded
-				return Principal{
-					Name:  user,
-					Role:  token.Role,
-					Group: paths[i],
-				}, nil
-			}
+		matched, verifyErr := verifySecret(r.secretKDFLimiter(), token.Hash, secret)
+		if verifyErr != nil {
+			// KDF admission or execution failed before a credential verdict.
+			// Release the attempt reservation without counting a failure or
+			// clearing any prior failures.
+			outcome = attemptAborted
+			return Principal{}, verifyErr
 		}
-		if !document.Inherit {
-			break
+		if matched {
+			outcome = attemptSucceeded
+			return Principal{
+				Name:  user,
+				Role:  token.Role,
+				Group: rootGroup,
+			}, nil
 		}
 	}
 	identity, err := r.authenticateIdentity(ctx, user, secret)
 	if err != nil {
 		return Principal{}, errors.New("invalid credentials")
 	}
-	for _, candidate := range documents {
-		if role, ok := candidate.document.Members[identity.Name]; ok {
-			identity.Role = role
-			identity.Group = candidate.path
-			outcome = attemptSucceeded
-			return identity, nil
-		}
+	if role, ok := document.Members[identity.Name]; ok {
+		identity.Role = role
+		identity.Group = rootGroup
+		outcome = attemptSucceeded
+		return identity, nil
 	}
 	return Principal{}, errors.New("invalid credentials")
 }
@@ -168,31 +159,20 @@ func (r *Resolver) AuthorizeIdentity(
 	group string,
 	identity Principal,
 ) (Principal, error) {
-	paths := parents(group)
-	for i := len(paths) - 1; i >= 0; i-- {
-		document, err := r.Controls.Load(ctx, paths[i])
-		if err != nil {
-			return Principal{}, fmt.Errorf("load group control %q: %w", paths[i], err)
-		}
-		if role, ok := document.Members[identity.Name]; ok {
-			identity.Role = role
-			identity.Group = paths[i]
-			return identity, nil
-		}
-		if !document.Inherit {
-			break
-		}
+	rootGroup, err := repopath.RootGroup(group)
+	if err != nil {
+		return Principal{}, err
+	}
+	document, err := r.Controls.Load(ctx, rootGroup)
+	if err != nil {
+		return Principal{}, fmt.Errorf("load root group control %q: %w", rootGroup, err)
+	}
+	if role, ok := document.Members[identity.Name]; ok {
+		identity.Role = role
+		identity.Group = rootGroup
+		return identity, nil
 	}
 	return Principal{}, errors.New("identity is not authorized")
-}
-
-func parents(g string) []string {
-	p := strings.Split(g, "/")
-	o := make([]string, len(p))
-	for i := range p {
-		o[i] = strings.Join(p[:i+1], "/")
-	}
-	return o
 }
 
 func HashSecret(secret string) (string, error) {
