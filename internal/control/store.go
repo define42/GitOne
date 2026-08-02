@@ -10,9 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/define42/GitOne/internal/gitformat"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 type Store struct {
@@ -29,7 +28,7 @@ func NewStore(root string) *Store { return &Store{Root: root, cache: map[string]
 func (s *Store) Load(ctx context.Context, group string) (Document, error) {
 	_ = ctx
 	p := filepath.Join(s.Root, filepath.FromSlash(group), "control.git")
-	r, e := gitformat.Open(p)
+	r, e := git.PlainOpen(p)
 	if e != nil {
 		return Document{}, e
 	}

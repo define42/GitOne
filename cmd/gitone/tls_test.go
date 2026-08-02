@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/tls"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -11,6 +13,11 @@ import (
 
 	"github.com/caddyserver/certmagic"
 )
+
+type staticAddress string
+
+func (address staticAddress) Network() string { return "tcp" }
+func (address staticAddress) String() string  { return string(address) }
 
 func clearTLSEnvironment(t *testing.T) {
 	t.Helper()
@@ -85,6 +92,22 @@ func TestTransportConfigFromEnvironment(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed private CA root", func(t *testing.T) {
+		clearTLSEnvironment(t)
+		rootCA := filepath.Join(t.TempDir(), "root.pem")
+		if err := os.WriteFile(rootCA, []byte("not a PEM certificate"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GITONE_TLS_MODE", "acme")
+		t.Setenv("GITONE_TLS_DOMAINS", "git.example")
+		t.Setenv("GITONE_ACME_CA_ROOT", rootCA)
+
+		_, err := transportConfigFromEnvironment(t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "no certificates found") {
+			t.Fatalf("transport configuration error = %v, want malformed root CA error", err)
+		}
+	})
+
 	for _, test := range []struct {
 		name      string
 		mode      string
@@ -130,6 +153,77 @@ func TestTransportConfigFromEnvironment(t *testing.T) {
 			_, err := transportConfigFromEnvironment(t.TempDir())
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("transport configuration error = %v, want containing %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestConfiguredServerUnencryptedListenFailure(t *testing.T) {
+	server := &configuredServer{
+		Server: &http.Server{Addr: "127.0.0.1:8080:extra"},
+		transport: transportConfig{
+			mode: transportUnencrypted,
+		},
+	}
+
+	err := server.ListenAndServe()
+	if err == nil || !strings.Contains(err.Error(), "too many colons") {
+		t.Fatalf("ListenAndServe error = %v, want invalid listen address", err)
+	}
+}
+
+func TestConfiguredServerACMEListenFailure(t *testing.T) {
+	server := &configuredServer{
+		Server: &http.Server{Addr: "127.0.0.1:8080:extra"},
+		transport: transportConfig{
+			mode: transportACME,
+		},
+	}
+
+	err := server.ListenAndServe()
+	if err == nil || !strings.Contains(err.Error(), "too many colons") {
+		t.Fatalf("ListenAndServe error = %v, want invalid listen address", err)
+	}
+}
+
+func TestListenerPort(t *testing.T) {
+	tests := []struct {
+		name      string
+		address   net.Addr
+		want      int
+		wantError bool
+	}{
+		{
+			name:    "valid",
+			address: staticAddress("127.0.0.1:8443"),
+			want:    8443,
+		},
+		{
+			name:      "malformed address",
+			address:   staticAddress("127.0.0.1"),
+			wantError: true,
+		},
+		{
+			name:      "non-numeric port",
+			address:   staticAddress("127.0.0.1:https"),
+			wantError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := listenerPort(test.address)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "determine TLS listener port") {
+					t.Fatalf("listenerPort error = %v, want port error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("listenerPort = %d, want %d", got, test.want)
 			}
 		})
 	}

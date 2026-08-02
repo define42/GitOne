@@ -16,11 +16,11 @@ func TestBuildStoreListsNewestFirstAndReportsCorruption(t *testing.T) {
 	store := NewStore(root)
 	older := Job{
 		ID: "older", Repository: repository.Full(), Status: StatusSucceeded,
-		Commit: strings.Repeat("1", 64), CreatedAt: time.Now().UTC().Add(-time.Hour),
+		CreatedAt: time.Now().UTC().Add(-time.Hour),
 	}
 	newer := Job{
 		ID: "newer", Repository: repository.Full(), Status: StatusQueued,
-		Commit: strings.Repeat("2", 64), CreatedAt: time.Now().UTC(),
+		CreatedAt: time.Now().UTC(),
 	}
 	if err := store.save(repository, older); err != nil {
 		t.Fatal(err)
@@ -96,19 +96,12 @@ func TestBuildStoreHandlesMissingDataAndValidatesIdentifiers(t *testing.T) {
 	if !validJobID("Build_123-ok") {
 		t.Fatal("valid build ID was rejected")
 	}
-	if err = store.save(repository, Job{
-		ID: "legacy-sha1", Commit: strings.Repeat("a", 40),
-	}); err == nil {
-		t.Fatal("save accepted a legacy SHA-1 commit ID")
-	}
 
 	unsafeRepository := repopath.Repository{Groups: []string{".."}, Name: "api"}
 	if _, err = store.List(unsafeRepository); err == nil {
 		t.Fatal("List accepted unsafe repository")
 	}
-	if err = store.save(unsafeRepository, Job{
-		ID: "build", Commit: strings.Repeat("1", 64),
-	}); err == nil {
+	if err = store.save(unsafeRepository, Job{ID: "build"}); err == nil {
 		t.Fatal("save accepted unsafe repository")
 	}
 }
@@ -176,9 +169,7 @@ func TestBuildStoreReportsFilesystemErrors(t *testing.T) {
 	}
 	store := NewStore(rootFile)
 	repository := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
-	job := Job{
-		ID: "build", Commit: strings.Repeat("1", 64), CreatedAt: time.Now().UTC(),
-	}
+	job := Job{ID: "build", CreatedAt: time.Now().UTC()}
 
 	if _, err := store.List(repository); err == nil {
 		t.Fatal("List ignored filesystem error")

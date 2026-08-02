@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	"github.com/go-git/go-git/v6/plumbing/object"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func WriteSourceArchive(
@@ -29,7 +29,7 @@ func WriteSourceArchive(
 	if err != nil {
 		return err
 	}
-	repository, err := gitformat.Open(gitPath)
+	repository, err := git.PlainOpen(gitPath)
 	if err != nil {
 		return err
 	}

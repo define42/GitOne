@@ -21,9 +21,9 @@ import (
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func assertMainDefaultWithoutMaster(t *testing.T, repository *git.Repository, mainExists bool) {
@@ -247,6 +247,65 @@ func TestCreateRepositoryWithReadme(t *testing.T) {
 	}
 	if contents != "api\n" {
 		t.Fatalf("unexpected README.md contents: %q", contents)
+	}
+}
+
+func TestCreatedRepositoriesUseSHA1ObjectFormat(t *testing.T) {
+	root := t.TempDir()
+	store := Store{Root: root}
+	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
+	if err := store.CreateRepository(repositoryPath, CreateRepositoryOptions{
+		InitializeReadme: true,
+		Author:           "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gitPath, err := store.GitPath(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := repository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repository.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree.Entries) != 1 {
+		t.Fatalf("initial tree has %d entries, want 1", len(tree.Entries))
+	}
+
+	for name, hash := range map[string]plumbing.Hash{
+		"commit": head.Hash(),
+		"tree":   tree.Hash,
+		"blob":   tree.Entries[0].Hash,
+	} {
+		objectID := hash.String()
+		if len(objectID) != 40 || !plumbing.IsHash(objectID) {
+			t.Errorf("%s object ID = %q, want a complete SHA-1 object ID", name, objectID)
+		}
+	}
+
+	configuration, err := os.ReadFile(filepath.Join(gitPath, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalized := strings.ToLower(string(configuration))
+	if strings.Contains(normalized, "objectformat") || strings.Contains(normalized, "sha256") {
+		t.Fatalf("new repository config enables SHA-256 objects:\n%s", configuration)
 	}
 }
 
@@ -935,8 +994,8 @@ func TestRepositoryAndGroupDeletionPreservesDataInTrash(t *testing.T) {
 		Target:     "main",
 		Source:     "feature",
 		Author:     "alice",
-		BaseCommit: strings.Repeat("1", 64),
-		HeadCommit: strings.Repeat("2", 64),
+		BaseCommit: strings.Repeat("1", 40),
+		HeadCommit: strings.Repeat("2", 40),
 	}
 	if err = reviews.Create(repositoryPath, &mergeRequest); err != nil {
 		t.Fatal(err)
@@ -1122,8 +1181,8 @@ func TestRenameRepositoryRollsBackWhenReviewMoveFails(t *testing.T) {
 		Target:     "main",
 		Source:     "feature",
 		Author:     "alice",
-		BaseCommit: strings.Repeat("1", 64),
-		HeadCommit: strings.Repeat("2", 64),
+		BaseCommit: strings.Repeat("1", 40),
+		HeadCommit: strings.Repeat("2", 40),
 	}
 	if err := review.NewStore(root).Create(repositoryPath, &request); err != nil {
 		t.Fatal(err)
@@ -1488,8 +1547,8 @@ func TestRenameGroupMovesNestedRepositoriesAndRejectsInvalidDestinations(t *test
 		Target:     "main",
 		Source:     "feature",
 		Author:     "alice",
-		BaseCommit: strings.Repeat("1", 64),
-		HeadCommit: strings.Repeat("2", 64),
+		BaseCommit: strings.Repeat("1", 40),
+		HeadCommit: strings.Repeat("2", 40),
 	}
 	if err := review.NewStore(root).Create(repositoryPath, &request); err != nil {
 		t.Fatal(err)
@@ -1563,7 +1622,7 @@ func TestRepositoryDescriptionHandlesMissingInvalidAndBrokenMetadata(t *testing.
 		t.Fatal(err)
 	}
 	checkout := filepath.Join(t.TempDir(), "invalid")
-	repository, err := git.PlainClone(checkout, &git.CloneOptions{URL: gitPath})
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1600,7 +1659,7 @@ func TestRepositoryDescriptionHandlesMissingInvalidAndBrokenMetadata(t *testing.
 	}
 	if err = bare.Storer.SetReference(plumbing.NewHashReference(
 		plumbing.NewBranchReferenceName("main"),
-		plumbing.NewHash(strings.Repeat("4", 64)),
+		plumbing.NewHash("4444444444444444444444444444444444444444"),
 	)); err != nil {
 		t.Fatal(err)
 	}
@@ -1651,7 +1710,7 @@ func TestUpdateGroupControlRejectsInvalidStateAndUsesDefaultAuthor(t *testing.T)
 
 	if err = repository.Storer.SetReference(plumbing.NewHashReference(
 		plumbing.NewBranchReferenceName("main"),
-		plumbing.NewHash(strings.Repeat("5", 64)),
+		plumbing.NewHash("5555555555555555555555555555555555555555"),
 	)); err != nil {
 		t.Fatal(err)
 	}

@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
-	"github.com/go-git/go-git/v6/plumbing"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 func TestEmbeddedRunnerValidatesConfiguration(t *testing.T) {
@@ -126,11 +126,7 @@ func TestEmbeddedRunnerScheduleErrorsAndFullQueue(t *testing.T) {
 	); err == nil {
 		t.Fatal("missing repository schedule was accepted")
 	}
-	failed, err := buildRunner.Schedule(
-		repositoryPath,
-		"main",
-		plumbing.NewHash(strings.Repeat("0", 64)),
-	)
+	failed, err := buildRunner.Schedule(repositoryPath, "main", plumbing.ZeroHash)
 	if err != nil || len(failed) != 1 || failed[0].Status != StatusFailed {
 		t.Fatalf("unknown commit schedule = %#v, %v", failed, err)
 	}
@@ -233,7 +229,7 @@ func TestEmbeddedRunnerRunReportsPreparationAndExecutorFailures(t *testing.T) {
 		repository: repopath.Repository{Groups: []string{"engineering"}, Name: "api"},
 		job: Job{
 			ID: "build", Repository: "engineering/api", Branch: "main",
-			Commit: strings.Repeat("1", 64), Status: StatusQueued, CreatedAt: time.Now().UTC(),
+			Commit: strings.Repeat("1", 40), Status: StatusQueued, CreatedAt: time.Now().UTC(),
 		},
 		config: repoconfig.JobConfig{
 			Image: "alpine:3", Script: []string{"true"}, TimeoutSeconds: 5,
@@ -339,7 +335,7 @@ func initializeRunTestRepository(
 	if err = os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = gitformat.Init(path, true); err != nil {
+	if _, err = git.PlainInit(path, true); err != nil {
 		t.Fatal(err)
 	}
 	return store
@@ -371,56 +367,5 @@ func TestEmbeddedRunnerCheckoutAndCappedWriterErrors(t *testing.T) {
 	writer = newCappedLogWriter(alwaysErrorWriter{}, 1)
 	if written, err := writer.Write(bytes.Repeat([]byte("x"), 32)); err == nil || written != 0 {
 		t.Fatalf("marker writer error = %d, %v", written, err)
-	}
-}
-
-func TestEmbeddedRunnerCheckoutPinsSHA256Storage(t *testing.T) {
-	root := t.TempDir()
-	repositoryPath := repopath.Repository{Groups: []string{"engineering"}, Name: "api"}
-	store := storage.Store{Root: root}
-	if err := store.CreateGroup("engineering", "alice", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateRepository(repositoryPath, storage.CreateRepositoryOptions{
-		InitializeReadme: true,
-		Author:           "alice",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	gitPath, err := store.GitPath(repositoryPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	source, err := gitformat.Open(gitPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	head, err := source.Head()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = source.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	destination := t.TempDir()
-	var output bytes.Buffer
-	buildRunner := &Runner{storage: store}
-	if err = buildRunner.checkout(repositoryPath, head.Hash(), destination, &output); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(output.String(), head.Hash().String()) {
-		t.Fatalf("checkout output = %q", output.String())
-	}
-	checkout, err := gitformat.Open(destination)
-	if err != nil {
-		t.Fatalf("open pinned checkout: %v", err)
-	}
-	defer func() { _ = checkout.Close() }()
-	if err = gitformat.Validate(checkout); err != nil {
-		t.Fatalf("validate pinned checkout: %v", err)
-	}
-	if _, err = os.Stat(filepath.Join(destination, "README.md")); err != nil {
-		t.Fatalf("checkout did not materialize README.md: %v", err)
 	}
 }

@@ -75,7 +75,7 @@ func TestLibvirtExecutorWithKVM(t *testing.T) {
 			ID:         "libvirt-integration",
 			Repository: "engineering/api",
 			Branch:     "main",
-			Commit:     strings.Repeat("1", 64),
+			Commit:     strings.Repeat("1", 40),
 		},
 		Directory: workspace,
 		Config: repoconfig.JobConfig{

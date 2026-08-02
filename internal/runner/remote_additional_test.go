@@ -533,7 +533,7 @@ func TestRemoteStopsCanceledBuildWithoutCompletingIt(t *testing.T) {
 	lease := Lease{
 		Job: Job{
 			ID: "canceled-build", Repository: "engineering/api", Branch: "main",
-			Commit: strings.Repeat("1", 64), Image: "alpine:3", RunnerID: "runner-one",
+			Commit: strings.Repeat("1", 40), Image: "alpine:3", RunnerID: "runner-one",
 		},
 		Config: repoconfig.JobConfig{
 			Image: "alpine:3", Script: []string{"sleep 30"}, TimeoutSeconds: 30,

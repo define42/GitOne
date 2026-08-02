@@ -11,7 +11,7 @@ import (
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/runner"
-	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 type repositoryBuildsInput struct {

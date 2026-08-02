@@ -12,14 +12,13 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	fdiff "github.com/go-git/go-git/v6/plumbing/format/diff"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	gitstorage "github.com/go-git/go-git/v6/storage"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	gitstorage "github.com/go-git/go-git/v5/storage"
 	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
@@ -163,7 +162,7 @@ func (a API) mergeRepositoryBranches(
 	if err != nil {
 		return nil, huma.Error500InternalServerError("could not resolve repository", err)
 	}
-	repository, err := gitformat.Open(repositoryPath)
+	repository, err := git.PlainOpen(repositoryPath)
 	if err != nil {
 		return nil, huma.Error404NotFound("repository not found", err)
 	}
@@ -373,7 +372,7 @@ func (a API) mergeRepositoryBranchesAtSource(
 		TreeHash:     treeHash,
 		ParentHashes: []plumbing.Hash{targetCommit.Hash, sourceCommit.Hash},
 	}
-	encodedCommit := repository.Storer.NewEncodedObject()
+	encodedCommit := &plumbing.MemoryObject{}
 	if err = commit.Encode(encodedCommit); err != nil {
 		return repositoryMergeResult{}, huma.Error500InternalServerError(
 			"could not encode merge commit",
@@ -861,7 +860,7 @@ func mergeTrees(
 
 	sort.Sort(object.TreeEntrySorter(entries))
 	tree := &object.Tree{Entries: entries}
-	encodedTree := repository.Storer.NewEncodedObject()
+	encodedTree := &plumbing.MemoryObject{}
 	if err := tree.Encode(encodedTree); err != nil {
 		return plumbing.ZeroHash, nil, err
 	}
@@ -960,7 +959,7 @@ func mergeFileEntries(
 	if !clean {
 		return object.TreeEntry{}, false, nil
 	}
-	blob := repository.Storer.NewEncodedObject()
+	blob := &plumbing.MemoryObject{}
 	blob.SetType(plumbing.BlobObject)
 	blob.SetSize(int64(len(merged)))
 	writer, err := blob.Writer()

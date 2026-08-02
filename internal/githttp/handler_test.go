@@ -22,14 +22,14 @@ import (
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
-	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 )
 
 func TestControlRefValidation(t *testing.T) {
-	req := &packp.UpdateRequests{}
+	req := packp.NewReferenceUpdateRequest()
 	req.Commands = []*packp.Command{{Name: plumbing.NewBranchReferenceName("main"), Old: plumbing.NewHash("1111111111111111111111111111111111111111"), New: plumbing.NewHash("2222222222222222222222222222222222222222")}}
 	if e := validateControlRefs(req); e != nil {
 		t.Fatal(e)
@@ -68,7 +68,7 @@ func TestGitRequestBodyLimitsRejectDeclaredOversize(t *testing.T) {
 }
 
 func TestControlRejectsTags(t *testing.T) {
-	req := &packp.UpdateRequests{}
+	req := packp.NewReferenceUpdateRequest()
 	req.Commands = []*packp.Command{{Name: plumbing.NewTagReferenceName("v1"), Old: plumbing.NewHash("1111111111111111111111111111111111111111"), New: plumbing.NewHash("2222222222222222222222222222222222222222")}}
 	if e := validateControlRefs(req); e == nil {
 		t.Fatal("expected rejection")
@@ -107,7 +107,7 @@ func TestControlRefValidationRejectsUnsafeMainChanges(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := &packp.UpdateRequests{}
+			request := packp.NewReferenceUpdateRequest()
 			request.Commands = test.commands
 			if err := validateControlRefs(request); err == nil {
 				t.Fatal("unsafe control reference update was accepted")
@@ -237,9 +237,10 @@ func TestValidateControlUpdateWithStoredHistory(t *testing.T) {
 }
 
 func TestRejectsUnsupportedReceiveCapability(t *testing.T) {
-	capabilities := &capability.List{}
-	capabilities.Set(capability.ObjectFormat, gitSHA256ObjectFormat)
-	capabilities.Set(capability.Atomic)
+	capabilities := capability.NewList()
+	if err := capabilities.Set(capability.Atomic); err != nil {
+		t.Fatal(err)
+	}
 	if err := validateReceiveCapabilities(capabilities); err == nil {
 		t.Fatal("expected unsupported atomic capability to be rejected")
 	}
@@ -380,7 +381,7 @@ func TestSmartHTTPRoutesAndMalformedRequests(t *testing.T) {
 
 func TestReceiveStatusErrorFormats(t *testing.T) {
 	handler := Handler{}
-	request := &packp.UpdateRequests{}
+	request := packp.NewReferenceUpdateRequest()
 	response := httptest.NewRecorder()
 	handler.writeReceiveError(response, request, "ok", errors.New("rejected"))
 	if response.Code != http.StatusConflict ||
@@ -388,7 +389,9 @@ func TestReceiveStatusErrorFormats(t *testing.T) {
 		t.Fatalf("plain receive error = %d %q", response.Code, response.Body.String())
 	}
 
-	request.Capabilities.Set(capability.ReportStatus)
+	if err := request.Capabilities.Set(capability.ReportStatus); err != nil {
+		t.Fatal(err)
+	}
 	request.Commands = []*packp.Command{{
 		Name: plumbing.NewBranchReferenceName("main"),
 		Old:  plumbing.NewHash("1111111111111111111111111111111111111111"),
@@ -428,7 +431,7 @@ func TestRejectsStaleReferenceUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := &packp.UpdateRequests{}
+	request := packp.NewReferenceUpdateRequest()
 	request.Commands = []*packp.Command{{
 		Name: plumbing.NewBranchReferenceName("main"),
 		Old:  plumbing.NewHash("1111111111111111111111111111111111111111"),
@@ -521,7 +524,7 @@ func TestValidateReferenceCommands(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			request := &packp.UpdateRequests{}
+			request := packp.NewReferenceUpdateRequest()
 			request.Commands = []*packp.Command{test.command}
 			validationErr := validateReferenceCommands(repository, request)
 			switch {
@@ -661,13 +664,13 @@ func TestPartialReceiveNotifiesSuccessfulReferenceUpdates(t *testing.T) {
 	}
 
 	feature := plumbing.NewBranchReferenceName("feature")
-	request := &packp.UpdateRequests{}
-	request.Capabilities.Set(capability.ReportStatus)
-	request.Capabilities.Set(capability.ObjectFormat, gitSHA256ObjectFormat)
-	zero := mustObjectID(t, gitSHA256ZeroObjectID)
+	request := packp.NewReferenceUpdateRequest()
+	if err = request.Capabilities.Set(capability.ReportStatus); err != nil {
+		t.Fatal(err)
+	}
 	request.Commands = []*packp.Command{
-		{Name: feature, Old: zero, New: head.Hash()},
-		{Name: feature, Old: zero, New: head.Hash()},
+		{Name: feature, Old: plumbing.ZeroHash, New: head.Hash()},
+		{Name: feature, Old: plumbing.ZeroHash, New: head.Hash()},
 	}
 	var body bytes.Buffer
 	if err = request.Encode(&body); err != nil {

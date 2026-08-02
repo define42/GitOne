@@ -11,13 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repoconfig"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"gopkg.in/yaml.v3"
 )
 
@@ -261,7 +260,7 @@ func TestRunnerSkipsUnconfiguredAndFilteredBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitPath, _ := store.GitPath(repositoryPath)
-	repository, _ := gitformat.Open(gitPath)
+	repository, _ := git.PlainOpen(gitPath)
 	head, _ := repository.Head()
 	executor := &recordingExecutor{}
 	buildRunner, err := New(Config{
@@ -331,7 +330,7 @@ func TestBuildStoreUsesRepositoryLocalDirectory(t *testing.T) {
 		ID:         "build-local",
 		Repository: repository.Full(),
 		Branch:     "main",
-		Commit:     strings.Repeat("1", 64),
+		Commit:     strings.Repeat("1", 40),
 		Status:     StatusSucceeded,
 		CreatedAt:  time.Now().UTC(),
 	}
@@ -568,11 +567,8 @@ func commitBuildConfig(
 		t.Fatal(err)
 	}
 	checkout := filepath.Join(t.TempDir(), "checkout")
-	repository, err := git.PlainClone(checkout, &git.CloneOptions{URL: gitPath})
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err = gitformat.Validate(repository); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := yaml.Marshal(config)

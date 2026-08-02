@@ -26,13 +26,12 @@ import (
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/runner"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/config"
-	"github.com/go-git/go-git/v6/plumbing"
-	gitclient "github.com/go-git/go-git/v6/plumbing/client"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	gittransport "github.com/go-git/go-git/v6/plumbing/transport/http"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	gittransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
 type staticDirectory map[string]string
@@ -985,7 +984,7 @@ func TestControlRepositoryAccessIsRestricted(t *testing.T) {
 
 	escalation := `{"content":"{\"version\":4,\"group\":\"engineering\",\"inherit\":true,` +
 		`\"visibility\":\"private\",\"members\":{\"alice\":\"owner\",\"bob\":\"owner\"}}",` +
-		`"expectedCommit":"0000000000000000000000000000000000000000000000000000000000000000"}`
+		`"expectedCommit":"0000000000000000000000000000000000000000"}`
 	request := httptest.NewRequest(
 		http.MethodPut,
 		"/api/repositories/engineering%2Fcontrol/files/main/control.json",
@@ -1852,8 +1851,9 @@ func TestImportBareRepositoryFromHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if origin := configuration.Remotes["origin"]; origin != nil {
-		t.Fatalf("clean imported repository retained origin configuration: %#v", origin)
+	origin := configuration.Remotes["origin"]
+	if origin == nil || len(origin.URLs) != 1 || origin.URLs[0] != remoteURL {
+		t.Fatalf("imported origin = %#v, want URL %q", origin, remoteURL)
 	}
 	if _, err = imported.Worktree(); !errors.Is(err, git.ErrIsBareRepository) {
 		t.Fatalf("imported repository is not bare: %v", err)
@@ -2243,11 +2243,9 @@ func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 		Username: "alice",
 		Password: "secret",
 	}
-	clonedRepository, err := git.PlainClone(checkout, &git.CloneOptions{
-		URL: server.URL + "/doh/whaat/hello.git",
-		ClientOptions: []gitclient.Option{
-			gitclient.WithHTTPAuth(credentials),
-		},
+	clonedRepository, err := git.PlainClone(checkout, false, &git.CloneOptions{
+		URL:  server.URL + "/doh/whaat/hello.git",
+		Auth: credentials,
 	})
 	if err != nil {
 		t.Fatalf("clone repository: %v", err)
@@ -2302,20 +2300,14 @@ func TestCloneRepositoryInitializedWithReadme(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = clonedRepository.Push(&git.PushOptions{
-		ClientOptions: []gitclient.Option{
-			gitclient.WithHTTPAuth(credentials),
-		},
-	}); err != nil {
+	if err = clonedRepository.Push(&git.PushOptions{Auth: credentials}); err != nil {
 		t.Fatalf("push repository: %v", err)
 	}
 
 	verificationCheckout := filepath.Join(t.TempDir(), "hello")
-	verifiedRepository, err := git.PlainClone(verificationCheckout, &git.CloneOptions{
-		URL: server.URL + "/doh/whaat/hello.git",
-		ClientOptions: []gitclient.Option{
-			gitclient.WithHTTPAuth(credentials),
-		},
+	verifiedRepository, err := git.PlainClone(verificationCheckout, false, &git.CloneOptions{
+		URL:  server.URL + "/doh/whaat/hello.git",
+		Auth: credentials,
 	})
 	if err != nil {
 		t.Fatalf("clone pushed repository: %v", err)
@@ -2352,7 +2344,7 @@ func TestRepositoryBrowserAPI(t *testing.T) {
 	}
 
 	checkout := filepath.Join(t.TempDir(), "api")
-	repository, err := git.PlainClone(checkout, &git.CloneOptions{
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{
 		URL: filepath.Join(root, "engineering", "api.git"),
 	})
 	if err != nil {
@@ -2941,7 +2933,7 @@ func TestRepositoryBrowserResolvesLFSContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkout := filepath.Join(t.TempDir(), "api")
-	repository, err := git.PlainClone(checkout, &git.CloneOptions{URL: gitPath})
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: gitPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3368,7 +3360,7 @@ func commitBranchFile(
 ) plumbing.Hash {
 	t.Helper()
 	checkout := filepath.Join(t.TempDir(), branch)
-	repository, err := git.PlainClone(checkout, &git.CloneOptions{URL: remotePath})
+	repository, err := git.PlainClone(checkout, false, &git.CloneOptions{URL: remotePath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3381,7 +3373,6 @@ func commitBranchFile(
 		if err = worktree.Checkout(&git.CheckoutOptions{
 			Branch: branchReference,
 			Create: true,
-			Force:  true,
 		}); err != nil {
 			t.Fatal(err)
 		}

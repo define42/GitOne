@@ -266,7 +266,7 @@ func TestRemoteAssignsAndReleasesReservationBeforeCompletion(t *testing.T) {
 			lease := Lease{
 				Job: Job{
 					ID: "reserved-build", Repository: "engineering/api", Branch: "main",
-					Commit: strings.Repeat("1", 64), Image: "alpine:3",
+					Commit: strings.Repeat("1", 40), Image: "alpine:3",
 				},
 				Config:       buildConfigForRemoteExecutorTest(),
 				LeaseSeconds: 30,
@@ -390,7 +390,7 @@ func TestRemoteHeartbeatsWhileTimedOutVMIsReleased(t *testing.T) {
 			lease := Lease{
 				Job: Job{
 					ID: "heartbeat-release", Repository: "engineering/api", Branch: "main",
-					Commit: strings.Repeat("2", 64), Image: "alpine:3",
+					Commit: strings.Repeat("2", 40), Image: "alpine:3",
 				},
 				Config: repoconfig.JobConfig{
 					Image: "alpine:3", Script: []string{"sleep 30"}, TimeoutSeconds: 1,

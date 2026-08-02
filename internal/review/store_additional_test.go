@@ -26,8 +26,8 @@ func validPersistedRequest(repository repopath.Repository) MergeRequest {
 		State:               StateOpen,
 		CreatedAt:           now,
 		UpdatedAt:           now,
-		BaseCommit:          strings.Repeat("1", 64),
-		HeadCommit:          strings.Repeat("2", 64),
+		BaseCommit:          strings.Repeat("1", 40),
+		HeadCommit:          strings.Repeat("2", 40),
 		RequiredApprovals:   1,
 		Approvals:           []Approval{},
 		Threads:             []Thread{},
@@ -52,7 +52,7 @@ func validPersistedRequest(repository repopath.Repository) MergeRequest {
 func TestValidateRejectsMalformedMergeRequests(t *testing.T) {
 	repository := testRepository()
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	hash := strings.Repeat("3", 64)
+	hash := strings.Repeat("3", 40)
 	tests := []struct {
 		name   string
 		mutate func(*MergeRequest)
@@ -71,9 +71,6 @@ func TestValidateRejectsMalformedMergeRequests(t *testing.T) {
 		}},
 		{"missing commit", func(request *MergeRequest) { request.BaseCommit = "" }},
 		{"invalid commit", func(request *MergeRequest) { request.HeadCommit = "not-a-hash" }},
-		{"legacy SHA-1 commit", func(request *MergeRequest) {
-			request.HeadCommit = strings.Repeat("a", 40)
-		}},
 		{"invalid approval requirement", func(request *MergeRequest) {
 			request.RequiredApprovals = 0
 		}},
@@ -194,8 +191,8 @@ func TestValidateAcceptsCompleteMergeIntent(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	request := validPersistedRequest(repository)
 	setMergeClaim(&request, now)
-	request.MergeTargetCommit = strings.Repeat("3", 64)
-	request.MergeResultCommit = strings.Repeat("4", 64)
+	request.MergeTargetCommit = strings.Repeat("3", 40)
+	request.MergeResultCommit = strings.Repeat("4", 40)
 	request.MergeResultStrategy = "merge-commit"
 	if err := validate(repository, request.ID, request); err != nil {
 		t.Fatal(err)
@@ -206,7 +203,7 @@ func setMergeClaim(request *MergeRequest, now time.Time) {
 	request.MergeInProgress = true
 	request.MergeClaimID = "claim"
 	request.MergeOwnerID = "worker"
-	request.MergeHeadCommit = strings.Repeat("5", 64)
+	request.MergeHeadCommit = strings.Repeat("5", 40)
 	request.MergeStartedBy = "alice"
 	request.MergeStartedAt = &now
 }

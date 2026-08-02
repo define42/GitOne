@@ -9,9 +9,9 @@ import (
 
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
+	git "github.com/go-git/go-git/v5"
 )
 
 type testIdentityProvider map[string]string
@@ -45,7 +45,7 @@ func repositoryAPIFixture(t *testing.T) (API, AuthInput, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := gitformat.Open(gitPath)
+	repository, err := git.PlainOpen(gitPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,18 +224,7 @@ func TestRepositoryBrowserRejectsInvalidReferencesAndPaths(t *testing.T) {
 				_, err := service.readRepositoryCommitDiff(ctx, &repositoryCommitDiffInput{
 					AuthInput:  credentials,
 					Repository: "engineering/api",
-					Commit:     strings.Repeat("0", 64),
-				})
-				return err
-			},
-		},
-		{
-			name: "legacy SHA-1 commit diff",
-			call: func() error {
-				_, err := service.readRepositoryCommitDiff(ctx, &repositoryCommitDiffInput{
-					AuthInput:  credentials,
-					Repository: "engineering/api",
-					Commit:     strings.Repeat("a", 40),
+					Commit:     strings.Repeat("0", 40),
 				})
 				return err
 			},
@@ -284,13 +273,7 @@ func TestUpdateRepositoryFileRejectsInvalidContentAndState(t *testing.T) {
 		{
 			name: "stale expected commit",
 			mutate: func(input *updateRepositoryFileInput) {
-				input.Body.ExpectedCommit = strings.Repeat("0", 64)
-			},
-		},
-		{
-			name: "legacy SHA-1 expected commit",
-			mutate: func(input *updateRepositoryFileInput) {
-				input.Body.ExpectedCommit = strings.Repeat("a", 40)
+				input.Body.ExpectedCommit = strings.Repeat("0", 40)
 			},
 		},
 		{

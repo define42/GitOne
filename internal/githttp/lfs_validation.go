@@ -8,11 +8,11 @@ import (
 	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 )
 
 func validateLFSPointerUpdates(
@@ -30,7 +30,7 @@ func validateLFSPointerUpdates(
 	seenTrees := make(map[plumbing.Hash]bool)
 	seenBlobs := make(map[plumbing.Hash]bool)
 	for _, command := range commands {
-		if command.New.IsZero() {
+		if command.New == plumbing.ZeroHash {
 			continue
 		}
 		commit, err := peelCommit(repository, command.New)

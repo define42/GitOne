@@ -8,24 +8,23 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/httpio"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/storage"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/format/packfile"
-	"github.com/go-git/go-git/v6/plumbing/format/pktline"
-	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
-	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
-	"github.com/go-git/go-git/v6/plumbing/protocol/packp/sideband"
-	"github.com/go-git/go-git/v6/plumbing/transport"
+	"github.com/go-git/go-billy/v5/osfs"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/packfile"
+	"github.com/go-git/go-git/v5/plumbing/format/pktline"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	gitserver "github.com/go-git/go-git/v5/plumbing/transport/server"
 )
 
 const (
@@ -41,12 +40,6 @@ type ReferenceUpdate struct {
 	Branch string
 	Commit plumbing.Hash
 }
-
-type responseWriteCloser struct {
-	io.Writer
-}
-
-func (responseWriteCloser) Close() error { return nil }
 
 type Handler struct {
 	Storage           storage.Store
@@ -128,12 +121,17 @@ func (h Handler) authorize(
 	return false
 }
 
-func (h Handler) openRepository(repo repopath.Repository) (*git.Repository, error) {
+func (h Handler) transport(repo repopath.Repository) (transport.Transport, *transport.Endpoint, error) {
 	p, err := h.Storage.GitPath(repo)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return gitformat.Open(p)
+	loader := gitserver.NewFilesystemLoader(osfs.New("/"))
+	ep, err := transport.NewEndpoint(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	return gitserver.NewServer(loader), ep, nil
 }
 
 func (h Handler) advertise(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
@@ -142,76 +140,94 @@ func (h Handler) advertise(w http.ResponseWriter, r *http.Request, repo repopath
 		http.Error(w, "unsupported service", 400)
 		return
 	}
-	repository, err := h.openRepository(repo)
+	t, ep, err := h.transport(repo)
 	if err != nil {
 		http.Error(w, "repository not found", 404)
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-"+service+"-advertisement")
-	w.Header().Set("Cache-Control", "no-cache")
-	writer := responseWriteCloser{Writer: w}
+	var adv *packp.AdvRefs
 	if service == "git-upload-pack" {
-		err = transport.UploadPack(
-			r.Context(),
-			repository.Storer,
-			nil,
-			writer,
-			&transport.UploadPackRequest{
-				GitProtocol:   r.Header.Get("Git-Protocol"),
-				AdvertiseRefs: true,
-				StatelessRPC:  true,
-			},
-		)
+		s, e := t.NewUploadPackSession(ep, nil)
+		if e != nil {
+			http.Error(w, e.Error(), 404)
+			return
+		}
+		defer func() {
+			_ = s.Close()
+		}()
+		adv, err = s.AdvertisedReferencesContext(r.Context())
 	} else {
-		err = advertiseSHA256ReceivePack(
-			repository.Storer,
-			r.Header.Get("Git-Protocol"),
-			writer,
-		)
+		s, e := t.NewReceivePackSession(ep, nil)
+		if e != nil {
+			http.Error(w, e.Error(), 404)
+			return
+		}
+		defer func() {
+			_ = s.Close()
+		}()
+		adv, err = s.AdvertisedReferencesContext(r.Context())
+		if err == nil {
+			// The filesystem pack writer cannot resolve bases omitted by thin packs.
+			err = adv.Capabilities.Set(noThinCapability)
+		}
 	}
 	if err != nil {
 		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-"+service+"-advertisement")
+	w.Header().Set("Cache-Control", "no-cache")
+	enc := pktline.NewEncoder(w)
+	if err := enc.Encodef("# service=%s\n", service); err != nil {
+		return
+	}
+	if err := enc.Flush(); err != nil {
+		return
+	}
+	if err := adv.Encode(w); err != nil {
 		return
 	}
 }
 
 func (h Handler) uploadPack(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
-	repository, err := h.openRepository(repo)
+	t, ep, err := h.transport(repo)
 	if err != nil {
 		http.Error(w, "not found", 404)
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
-	w.Header().Set("Cache-Control", "no-cache")
-	err = transport.UploadPack(
-		r.Context(),
-		repository.Storer,
-		r.Body,
-		responseWriteCloser{Writer: w},
-		&transport.UploadPackRequest{
-			GitProtocol:  r.Header.Get("Git-Protocol"),
-			StatelessRPC: true,
-		},
-	)
+	s, err := t.NewUploadPackSession(ep, nil)
 	if err != nil {
+		http.Error(w, err.Error(), 404)
+		return
+	}
+	defer func() {
+		_ = s.Close()
+	}()
+	req := packp.NewUploadPackRequest()
+	if err = req.Decode(r.Body); err != nil {
 		if httpio.BodyTooLarge(err) {
 			http.Error(w, "upload-pack request is too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		if strings.HasPrefix(err.Error(), "peeking line:") ||
-			strings.HasPrefix(err.Error(), "decoding upload-") {
-			http.Error(w, "bad upload-pack request", http.StatusBadRequest)
-			return
-		}
+		http.Error(w, "bad upload-pack request", 400)
+		return
+	}
+	resp, err := s.UploadPack(r.Context(), req)
+	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	defer func() {
+		_ = resp.Close()
+	}()
+	w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+	w.Header().Set("Cache-Control", "no-cache")
+	_ = resp.Encode(w)
 }
 
 func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopath.Repository) {
-	reader := bufio.NewReader(r.Body)
-	req := &packp.UpdateRequests{}
-	if err := req.Decode(reader); err != nil {
+	req := packp.NewReferenceUpdateRequest()
+	if err := req.Decode(r.Body); err != nil {
 		if httpio.BodyTooLarge(err) {
 			http.Error(w, "receive-pack request is too large", http.StatusRequestEntityTooLarge)
 			return
@@ -219,18 +235,10 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		http.Error(w, "bad receive-pack request", 400)
 		return
 	}
-	if req.Capabilities.Supports(capability.PushOptions) {
-		var options packp.PushOptions
-		if err := options.Decode(reader); err != nil {
-			http.Error(w, "bad receive-pack push options", http.StatusBadRequest)
-			return
-		}
-	}
-	if err := validateReceiveCapabilities(&req.Capabilities); err != nil {
-		h.writeReceiveError(w, req, "ok", err)
-		return
-	}
-	if err := validateReceiveObjectIDs(req); err != nil {
+	defer func() {
+		_ = req.Packfile.Close()
+	}()
+	if err := validateReceiveCapabilities(req.Capabilities); err != nil {
 		h.writeReceiveError(w, req, "ok", err)
 		return
 	}
@@ -264,7 +272,7 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		http.Error(w, "not found", 404)
 		return
 	}
-	repository, err := gitformat.Open(path)
+	repository, err := git.PlainOpen(path)
 	if err != nil {
 		http.Error(w, "not found", 404)
 		return
@@ -276,6 +284,7 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 	}
 	validationRepository := repository
 	var quarantine *receiveQuarantine
+	reader := bufio.NewReader(req.Packfile)
 	if _, peekErr := reader.Peek(1); peekErr == nil {
 		quarantine, err = newReceiveQuarantine(path, repository.Storer)
 		if err != nil {
@@ -339,7 +348,8 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		}
 	}
 
-	status := &packp.ReportStatus{UnpackStatus: "ok"}
+	status := packp.NewReportStatus()
+	status.UnpackStatus = "ok"
 	allApplied := true
 	maintenanceNeeded := false
 	updates := make([]ReferenceUpdate, 0, len(req.Commands))
@@ -355,7 +365,7 @@ func (h Handler) receivePack(w http.ResponseWriter, r *http.Request, repo repopa
 		} else {
 			maintenanceNeeded = maintenanceNeeded || maintenanceCandidates[command]
 			if repo.Name != "control" &&
-				!command.New.IsZero() &&
+				command.New != plumbing.ZeroHash &&
 				command.Name.IsBranch() {
 				updates = append(updates, ReferenceUpdate{
 					Branch: command.Name.Short(),
@@ -406,28 +416,12 @@ func referenceUpdateMayDiscardObjects(
 }
 
 func validateReceiveCapabilities(capabilities *capability.List) error {
-	objectFormats := capabilities.Get(capability.ObjectFormat)
-	// Native Git echoes the advertised object-format. go-git/v6 alpha.5 does
-	// not yet echo it on push, so an omitted value is accepted only because
-	// validateReceiveObjectIDs independently requires 32-byte object IDs and
-	// the SHA-256 quarantine rejects a pack in any other format.
-	if len(objectFormats) > 0 &&
-		(len(objectFormats) != 1 || objectFormats[0] != gitSHA256ObjectFormat) {
-		return fmt.Errorf("receive object-format must be sha256")
-	}
 	for _, requested := range capabilities.All() {
 		switch requested {
-		case capability.ObjectFormat:
 		case capability.Agent,
 			capability.OFSDelta,
 			capability.DeleteRefs,
 			capability.ReportStatus,
-			capability.ReportStatusV2,
-			capability.Sideband,
-			capability.Sideband64k,
-			capability.NoProgress,
-			capability.PushOptions,
-			capability.Quiet,
 			noThinCapability:
 		default:
 			return fmt.Errorf("unsupported receive capability %q", requested)
@@ -436,7 +430,7 @@ func validateReceiveCapabilities(capabilities *capability.List) error {
 	return nil
 }
 
-func validateControlRefs(req *packp.UpdateRequests) error {
+func validateControlRefs(req *packp.ReferenceUpdateRequest) error {
 	if len(req.Commands) != 1 {
 		return fmt.Errorf("control repository permits one main update only")
 	}
@@ -444,16 +438,16 @@ func validateControlRefs(req *packp.UpdateRequests) error {
 	if c.Name.String() != "refs/heads/main" {
 		return fmt.Errorf("control repository only permits refs/heads/main")
 	}
-	if c.New.IsZero() {
+	if c.New == plumbing.ZeroHash {
 		return fmt.Errorf("main cannot be deleted")
 	}
-	if c.Old.IsZero() {
+	if c.Old == plumbing.ZeroHash {
 		return fmt.Errorf("main can only be created during repository initialization")
 	}
 	return nil
 }
 
-func validateReferenceCommands(repository *git.Repository, req *packp.UpdateRequests) error {
+func validateReferenceCommands(repository *git.Repository, req *packp.ReferenceUpdateRequest) error {
 	for _, command := range req.Commands {
 		current, err := repository.Reference(command.Name, false)
 		switch command.Action() {
@@ -552,16 +546,16 @@ func applyReferenceCommand(repository *git.Repository, command *packp.Command) e
 
 func (h Handler) writeReceiveError(
 	w http.ResponseWriter,
-	req *packp.UpdateRequests,
+	req *packp.ReferenceUpdateRequest,
 	unpack string,
 	err error,
 ) {
-	if !req.Capabilities.Supports(capability.ReportStatus) &&
-		!req.Capabilities.Supports(capability.ReportStatusV2) {
+	if !req.Capabilities.Supports(capability.ReportStatus) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	status := &packp.ReportStatus{UnpackStatus: unpack}
+	status := packp.NewReportStatus()
+	status.UnpackStatus = unpack
 	for _, command := range req.Commands {
 		status.CommandStatuses = append(status.CommandStatuses, &packp.CommandStatus{
 			ReferenceName: command.Name,
@@ -573,25 +567,12 @@ func (h Handler) writeReceiveError(
 
 func (h Handler) writeReceiveStatus(
 	w http.ResponseWriter,
-	req *packp.UpdateRequests,
+	req *packp.ReferenceUpdateRequest,
 	status *packp.ReportStatus,
 ) {
 	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
 	w.Header().Set("Cache-Control", "no-cache")
-	if !req.Capabilities.Supports(capability.ReportStatus) &&
-		!req.Capabilities.Supports(capability.ReportStatusV2) {
-		return
-	}
-	var writer io.Writer = w
-	sidebanded := false
-	if req.Capabilities.Supports(capability.Sideband64k) {
-		writer = sideband.NewMuxer(sideband.Sideband64k, w)
-		sidebanded = true
-	} else if req.Capabilities.Supports(capability.Sideband) {
-		writer = sideband.NewMuxer(sideband.Sideband, w)
-		sidebanded = true
-	}
-	if err := status.Encode(writer); err == nil && sidebanded {
-		_ = pktline.WriteFlush(w)
+	if req.Capabilities.Supports(capability.ReportStatus) {
+		_ = status.Encode(w)
 	}
 }

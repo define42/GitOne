@@ -12,9 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
-	git "github.com/go-git/go-git/v6"
+	git "github.com/go-git/go-git/v5"
 )
 
 func TestArchiveImportErrorMethods(t *testing.T) {
@@ -587,5 +586,5 @@ func writeRepositoryTAR(
 }
 
 func initBareRepository(path string) (*git.Repository, error) {
-	return gitformat.Init(path, true)
+	return git.PlainInit(path, true)
 }

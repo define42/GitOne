@@ -12,7 +12,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/runner"
-	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 type runnerClaimBody struct {

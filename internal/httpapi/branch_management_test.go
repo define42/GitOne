@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestRepositoryBranchDivergenceAndDeletion(t *testing.T) {
@@ -114,7 +114,7 @@ func TestRepositoryBranchDeletionRejectsDefaultStaleAndMissingBranches(t *testin
 		status   int
 	}{
 		{name: "default", branch: "main", expected: head, status: http.StatusConflict},
-		{name: "stale", branch: "feature", expected: strings.Repeat("0", 64), status: http.StatusConflict},
+		{name: "stale", branch: "feature", expected: strings.Repeat("0", 40), status: http.StatusConflict},
 		{name: "missing", branch: "missing", expected: head, status: http.StatusNotFound},
 		{name: "invalid", branch: "bad branch", expected: head, status: http.StatusBadRequest},
 	} {
@@ -137,10 +137,37 @@ func TestRepositoryBranchDeletionRejectsDefaultStaleAndMissingBranches(t *testin
 
 func TestRepositoryBranchDeletionHTTPRoute(t *testing.T) {
 	service, _, head := repositoryAPIFixture(t)
+	if len(head) != 40 || !plumbing.IsHash(head) {
+		t.Fatalf("fixture HEAD = %q, want a complete SHA-1 commit ID", head)
+	}
 	repository := fixtureRepository(t, service)
 	setFixtureBranch(t, repository, "feature/docs", plumbing.NewHash(head))
 	mux := http.NewServeMux()
 	Register(mux, service)
+
+	for _, expectedCommit := range []string{
+		strings.Repeat("a", 39),
+		strings.Repeat("a", 64),
+	} {
+		request := httptest.NewRequest(
+			http.MethodDelete,
+			"/api/repositories/engineering%2Fapi/branches/feature%2Fdocs",
+			strings.NewReader(`{"expectedCommit":"`+expectedCommit+`"}`),
+		)
+		request.Header.Set("Content-Type", "application/json")
+		request.SetBasicAuth("alice", "secret")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf(
+				"delete with %d-character commit status = %d, want %d: %s",
+				len(expectedCommit),
+				response.Code,
+				http.StatusUnprocessableEntity,
+				response.Body.String(),
+			)
+		}
+	}
 
 	request := httptest.NewRequest(
 		http.MethodDelete,

@@ -13,20 +13,18 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	gitstorage "github.com/go-git/go-git/v6/storage"
-	"github.com/go-git/go-git/v6/storage/memory"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	gitstorage "github.com/go-git/go-git/v5/storage"
+	"github.com/go-git/go-git/v5/storage/memory"
 )
 
 func storeTestBlob(t *testing.T, repository *git.Repository, content []byte) plumbing.Hash {
 	t.Helper()
-	encoded := repository.Storer.NewEncodedObject()
+	encoded := &plumbing.MemoryObject{}
 	encoded.SetType(plumbing.BlobObject)
 	encoded.SetSize(int64(len(content)))
 	writer, err := encoded.Writer()
@@ -55,7 +53,7 @@ func storeTestTree(
 	t.Helper()
 	sort.Sort(object.TreeEntrySorter(entries))
 	tree := &object.Tree{Entries: entries}
-	encoded := repository.Storer.NewEncodedObject()
+	encoded := &plumbing.MemoryObject{}
 	if err := tree.Encode(encoded); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +87,7 @@ func storeTestCommit(
 		TreeHash:     tree.Hash,
 		ParentHashes: parents,
 	}
-	encoded := repository.Storer.NewEncodedObject()
+	encoded := &plumbing.MemoryObject{}
 	if err := commit.Encode(encoded); err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +103,7 @@ func storeTestCommit(
 }
 
 func TestMergeRepositoryBranchesAtSourceRejectsMovedSource(t *testing.T) {
-	repository, err := gitformat.Init(t.TempDir(), true)
+	repository, err := git.PlainInit(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +242,7 @@ func TestCompareCanMergeWithRepositoryScopedWriteToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := gitformat.Open(repositoryPath)
+	repository, err := git.PlainOpen(repositoryPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +316,7 @@ func TestCompareRepositoryBranchesHonorsCanceledContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := gitformat.Open(repositoryPath)
+	repository, err := git.PlainOpen(repositoryPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,10 +338,7 @@ func TestCompareRepositoryBranchesHonorsCanceledContext(t *testing.T) {
 }
 
 func TestReachableCommitsEnforcesWalkLimit(t *testing.T) {
-	repository, err := git.Init(
-		memory.NewStorage(memory.WithObjectFormat(formatcfg.SHA256)),
-		git.WithObjectFormat(formatcfg.SHA256),
-	)
+	repository, err := git.Init(memory.NewStorage(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,10 +370,7 @@ func TestReachableCommitsEnforcesWalkLimit(t *testing.T) {
 }
 
 func TestCommitDifferenceHonorsCanceledContext(t *testing.T) {
-	repository, err := git.Init(
-		memory.NewStorage(memory.WithObjectFormat(formatcfg.SHA256)),
-		git.WithObjectFormat(formatcfg.SHA256),
-	)
+	repository, err := git.Init(memory.NewStorage(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,13 +513,13 @@ func TestMergeFileMode(t *testing.T) {
 }
 
 func TestMergeFileEntriesWithStoredGitBlobs(t *testing.T) {
-	repository, err := gitformat.Init(t.TempDir(), true)
+	repository, err := git.PlainInit(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	storeBlob := func(content []byte) plumbing.Hash {
 		t.Helper()
-		encoded := repository.Storer.NewEncodedObject()
+		encoded := &plumbing.MemoryObject{}
 		encoded.SetType(plumbing.BlobObject)
 		encoded.SetSize(int64(len(content)))
 		writer, writerErr := encoded.Writer()
@@ -616,7 +608,7 @@ func TestMergeFileEntriesWithStoredGitBlobs(t *testing.T) {
 	}
 
 	missingBlob := entry(
-		plumbing.NewHash("4444444444444444444444444444444444444444444444444444444444444444"),
+		plumbing.NewHash("4444444444444444444444444444444444444444"),
 		filemode.Regular,
 	)
 	if _, _, err = mergeFileEntries(
@@ -631,13 +623,13 @@ func TestMergeFileEntriesWithStoredGitBlobs(t *testing.T) {
 }
 
 func TestMergeTreesWithStoredGitObjects(t *testing.T) {
-	repository, err := gitformat.Init(t.TempDir(), true)
+	repository, err := git.PlainInit(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	storeBlob := func(content string) plumbing.Hash {
 		t.Helper()
-		encoded := repository.Storer.NewEncodedObject()
+		encoded := &plumbing.MemoryObject{}
 		encoded.SetType(plumbing.BlobObject)
 		encoded.SetSize(int64(len(content)))
 		writer, writerErr := encoded.Writer()
@@ -661,7 +653,7 @@ func TestMergeTreesWithStoredGitObjects(t *testing.T) {
 		t.Helper()
 		sort.Sort(object.TreeEntrySorter(entries))
 		tree := &object.Tree{Entries: entries}
-		encoded := repository.Storer.NewEncodedObject()
+		encoded := &plumbing.MemoryObject{}
 		if encodeErr := tree.Encode(encoded); encodeErr != nil {
 			t.Fatal(encodeErr)
 		}
@@ -802,7 +794,7 @@ func TestMergeTreesWithStoredGitObjects(t *testing.T) {
 }
 
 func TestAssessBranchMergeWithStoredCommitGraphs(t *testing.T) {
-	repository, err := gitformat.Init(t.TempDir(), true)
+	repository, err := git.PlainInit(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -866,7 +858,7 @@ func TestAssessBranchMergeWithStoredCommitGraphs(t *testing.T) {
 }
 
 func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
-	repository, err := gitformat.Init(t.TempDir(), true)
+	repository, err := git.PlainInit(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -927,7 +919,7 @@ func TestCompareTreesReportsStoredFileChanges(t *testing.T) {
 }
 
 func TestCompareTreesEnforcesAggregateLimits(t *testing.T) {
-	repository, err := gitformat.Init(t.TempDir(), true)
+	repository, err := git.PlainInit(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}

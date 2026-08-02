@@ -84,6 +84,27 @@ func TestNewServer(t *testing.T) {
 	}
 }
 
+func TestRunReturnsInvalidListenAddressWithEphemeralSessions(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("GITONE_SESSION_HASH_KEY", "")
+	t.Setenv("GITONE_SESSION_BLOCK_KEY", "")
+
+	err := run(context.Background(), []string{
+		"-root", t.TempDir(),
+		"-listen", "127.0.0.1:8080:extra",
+	})
+	if err == nil || !strings.Contains(err.Error(), "too many colons") {
+		t.Fatalf("run error = %v, want invalid listen address", err)
+	}
+}
+
+func TestRunReturnsConfigurationError(t *testing.T) {
+	err := run(context.Background(), []string{"-unknown"})
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("run error = %v, want invalid flag error", err)
+	}
+}
+
 func TestServeGracefullyShutsDown(t *testing.T) {
 	server := newGracefulServerStub(t)
 	server.listenErr = http.ErrServerClosed
@@ -129,6 +150,21 @@ func TestServeReturnsShutdownError(t *testing.T) {
 		t.Fatalf("serve returned %v, want %v", err, want)
 	}
 	server.finish()
+}
+
+func TestServeReturnsListenErrorAfterShutdown(t *testing.T) {
+	want := errors.New("listen failed during shutdown")
+	server := newGracefulServerStub(t)
+	server.listenErr = want
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- serve(ctx, server, time.Second) }()
+
+	<-server.listenStarted
+	cancel()
+	if err := <-result; !errors.Is(err, want) {
+		t.Fatalf("serve returned %v, want %v", err, want)
+	}
 }
 
 func TestNewServerConfiguresACMEHTTPS(t *testing.T) {

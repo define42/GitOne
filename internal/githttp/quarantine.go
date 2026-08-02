@@ -8,16 +8,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/define42/GitOne/internal/gitformat"
-	"github.com/go-git/go-billy/v6/osfs"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/cache"
-	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
-	"github.com/go-git/go-git/v6/plumbing/storer"
-	gitstorage "github.com/go-git/go-git/v6/storage"
-	"github.com/go-git/go-git/v6/storage/filesystem"
-	"github.com/go-git/go-git/v6/storage/transactional"
+	"github.com/go-git/go-billy/v5/osfs"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/storer"
+	gitstorage "github.com/go-git/go-git/v5/storage"
+	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/go-git/go-git/v5/storage/transactional"
 )
 
 // receiveQuarantine keeps an incoming pack outside the live object directory.
@@ -34,13 +32,6 @@ type quarantineStorer struct {
 	gitstorage.Storer
 	objects    *transactional.ObjectStorage
 	packWriter storer.PackfileWriter
-}
-
-func (s *quarantineStorer) SupportsExtension(name, value string) bool {
-	checker, ok := s.Storer.(interface {
-		SupportsExtension(string, string) bool
-	})
-	return ok && checker.SupportsExtension(name, value)
 }
 
 func (s *quarantineStorer) NewEncodedObject() plumbing.EncodedObject {
@@ -98,11 +89,7 @@ func newReceiveQuarantine(
 		}
 	}()
 
-	temporary := filesystem.NewStorageWithOptions(
-		osfs.New(root),
-		cache.NewObjectLRUDefault(),
-		filesystem.Options{ObjectFormat: formatcfg.SHA256},
-	)
+	temporary := filesystem.NewStorage(osfs.New(root), cache.NewObjectLRUDefault())
 	if err = temporary.Init(); err != nil {
 		return nil, fmt.Errorf("initialize receive quarantine: %w", err)
 	}
@@ -114,9 +101,6 @@ func newReceiveQuarantine(
 	repository, err := git.Open(combined, nil)
 	if err != nil {
 		return nil, fmt.Errorf("open receive quarantine: %w", err)
-	}
-	if err = gitformat.Validate(repository); err != nil {
-		return nil, fmt.Errorf("validate receive quarantine: %w", err)
 	}
 
 	cleanup = false

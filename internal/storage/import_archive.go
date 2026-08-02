@@ -13,12 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/lockmgr"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
-	gitconfig "github.com/go-git/go-git/v6/config"
-	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
+	git "github.com/go-git/go-git/v5"
 )
 
 const (
@@ -187,16 +185,11 @@ func (s Store) stageRepositoryArchive(
 		return "", "", err
 	}
 
-	extractionPath := filepath.Join(temporaryPath, "archive")
-	if err = os.MkdirAll(extractionPath, 0o750); err != nil {
+	if err = extractRepositoryArchive(ctx, archivePath, filename, temporaryPath); err != nil {
 		_ = os.RemoveAll(temporaryPath)
 		return "", "", &ArchiveImportError{Err: err}
 	}
-	if err = extractRepositoryArchive(ctx, archivePath, filename, extractionPath); err != nil {
-		_ = os.RemoveAll(temporaryPath)
-		return "", "", &ArchiveImportError{Err: err}
-	}
-	repositoryPath, err := findArchivedBareRepository(extractionPath)
+	repositoryPath, err := findArchivedBareRepository(temporaryPath)
 	if err != nil {
 		_ = os.RemoveAll(temporaryPath)
 		return "", "", &ArchiveImportError{Err: err}
@@ -205,28 +198,13 @@ func (s Store) stageRepositoryArchive(
 		_ = os.RemoveAll(temporaryPath)
 		return "", "", &ArchiveImportError{Err: err}
 	}
-	isBare, inspectErr := inspectBareRepository(repositoryPath)
-	if inspectErr != nil {
-		_ = os.RemoveAll(temporaryPath)
-		return "", "", &ArchiveImportError{Err: inspectErr}
-	}
-	if !isBare {
+	if !isBareRepository(repositoryPath) {
 		_ = os.RemoveAll(temporaryPath)
 		return "", "", &ArchiveImportError{
 			Err: errors.New("archive does not contain a valid bare Git repository"),
 		}
 	}
-	normalizedPath := filepath.Join(temporaryPath, "repository.git")
-	repository, err := normalizeImportedRepository(repositoryPath, normalizedPath)
-	if err != nil {
-		_ = os.RemoveAll(temporaryPath)
-		return "", "", &ArchiveImportError{Err: err}
-	}
-	if err = repository.Close(); err != nil {
-		_ = os.RemoveAll(temporaryPath)
-		return "", "", &ArchiveImportError{Err: err}
-	}
-	return temporaryPath, normalizedPath, nil
+	return temporaryPath, repositoryPath, nil
 }
 
 func (s Store) prepareImportDestination(r repopath.Repository) (importDestination, error) {
@@ -539,11 +517,7 @@ func (r contextReader) Read(buffer []byte) (int, error) {
 }
 
 func findArchivedBareRepository(root string) (string, error) {
-	isBare, err := inspectBareRepository(root)
-	if err != nil {
-		return "", err
-	}
-	if isBare {
+	if isBareRepository(root) {
 		return root, nil
 	}
 	entries, err := os.ReadDir(root)
@@ -556,11 +530,7 @@ func findArchivedBareRepository(root string) (string, error) {
 			continue
 		}
 		candidate := filepath.Join(root, entry.Name())
-		isBare, err = inspectBareRepository(candidate)
-		if err != nil {
-			return "", err
-		}
-		if isBare {
+		if isBareRepository(candidate) {
 			candidates = append(candidates, candidate)
 		}
 	}
@@ -577,43 +547,24 @@ func findArchivedBareRepository(root string) (string, error) {
 }
 
 func isBareRepository(repositoryPath string) bool {
-	isBare, err := inspectBareRepository(repositoryPath)
-	return err == nil && isBare
-}
-
-func inspectBareRepository(repositoryPath string) (_ bool, retErr error) {
 	head, err := os.Stat(filepath.Join(repositoryPath, "HEAD"))
 	if err != nil || !head.Mode().IsRegular() {
-		return false, nil
+		return false
 	}
 	objects, err := os.Stat(filepath.Join(repositoryPath, "objects"))
 	if err != nil || !objects.IsDir() {
-		return false, nil
+		return false
 	}
-	objectFormat, err := gitformat.DetectObjectFormat(repositoryPath)
+	repository, err := git.PlainOpen(repositoryPath)
 	if err != nil {
-		return false, fmt.Errorf("inspect archived repository object format: %w", err)
+		return false
 	}
-	if objectFormat == formatcfg.SHA1 {
-		if err := gitformat.RequireLegacySHA1(); err != nil {
-			return false, fmt.Errorf("inspect archived SHA-1 repository: %w", err)
-		}
+	configuration, err := repository.Config()
+	if err != nil || !configuration.Core.IsBare {
+		return false
 	}
-
-	configFile, err := os.Open(filepath.Join(repositoryPath, "config"))
-	if err != nil {
-		return false, fmt.Errorf("open archived repository config: %w", err)
-	}
-	defer func() {
-		if err := configFile.Close(); err != nil && retErr == nil {
-			retErr = fmt.Errorf("close archived repository config: %w", err)
-		}
-	}()
-	configuration, err := gitconfig.ReadConfig(configFile)
-	if err != nil {
-		return false, fmt.Errorf("parse archived repository config: %w", err)
-	}
-	return configuration.Core.IsBare, nil
+	_, err = repository.Worktree()
+	return errors.Is(err, git.ErrIsBareRepository)
 }
 
 func sanitizeArchivedRepository(repositoryPath string) error {

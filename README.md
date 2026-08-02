@@ -16,6 +16,12 @@ Pure-Go Git and Git LFS server with a Huma administration API and a small TypeSc
 
 Every repository belongs to at least one group. Every group must contain `control.git` and is the authorization source for that group.
 
+Git repositories use Git's SHA-1 object format through go-git v5 for broad
+tooling compatibility. Git LFS object IDs remain SHA-256. Existing repositories
+created with Git's SHA-256 object format are not converted automatically and
+must be converted or replaced before running this version because go-git v5
+cannot open them.
+
 ## Run
 
 ```bash
@@ -71,35 +77,6 @@ The native libvirt SSH transport is restricted to NIST-curve ECDH, AES-CTR,
 HMAC-SHA-2, and approved EdDSA, ECDSA, or RSA host-key signatures. CI runs the
 complete Go test suite in both normal FIPS mode and the diagnostic
 `GODEBUG=fips140=only` mode.
-
-All GitOne-owned Git repositories use Git's SHA-256 object format. Repository
-creation, storage, smart HTTP, API object IDs, and runner checkouts reject
-SHA-1 repositories and 40-character object IDs. The implementation is pure Go
-and does not invoke a system `git` executable or use the old global
-`-tags=sha256` build mode.
-
-Remote and archive imports accept a complete legacy SHA-1 repository only as a
-one-way input conversion. GitOne validates each legacy object, rewrites every
-reachable tree, commit, annotated tag, and ref into a fresh SHA-256 repository,
-then deletes the staged SHA-1 data before publication. Blob contents, including
-Git LFS pointer blobs, remain byte-for-byte unchanged. Shallow repositories,
-alternates or grafts, submodule gitlinks, notes, replace refs, and signed commit
-or tag metadata are rejected because they cannot be converted without missing
-history, repository-qualified mappings, or invalidating signatures.
-
-SHA-256 imports cross the same clean boundary: GitOne verifies the complete
-reachable graph and copies only its objects and refs into a newly initialized
-SHA-256 repository. Hooks, reflogs, remote configuration, unreachable objects,
-and foreign object files are never published from the staged source.
-
-Verifying a legacy Git object necessarily computes SHA-1. GitOne treats that
-operation only as legacy input validation, not as an approved cryptographic
-service, and registers Go's standard-library SHA-1 implementation for go-git's
-legacy import path. Every published Git object and object ID is SHA-256. Legacy
-conversion is disabled by the diagnostic `GODEBUG=fips140=only` setting; a
-remote SHA-1 source is rejected before any pack request. Deployments whose
-policy forbids even non-security SHA-1 processing must also disallow SHA-1
-imports.
 
 Remote HTTP(S) repository imports block loopback, private, link-local, metadata, shared, multicast, documentation, and reserved address ranges by default. DNS is checked again when connecting, the validated numeric address is dialed directly, and every redirect is subject to the same policy. Administrators can set `GITONE_IMPORT_ALLOWLIST` or `-import-allowlist` to a comma-separated list of exact hostnames, IP addresses, or CIDR prefixes, such as `git.internal.example,10.20.0.0/16`. Allowlist entries explicitly permit otherwise blocked destinations.
 
@@ -480,8 +457,8 @@ These endpoints require `Authorization: Bearer <GITONE_RUNNER_TOKEN>`.
 | `PATCH` | `/api/groups/{path}` | Rename or move a group. JSON field: `newPath`. A cross-parent move requires maintainer access to the source group and both non-root parent groups. |
 | `DELETE` | `/api/groups/{path}` | Delete an empty group. |
 | `POST` | `/api/repositories/{path}` | Create a repository. `path` is the URL-encoded full `group/repository` path. Optional query parameters: `description`, and `initializeReadme=true` to create `README.md` on `main`. A description is stored in `.gitone.yaml`. |
-| `POST` | `/api/repositories/{path}/import` | Mirror all Git refs and tags plus every reachable Git LFS object from an HTTP or HTTPS remote into a new SHA-256 bare repository. A complete SHA-1 source is converted before publication. LFS objects are authenticated with the supplied credentials, downloaded through the same network policy as Git, and verified by size and SHA-256. A missing, corrupt, shallow, signed, or otherwise unsupported graph fails the complete import. Non-public network destinations are blocked unless administratively allowlisted. JSON fields: `url`, optional `username`, and optional `password` or access token. |
-| `POST` | `/api/repositories/{path}/import-archive?filename=repository.tar.gz` | Upload a `.zip`, `.tar`, `.tar.gz`, or `.tgz` file as the raw request body. The archive must contain one complete bare Git repository at its root or in one enclosing folder and may be up to 1 GiB compressed. SHA-1 repositories are converted to SHA-256 before publication. Git LFS objects are not imported. |
+| `POST` | `/api/repositories/{path}/import` | Mirror all Git refs and tags plus every reachable Git LFS object from an HTTP or HTTPS remote into a new bare repository. LFS objects are authenticated with the supplied credentials, downloaded through the same network policy as Git, and verified by size and SHA-256 before the repository is published. A missing or corrupt object fails the complete import. Non-public network destinations are blocked unless administratively allowlisted. JSON fields: `url`, optional `username`, and optional `password` or access token. |
+| `POST` | `/api/repositories/{path}/import-archive?filename=repository.tar.gz` | Upload a `.zip`, `.tar`, `.tar.gz`, or `.tgz` file as the raw request body. The archive must contain one bare Git repository at its root or in one enclosing folder and may be up to 1 GiB compressed. Git LFS objects are not imported. |
 | `PATCH` | `/api/repositories/{path}` | Rename a repository. JSON field: `newName`. |
 | `DELETE` | `/api/repositories/{path}` | Delete a repository. |
 

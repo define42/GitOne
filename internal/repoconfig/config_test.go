@@ -8,9 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/define42/GitOne/internal/gitformat"
-	git "github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing/object"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestJobConfigValidationAndDefaults(t *testing.T) {
@@ -159,7 +158,7 @@ func TestConfigRejectsInvalidJobDependencies(t *testing.T) {
 
 func TestReadUsesOnlyGitOneYAML(t *testing.T) {
 	directory := t.TempDir()
-	repository, err := gitformat.Init(directory, false)
+	repository, err := git.PlainInit(directory, false)
 	if err != nil {
 		t.Fatal(err)
 	}

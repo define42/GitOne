@@ -19,10 +19,9 @@ import (
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	gitoneserver "github.com/define42/GitOne/internal/server"
-	git "github.com/go-git/go-git/v6"
-	gitclient "github.com/go-git/go-git/v6/plumbing/client"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	gittransport "github.com/go-git/go-git/v6/plumbing/transport/http"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	gittransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -179,11 +178,9 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 			Username: "johndoe@example.com",
 			Password: "dogood",
 		}
-		repository, err := git.PlainClone(checkout, &git.CloneOptions{
-			URL: server.URL + "/engineering/backend/api.git",
-			ClientOptions: []gitclient.Option{
-				gitclient.WithHTTPAuth(credentials),
-			},
+		repository, err := git.PlainClone(checkout, false, &git.CloneOptions{
+			URL:  server.URL + "/engineering/backend/api.git",
+			Auth: credentials,
 		})
 		if err != nil {
 			t.Fatalf("clone through GitOne: %v", err)
@@ -210,11 +207,7 @@ func TestGitOneEndToEndWithLDAP(t *testing.T) {
 		if err != nil {
 			t.Fatalf("commit README: %v", err)
 		}
-		if err = repository.Push(&git.PushOptions{
-			ClientOptions: []gitclient.Option{
-				gitclient.WithHTTPAuth(credentials),
-			},
-		}); err != nil {
+		if err = repository.Push(&git.PushOptions{Auth: credentials}); err != nil {
 			t.Fatalf("push through GitOne: %v", err)
 		}
 

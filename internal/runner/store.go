@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/define42/GitOne/internal/gitformat"
 	"github.com/define42/GitOne/internal/repopath"
 )
 
@@ -114,9 +113,6 @@ func readJob(directory, id string) (Job, error) {
 	if err = json.Unmarshal(contents, &job); err != nil {
 		return Job{}, fmt.Errorf("read build %q: %w", id, err)
 	}
-	if !gitformat.IsSHA256OID(job.Commit) {
-		return Job{}, fmt.Errorf("read build %q: commit must be a lowercase SHA-256 object ID", id)
-	}
 	return job, nil
 }
 
@@ -154,9 +150,6 @@ func readLog(file *os.File) (string, error) {
 }
 
 func (s Store) save(repository repopath.Repository, job Job) error {
-	if !gitformat.IsSHA256OID(job.Commit) {
-		return errors.New("build commit must be a lowercase SHA-256 object ID")
-	}
 	path, err := s.jobPath(repository, job.ID, ".json")
 	if err != nil {
 		return err
