@@ -1076,6 +1076,108 @@ h3 {
   color: var(--muted);
 }
 
+.group-contents > .group-tree {
+  margin: -0.4rem;
+  overflow-x: auto;
+  padding: 0.4rem;
+}
+
+.group-tree {
+  min-width: 0;
+}
+
+.group-tree-entry {
+  align-items: stretch;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  grid-template-columns: 2.75rem minmax(0, 1fr);
+  min-width: 14rem;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.group-tree-entry:hover {
+  background: var(--surface-subtle);
+  border-color: var(--border-strong);
+}
+
+.group-tree-spacer {
+  border-right: 1px solid var(--border);
+  display: block;
+  min-width: 0;
+}
+
+.group-tree-toggle {
+  align-self: stretch;
+  background: transparent;
+  border: 0;
+  border-radius: 5px 0 0 5px;
+  border-right: 1px solid var(--border);
+  color: var(--muted);
+  min-height: 4.5rem;
+  padding: 0;
+  width: 2.75rem;
+}
+
+.group-tree-toggle:hover {
+  background: var(--button-hover);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.group-tree-toggle .icon {
+  transition: transform 120ms ease;
+}
+
+.group-tree-toggle[aria-expanded="true"] .icon {
+  transform: rotate(90deg);
+}
+
+.group-tree-link {
+  background: transparent;
+  border: 0;
+  border-radius: 0 5px 5px 0;
+  min-width: 0;
+  width: 100%;
+}
+
+.group-tree-link:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
+.group-tree-leaf-link {
+  grid-column: 1 / -1;
+  grid-template-columns: 2.75rem auto minmax(0, 1fr) auto;
+  padding-left: 0;
+}
+
+.group-tree-leaf-link > .group-tree-spacer {
+  align-self: stretch;
+  border-right: 0;
+}
+
+.group-tree-children {
+  border-left: 1px solid var(--border);
+  margin: 0.55rem 0 0 0.85rem;
+  padding-left: 0.65rem;
+}
+
+.group-tree-message {
+  color: var(--muted);
+  font-size: 0.875rem;
+  padding: 0.85rem 1rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .group-tree-toggle .icon {
+    transition: none;
+  }
+}
+
 .action-dialog {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -3783,6 +3885,11 @@ table {
     white-space: normal;
   }
 
+  .group-tree-children {
+    margin-left: 0.45rem;
+    padding-left: 0.4rem;
+  }
+
   .latest-commit {
     grid-template-columns: auto minmax(0, 1fr);
   }
@@ -4053,6 +4160,10 @@ table {
 
   .resource-link {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .group-tree-leaf-link {
+    grid-template-columns: 2.75rem auto minmax(0, 1fr);
   }
 
   .resource-arrow {

@@ -29,6 +29,7 @@ interface GroupSummary {
   path: string;
   description: string;
   role: GroupRole;
+  hasChildren: boolean;
 }
 
 interface GroupList {
@@ -1385,6 +1386,227 @@ function groupList(
     item.append(link);
     list.append(item);
   }
+  return list;
+}
+
+type GroupTreeResource =
+  | {kind: "subgroup"; name: string; subgroup: GroupSummary}
+  | {kind: "repository"; name: string; repository: RepositorySummary};
+
+let groupTreeChildrenSequence = 0;
+
+function groupTreeResources(data: GroupDetail): GroupTreeResource[] {
+  const resources: GroupTreeResource[] = [
+    ...data.subgroups.map((subgroup) => ({
+      kind: "subgroup" as const,
+      name: subgroup.name,
+      subgroup,
+    })),
+    ...data.repositories.map((repository) => ({
+      kind: "repository" as const,
+      name: repository.name,
+      repository,
+    })),
+  ];
+  return resources.sort((left, right) => {
+    const nameOrder = left.name.localeCompare(right.name, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+    if (nameOrder !== 0 || left.kind === right.kind) {
+      return nameOrder;
+    }
+    return left.kind === "subgroup" ? -1 : 1;
+  });
+}
+
+function groupTreeSpacer(): HTMLSpanElement {
+  const spacer = element("span");
+  spacer.className = "group-tree-spacer";
+  spacer.setAttribute("aria-hidden", "true");
+  return spacer;
+}
+
+function groupTreeLink(
+  href: string,
+  name: string,
+  kind: "subgroup" | "repository",
+  description?: string,
+  role?: GroupRole,
+  showArrow = true,
+): HTMLAnchorElement {
+  const link = element("a");
+  link.href = href;
+  link.className = "resource-link group-tree-link";
+  const iconContainer = element("span");
+  iconContainer.className = `resource-icon ${kind === "subgroup" ? "group-icon" : "repository-icon"}`;
+  iconContainer.append(icon(kind === "subgroup" ? "folder" : "repository"));
+  const content = element("span");
+  content.className = "resource-content";
+  const title = element("span");
+  title.className = "resource-title";
+  const type = element("span", `${kind === "subgroup" ? "Subgroup" : "Repository"}: `);
+  type.className = "sr-only";
+  title.append(type, element("strong", name));
+  if (role) {
+    title.append(groupRoleBadge(role));
+  }
+  content.append(title);
+  if (kind === "repository") {
+    const summary = element("span", description || "No description");
+    summary.className = "resource-description";
+    content.append(summary);
+  }
+  link.append(iconContainer, content);
+  if (showArrow) {
+    const arrow = icon("chevron-right");
+    arrow.classList.add("resource-arrow");
+    link.append(arrow);
+  }
+  return link;
+}
+
+function setGroupTreeLeafEntry(
+  entry: HTMLDivElement,
+  link: HTMLAnchorElement,
+): void {
+  if (!link.querySelector(".resource-arrow")) {
+    const arrow = icon("chevron-right");
+    arrow.classList.add("resource-arrow");
+    link.append(arrow);
+  }
+  link.classList.add("group-tree-leaf-link");
+  link.prepend(groupTreeSpacer());
+  entry.replaceChildren(link);
+}
+
+function groupTreeItems(data: GroupDetail): HTMLLIElement[] {
+  return groupTreeResources(data).map((resource) => {
+    if (resource.kind === "repository") {
+      const item = element("li");
+      item.className = "group-tree-item group-tree-repository";
+      const entry = element("div");
+      entry.className = "group-tree-entry";
+      const link = groupTreeLink(
+        repositoryBrowserURL(`${data.path}/${resource.repository.name}`),
+        resource.repository.name,
+        "repository",
+        resource.repository.description,
+      );
+      setGroupTreeLeafEntry(entry, link);
+      item.append(entry);
+      return item;
+    }
+
+    const item = element("li");
+    item.className = "group-tree-item group-tree-subgroup";
+    const entry = element("div");
+    entry.className = "group-tree-entry";
+    const subgroup = resource.subgroup;
+    const link = groupTreeLink(
+      groupURL(subgroup.path),
+      subgroup.name,
+      "subgroup",
+      undefined,
+      subgroup.role,
+      !subgroup.hasChildren,
+    );
+    if (!subgroup.hasChildren) {
+      setGroupTreeLeafEntry(entry, link);
+      item.append(entry);
+      return item;
+    }
+
+    const toggle = element("button");
+    toggle.type = "button";
+    toggle.className = "group-tree-toggle";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.setAttribute("aria-label", `Expand ${subgroup.name}`);
+    toggle.title = `Expand ${subgroup.name}`;
+    toggle.append(icon("chevron-right"));
+    const children = element("ul");
+    children.id = `group-tree-children-${++groupTreeChildrenSequence}`;
+    children.className = "resource-list group-tree group-tree-children";
+    children.hidden = true;
+    children.setAttribute("aria-label", `Contents of ${subgroup.path}`);
+    toggle.setAttribute("aria-controls", children.id);
+    const status = element("span");
+    status.className = "sr-only";
+    status.setAttribute("role", "status");
+    entry.append(toggle, link);
+    item.append(entry, children, status);
+
+    let loaded = false;
+    let loading = false;
+    const setExpanded = (expanded: boolean): void => {
+      toggle.setAttribute("aria-expanded", String(expanded));
+      toggle.setAttribute("aria-label", `${expanded ? "Collapse" : "Expand"} ${subgroup.name}`);
+      toggle.title = `${expanded ? "Collapse" : "Expand"} ${subgroup.name}`;
+      children.hidden = !expanded;
+    };
+    toggle.addEventListener("click", async () => {
+      const expanded = toggle.getAttribute("aria-expanded") === "true";
+      setExpanded(!expanded);
+      if (expanded || loaded || loading) {
+        return;
+      }
+
+      loading = true;
+      children.setAttribute("aria-busy", "true");
+      status.textContent = `Loading ${subgroup.name}.`;
+      const loadingItem = element("li", `Loading ${subgroup.name}…`);
+      loadingItem.className = "group-tree-message";
+      children.replaceChildren(loadingItem);
+      try {
+        const nested = await request<GroupDetail>(apiGroupURL(subgroup.path));
+        if (!item.isConnected) {
+          return;
+        }
+        const nestedItems = groupTreeItems(nested);
+        if (nestedItems.length === 0) {
+          const transferFocus = document.activeElement === toggle;
+          children.remove();
+          setGroupTreeLeafEntry(entry, link);
+          if (transferFocus) {
+            link.focus();
+          }
+          status.textContent = `${subgroup.name} has no subgroups or repositories.`;
+        } else {
+          children.replaceChildren(...nestedItems);
+          loaded = true;
+          status.textContent = `${subgroup.name} loaded.`;
+        }
+      } catch (reason) {
+        if (!item.isConnected) {
+          return;
+        }
+        children.replaceChildren();
+        setExpanded(false);
+        status.textContent = "";
+        showStatus(
+          reason instanceof Error
+            ? reason.message
+            : `Could not load ${subgroup.name}.`,
+          true,
+        );
+      } finally {
+        loading = false;
+        children.removeAttribute("aria-busy");
+      }
+    });
+    return item;
+  });
+}
+
+function groupTree(data: GroupDetail): HTMLElement {
+  const items = groupTreeItems(data);
+  if (items.length === 0) {
+    return emptyState("No subgroups or repositories yet.");
+  }
+  const list = element("ul");
+  list.className = "resource-list group-tree";
+  list.setAttribute("aria-label", `Contents of ${data.path}`);
+  list.append(...items);
   return list;
 }
 
@@ -6416,44 +6638,15 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     ? subgroupRenameControl(data.path)
     : null;
 
-  const subgroups = element("section");
-  subgroups.className = "content-section";
-  subgroups.append(
-    sectionHeading("Subgroups", data.subgroups.length),
-    groupList(data.subgroups, "No subgroups yet.", false),
+  const contents = element("section");
+  contents.className = "content-section group-contents";
+  contents.append(
+    sectionHeading(
+      "Subgroups and repositories",
+      data.subgroups.length + data.repositories.length,
+    ),
+    groupTree(data),
   );
-
-  const repositories = element("section");
-  repositories.className = "content-section";
-  repositories.append(sectionHeading("Repositories", data.repositories.length));
-  if (data.repositories.length === 0) {
-    repositories.append(emptyState("No repositories yet."));
-  } else {
-    const list = element("ul");
-    list.className = "resource-list repository-list";
-    for (const repository of data.repositories) {
-      const item = element("li");
-      const link = element("a");
-      link.href = repositoryBrowserURL(`${data.path}/${repository.name}`);
-      link.className = "resource-link";
-      const iconContainer = element("span");
-      iconContainer.className = "resource-icon repository-icon";
-      iconContainer.append(icon("repository"));
-      const content = element("span");
-      content.className = "resource-content";
-      content.append(
-        element("strong", repository.name),
-        element("span", repository.description || "No description"),
-      );
-      content.lastElementChild?.classList.add("resource-description");
-      const arrow = icon("chevron-right");
-      arrow.classList.add("resource-arrow");
-      link.append(iconContainer, content, arrow);
-      item.append(link);
-      list.append(item);
-    }
-    repositories.append(list);
-  }
 
   const danger = element("details");
   danger.className = "settings-panel";
@@ -6503,8 +6696,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
       pageActions,
       [groupRoleBadge(data.role)],
     ),
-    subgroups,
-    repositories,
+    contents,
     ...(canManageGroup
       ? [
         danger,

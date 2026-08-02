@@ -48,6 +48,7 @@ type groupSummary struct {
 	Path        string       `json:"path"`
 	Description string       `json:"description"`
 	Role        control.Role `json:"role"`
+	HasChildren bool         `json:"hasChildren"`
 }
 
 type listGroupsInput struct {
@@ -354,6 +355,7 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 	if listErr != nil {
 		return nil, huma.Error500InternalServerError("could not list groups", listErr)
 	}
+	childBearing := childBearingGroups(groups)
 
 	output := &listGroupsOutput{}
 	output.Body.Groups = []groupSummary{}
@@ -392,6 +394,7 @@ func (a API) listGroups(ctx context.Context, input *listGroupsInput) (*listGroup
 			Path:        group.Path,
 			Description: description,
 			Role:        principal.Role,
+			HasChildren: childBearing[group.Path],
 		})
 	}
 	if !authenticated {
@@ -413,6 +416,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 	if listErr != nil {
 		return nil, huma.Error500InternalServerError("could not list groups", listErr)
 	}
+	childBearing := childBearingGroups(groups)
 
 	var current *storage.GroupInfo
 	output := &groupDetailOutput{}
@@ -454,6 +458,7 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 			Path:        group.Path,
 			Description: "",
 			Role:        subgroupPrincipal.Role,
+			HasChildren: childBearing[group.Path],
 		})
 	}
 	if current == nil {
@@ -473,6 +478,19 @@ func (a API) getGroup(ctx context.Context, input *GroupPathInput) (*groupDetailO
 		})
 	}
 	return output, nil
+}
+
+func childBearingGroups(groups []storage.GroupInfo) map[string]bool {
+	childBearing := make(map[string]bool, len(groups))
+	for _, group := range groups {
+		if len(group.Repositories) > 0 {
+			childBearing[group.Path] = true
+		}
+		if parent := parentGroup(group.Path); parent != "" {
+			childBearing[parent] = true
+		}
+	}
+	return childBearing
 }
 
 func (a API) getGroupSettings(ctx context.Context, input *GroupPathInput) (*groupSettingsOutput, error) {

@@ -302,7 +302,8 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 	if len(groups.Body.Groups) != 1 ||
 		groups.Body.Groups[0].Path != "engineering" ||
 		groups.Body.Groups[0].Description != "Engineering services" ||
-		groups.Body.Groups[0].Role != control.RoleDeveloper {
+		groups.Body.Groups[0].Role != control.RoleDeveloper ||
+		!groups.Body.Groups[0].HasChildren {
 		t.Fatalf("unexpected group summaries: %#v", groups.Body.Groups)
 	}
 
@@ -317,8 +318,68 @@ func TestGroupSummariesIncludeEffectiveRole(t *testing.T) {
 		group.Body.Role != control.RoleDeveloper ||
 		group.Body.Subgroups[0].Path != "engineering/platform" ||
 		group.Body.Subgroups[0].Description != "" ||
-		group.Body.Subgroups[0].Role != control.RoleDeveloper {
+		group.Body.Subgroups[0].Role != control.RoleDeveloper ||
+		group.Body.Subgroups[0].HasChildren {
 		t.Fatalf("unexpected subgroup summaries: %#v", group.Body.Subgroups)
+	}
+}
+
+func TestChildBearingGroupsIncludesRepositoriesAndSubgroups(t *testing.T) {
+	groups := []storage.GroupInfo{
+		{Path: "repository-parent", Repositories: []string{"api"}},
+		{Path: "subgroup-parent"},
+		{Path: "subgroup-parent/child"},
+		{Path: "empty"},
+	}
+	childBearing := childBearingGroups(groups)
+	if !childBearing["repository-parent"] || !childBearing["subgroup-parent"] {
+		t.Fatalf("groups with children were not detected: %#v", childBearing)
+	}
+	if childBearing["subgroup-parent/child"] || childBearing["empty"] {
+		t.Fatalf("empty groups were reported as having children: %#v", childBearing)
+	}
+}
+
+func TestGroupSummariesReportChildBearingSubgroups(t *testing.T) {
+	service, credentials, _ := repositoryAPIFixture(t)
+	for _, group := range []string{
+		"engineering/repository-parent",
+		"engineering/subgroup-parent",
+		"engineering/subgroup-parent/child",
+		"engineering/empty",
+	} {
+		if err := service.Storage.CreateGroup(group, "alice", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.Storage.CreateRepository(
+		repopath.Repository{
+			Groups: []string{"engineering", "repository-parent"},
+			Name:   "nested-api",
+		},
+		storage.CreateRepositoryOptions{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	group, err := service.getGroup(context.Background(), &GroupPathInput{
+		AuthInput: credentials,
+		Path:      "engineering",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childBearing := make(map[string]bool, len(group.Body.Subgroups))
+	for _, subgroup := range group.Body.Subgroups {
+		childBearing[subgroup.Name] = subgroup.HasChildren
+	}
+	want := map[string]bool{
+		"repository-parent": true,
+		"subgroup-parent":   true,
+		"empty":             false,
+	}
+	if !maps.Equal(childBearing, want) {
+		t.Fatalf("subgroup child markers = %#v, want %#v", childBearing, want)
 	}
 }
 
