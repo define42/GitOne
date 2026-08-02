@@ -76,11 +76,15 @@ func TestStoreCreatesListsAndUpdatesIssues(t *testing.T) {
 
 	updated, err := store.Update(repository, 1, func(record *Issue) error {
 		now := time.Now().UTC()
+		branchCreatedAt := now.In(nonUTC)
 		record.State = StateClosed
 		record.ClosedBy = "bob"
 		record.ClosedAt = &now
 		record.Labels = []string{"bug"}
 		record.Assignees = []string{"carol"}
+		record.Branch = "issue-1-first"
+		record.BranchCreatedBy = "bob"
+		record.BranchCreatedAt = &branchCreatedAt
 		record.Comments = append(record.Comments, Comment{
 			ID:        1,
 			Author:    "bob",
@@ -93,7 +97,9 @@ func TestStoreCreatesListsAndUpdatesIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 	if updated.State != StateClosed || updated.ClosedBy != "bob" ||
-		len(updated.Comments) != 1 || len(updated.Labels) != 1 {
+		len(updated.Comments) != 1 || len(updated.Labels) != 1 ||
+		updated.Branch != "issue-1-first" || updated.BranchCreatedBy != "bob" ||
+		updated.BranchCreatedAt == nil || updated.BranchCreatedAt.Location() != time.UTC {
 		t.Fatalf("unexpected updated issue: %#v", updated)
 	}
 
@@ -101,7 +107,9 @@ func TestStoreCreatesListsAndUpdatesIssues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.State != StateClosed || len(stored.Comments) != 1 {
+	if stored.State != StateClosed || len(stored.Comments) != 1 ||
+		stored.Branch != "issue-1-first" || stored.BranchCreatedBy != "bob" ||
+		stored.BranchCreatedAt == nil {
 		t.Fatalf("update was not persisted: %#v", stored)
 	}
 }
@@ -141,11 +149,44 @@ func TestStoreValidatesIssueContent(t *testing.T) {
 	store := NewStore(root)
 
 	cases := map[string]func(*Issue){
-		"empty title":      func(record *Issue) { record.Title = "  " },
-		"long title":       func(record *Issue) { record.Title = strings.Repeat("t", MaximumTitleBytes+1) },
-		"long description": func(record *Issue) { record.Description = strings.Repeat("d", MaximumBodyBytes+1) },
-		"missing author":   func(record *Issue) { record.Author = "" },
-		"invalid state":    func(record *Issue) { record.State = State("wontfix") },
+		"empty title":             func(record *Issue) { record.Title = "  " },
+		"long title":              func(record *Issue) { record.Title = strings.Repeat("t", MaximumTitleBytes+1) },
+		"long description":        func(record *Issue) { record.Description = strings.Repeat("d", MaximumBodyBytes+1) },
+		"missing author":          func(record *Issue) { record.Author = "" },
+		"invalid state":           func(record *Issue) { record.State = State("wontfix") },
+		"branch without metadata": func(record *Issue) { record.Branch = "issue-1-valid" },
+		"metadata without branch": func(record *Issue) {
+			now := time.Now().UTC()
+			record.BranchCreatedBy = "alice"
+			record.BranchCreatedAt = &now
+		},
+		"untrimmed branch": func(record *Issue) {
+			now := time.Now().UTC().Add(time.Hour)
+			record.Branch = " issue-1-valid"
+			record.BranchCreatedBy = "alice"
+			record.BranchCreatedAt = &now
+		},
+		"long branch": func(record *Issue) {
+			now := time.Now().UTC().Add(time.Hour)
+			record.Branch = strings.Repeat("b", MaximumBranchBytes+1)
+			record.BranchCreatedBy = "alice"
+			record.BranchCreatedAt = &now
+		},
+		"untrimmed branch creator": func(record *Issue) {
+			now := time.Now().UTC().Add(time.Hour)
+			record.Branch = "issue-1-valid"
+			record.BranchCreatedBy = " alice"
+			record.BranchCreatedAt = &now
+		},
+		"branch creation before issue": func(record *Issue) {
+			createdAt := time.Now().UTC()
+			branchCreatedAt := createdAt.Add(-time.Hour)
+			record.CreatedAt = createdAt
+			record.UpdatedAt = createdAt
+			record.Branch = "issue-1-valid"
+			record.BranchCreatedBy = "alice"
+			record.BranchCreatedAt = &branchCreatedAt
+		},
 		"closure metadata": func(record *Issue) { record.ClosedBy = "bob" },
 		"duplicate label":  func(record *Issue) { record.Labels = []string{"bug", "bug"} },
 		"untrimmed label":  func(record *Issue) { record.Labels = []string{" bug"} },

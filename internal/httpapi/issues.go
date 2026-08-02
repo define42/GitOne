@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/auth"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/issue"
 	"github.com/define42/GitOne/internal/repopath"
+	"github.com/go-git/go-git/v5/plumbing"
+	"golang.org/x/text/unicode/norm"
 )
 
 type issuesInput struct {
@@ -62,6 +67,16 @@ type createIssueCommentInput struct {
 	Body createIssueCommentBody
 }
 
+type createIssueBranchBody struct {
+	Name string `json:"name" minLength:"1" maxLength:"1024" doc:"Git-safe name for the issue branch"`
+	From string `json:"from" minLength:"1" doc:"Existing branch from which the issue branch is created"`
+}
+
+type createIssueBranchInput struct {
+	IssueInput
+	Body createIssueBranchBody
+}
+
 // issueCommentView mirrors issue.Comment under a distinct OpenAPI schema name
 // so that it does not collide with the merge request comment schema.
 type issueCommentView struct {
@@ -72,21 +87,25 @@ type issueCommentView struct {
 }
 
 type issueView struct {
-	ID          uint64             `json:"id"`
-	Repository  string             `json:"repository"`
-	Title       string             `json:"title"`
-	Description string             `json:"description"`
-	Author      string             `json:"author"`
-	State       issue.State        `json:"state"`
-	CreatedAt   time.Time          `json:"createdAt"`
-	UpdatedAt   time.Time          `json:"updatedAt"`
-	Labels      []string           `json:"labels"`
-	Assignees   []string           `json:"assignees"`
-	Comments    []issueCommentView `json:"comments"`
-	ClosedBy    string             `json:"closedBy,omitempty"`
-	ClosedAt    *time.Time         `json:"closedAt,omitempty"`
-	CanComment  bool               `json:"canComment"`
-	CanUpdate   bool               `json:"canUpdate"`
+	ID              uint64             `json:"id"`
+	Repository      string             `json:"repository"`
+	Title           string             `json:"title"`
+	Description     string             `json:"description"`
+	SuggestedBranch string             `json:"suggestedBranch" doc:"Git-safe branch name derived from the issue description"`
+	Author          string             `json:"author"`
+	State           issue.State        `json:"state"`
+	CreatedAt       time.Time          `json:"createdAt"`
+	UpdatedAt       time.Time          `json:"updatedAt"`
+	Labels          []string           `json:"labels"`
+	Assignees       []string           `json:"assignees"`
+	Comments        []issueCommentView `json:"comments"`
+	Branch          string             `json:"branch,omitempty"`
+	BranchCreatedBy string             `json:"branchCreatedBy,omitempty"`
+	BranchCreatedAt *time.Time         `json:"branchCreatedAt,omitempty"`
+	ClosedBy        string             `json:"closedBy,omitempty"`
+	ClosedAt        *time.Time         `json:"closedAt,omitempty"`
+	CanComment      bool               `json:"canComment"`
+	CanUpdate       bool               `json:"canUpdate"`
 }
 
 type issuesOutput struct {
@@ -98,6 +117,18 @@ type issuesOutput struct {
 
 type issueOutput struct {
 	Body issueView
+}
+
+type createIssueBranchOutput struct {
+	Body struct {
+		Repository string    `json:"repository"`
+		IssueID    uint64    `json:"issueId"`
+		Name       string    `json:"name"`
+		From       string    `json:"from"`
+		Commit     string    `json:"commit"`
+		CreatedBy  string    `json:"createdBy"`
+		CreatedAt  time.Time `json:"createdAt"`
+	}
 }
 
 func registerIssueAPI(api huma.API, service API) {
@@ -142,6 +173,15 @@ func registerIssueAPI(api huma.API, service API) {
 		Tags:          []string{"Issues"},
 		DefaultStatus: http.StatusCreated,
 	}), service.createIssueComment)
+
+	huma.Register(api, protected(huma.Operation{
+		OperationID:   "create-issue-branch",
+		Method:        http.MethodPost,
+		Path:          "/api/repositories/{repository}/issues/{id}/branch",
+		Summary:       "Create and record a branch for a repository issue",
+		Tags:          []string{"Issues"},
+		DefaultStatus: http.StatusCreated,
+	}), service.createIssueBranch)
 }
 
 func (a API) issueStore() *issue.Store {
@@ -397,6 +437,85 @@ func (a API) createIssueComment(
 	}, nil
 }
 
+func (a API) createIssueBranch(
+	ctx context.Context,
+	input *createIssueBranchInput,
+) (*createIssueBranchOutput, error) {
+	if input.ID == 0 {
+		return nil, huma.Error400BadRequest("issue ID must be greater than zero")
+	}
+	if len(input.Body.Name) > issue.MaximumBranchBytes {
+		return nil, huma.Error400BadRequest("issue branch name is too long")
+	}
+	branchName, err := validatedBranchReference(input.Body.Name)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid issue branch name", err)
+	}
+	sourceName, err := validatedBranchReference(input.Body.From)
+	if err != nil {
+		return nil, huma.Error400BadRequest("invalid source branch name", err)
+	}
+	prefix := issueBranchPrefix(input.ID)
+	if input.Body.Name != prefix && !strings.HasPrefix(input.Body.Name, prefix+"-") {
+		return nil, huma.Error400BadRequest("issue branch name must use the issue number prefix")
+	}
+
+	repository, parsed, principal, release, err := a.openLockedReviewRepository(
+		ctx,
+		input.AuthInput,
+		input.Repository,
+		control.RoleDeveloper,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	record, err := a.issueStore().Get(parsed, input.ID)
+	if err != nil {
+		return nil, issueMutationError("could not read issue", err)
+	}
+	if record.Branch != "" {
+		return nil, huma.Error409Conflict("issue already has a branch")
+	}
+
+	commit, err := createRepositoryBranchReference(repository, branchName, sourceName)
+	if err != nil {
+		return nil, err
+	}
+	createdAt := time.Now().UTC()
+	updated, err := a.issueStore().Update(parsed, input.ID, func(stored *issue.Issue) error {
+		if stored.Branch != "" {
+			return huma.Error409Conflict("issue already has a branch")
+		}
+		stored.Branch = input.Body.Name
+		stored.BranchCreatedBy = principal.Name
+		stored.BranchCreatedAt = &createdAt
+		return nil
+	})
+	if err != nil {
+		rollbackErr := repository.Storer.RemoveReference(branchName)
+		if rollbackErr != nil && !errors.Is(rollbackErr, plumbing.ErrReferenceNotFound) {
+			return nil, huma.Error500InternalServerError(
+				"could not save issue branch or roll back its Git reference",
+				errors.Join(err, rollbackErr),
+			)
+		}
+		return nil, issueMutationError("could not save issue branch", err)
+	}
+	a.scheduleBuild(parsed, input.Body.Name, commit)
+
+	output := &createIssueBranchOutput{}
+	output.Body.Repository = parsed.Full()
+	output.Body.IssueID = updated.ID
+	output.Body.Name = updated.Branch
+	output.Body.From = input.Body.From
+	output.Body.Commit = commit.String()
+	output.Body.CreatedBy = updated.BranchCreatedBy
+	output.Body.CreatedAt = *updated.BranchCreatedAt
+	return output, nil
+}
+
 // openLockedIssueRepository authorizes the principal, confirms the repository
 // exists, and holds the repository operation lock for the caller.
 func (a API) openLockedIssueRepository(
@@ -433,19 +552,23 @@ func (a API) issuePrincipal(
 
 func buildIssueView(record issue.Issue, viewer string, role control.Role) issueView {
 	view := issueView{
-		ID:          record.ID,
-		Repository:  record.Repository,
-		Title:       record.Title,
-		Description: record.Description,
-		Author:      record.Author,
-		State:       record.State,
-		CreatedAt:   record.CreatedAt,
-		UpdatedAt:   record.UpdatedAt,
-		Labels:      record.Labels,
-		Assignees:   record.Assignees,
-		Comments:    issueCommentViews(record.Comments),
-		ClosedBy:    record.ClosedBy,
-		ClosedAt:    record.ClosedAt,
+		ID:              record.ID,
+		Repository:      record.Repository,
+		Title:           record.Title,
+		Description:     record.Description,
+		SuggestedBranch: suggestedIssueBranch(record),
+		Author:          record.Author,
+		State:           record.State,
+		CreatedAt:       record.CreatedAt,
+		UpdatedAt:       record.UpdatedAt,
+		Labels:          record.Labels,
+		Assignees:       record.Assignees,
+		Comments:        issueCommentViews(record.Comments),
+		Branch:          record.Branch,
+		BranchCreatedBy: record.BranchCreatedBy,
+		BranchCreatedAt: record.BranchCreatedAt,
+		ClosedBy:        record.ClosedBy,
+		ClosedAt:        record.ClosedAt,
 	}
 	if view.Labels == nil {
 		view.Labels = []string{}
@@ -457,6 +580,51 @@ func buildIssueView(record issue.Issue, viewer string, role control.Role) issueV
 	view.CanUpdate = role.Allows(control.RoleMaintainer) ||
 		(role.Allows(control.RoleDeveloper) && viewer != "" && viewer == record.Author)
 	return view
+}
+
+const maximumIssueBranchSlugBytes = 80
+
+// suggestedIssueBranch turns the issue description into a Git-safe branch
+// name. The issue number keeps otherwise identical descriptions distinct, and
+// the title supplies a useful fallback for issues without a description.
+func suggestedIssueBranch(record issue.Issue) string {
+	prefix := issueBranchPrefix(record.ID)
+	source := strings.TrimSpace(record.Description)
+	if source == "" {
+		source = strings.TrimSpace(record.Title)
+	}
+
+	var slug strings.Builder
+	separator := false
+	for _, character := range norm.NFC.String(strings.ToLower(source)) {
+		isLetter := unicode.IsLetter(character)
+		isNumber := unicode.IsNumber(character)
+		isAttachedMark := unicode.IsMark(character) && slug.Len() > 0 && !separator
+		if !isLetter && !isNumber && !isAttachedMark {
+			separator = slug.Len() > 0
+			continue
+		}
+		characterBytes := utf8.RuneLen(character)
+		if separator {
+			if slug.Len()+1+characterBytes > maximumIssueBranchSlugBytes {
+				break
+			}
+			slug.WriteByte('-')
+			separator = false
+		}
+		if slug.Len()+characterBytes > maximumIssueBranchSlugBytes {
+			break
+		}
+		slug.WriteRune(character)
+	}
+	if slug.Len() == 0 {
+		return prefix
+	}
+	return prefix + "-" + slug.String()
+}
+
+func issueBranchPrefix(id uint64) string {
+	return "issue-" + strconv.FormatUint(id, 10)
 }
 
 func issueCommentViews(comments []issue.Comment) []issueCommentView {

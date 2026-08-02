@@ -2,13 +2,21 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/define42/GitOne/internal/control"
 	"github.com/define42/GitOne/internal/issue"
 	"github.com/define42/GitOne/internal/repopath"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 type issueAPIFixture struct {
@@ -98,6 +106,9 @@ func TestIssueLifecycle(t *testing.T) {
 	}
 	if !created.CanComment || !created.CanUpdate {
 		t.Fatalf("author permissions were not reported: %#v", created)
+	}
+	if created.SuggestedBranch != "issue-1-details" {
+		t.Fatalf("suggested branch = %q, want issue-1-details", created.SuggestedBranch)
 	}
 	if created.Labels == nil || created.Assignees == nil || created.Comments == nil {
 		t.Fatalf("issue arrays were not normalized: %#v", created)
@@ -203,6 +214,232 @@ func TestIssueLifecycle(t *testing.T) {
 	if reopened.Body.State != issue.StateOpen || reopened.Body.ClosedBy != "" ||
 		reopened.Body.ClosedAt != nil {
 		t.Fatalf("closure metadata was not cleared: %#v", reopened.Body)
+	}
+}
+
+func TestSuggestedIssueBranch(t *testing.T) {
+	longDescription := strings.Repeat("word ", 40)
+	exactBoundary := strings.Repeat("a", maximumIssueBranchSlugBytes)
+	overBoundary := exactBoundary + "a"
+	separatorFits := strings.Repeat("a", maximumIssueBranchSlugBytes-2) + " b"
+	separatorDoesNotFit := strings.Repeat("a", maximumIssueBranchSlugBytes-1) + " b"
+	twoByteBoundary := strings.Repeat("é", maximumIssueBranchSlugBytes/2)
+	threeByteBoundary := strings.Repeat("界", maximumIssueBranchSlugBytes/3)
+	fourByteBoundary := strings.Repeat("𐍈", maximumIssueBranchSlugBytes/4)
+	tests := []struct {
+		name        string
+		id          uint64
+		description string
+		title       string
+		want        string
+	}{
+		{name: "description", id: 12, description: "Fix Login Redirect", title: "ignored", want: "issue-12-fix-login-redirect"},
+		{name: "markdown and forbidden ref characters", id: 3, description: "**Crash** on `foo.lock` / @{main} ~^:?*[\\", want: "issue-3-crash-on-foo-lock-main"},
+		{name: "collapsed separators", id: 4, description: "  one ... two --- three  ", want: "issue-4-one-two-three"},
+		{name: "title fallback", id: 5, description: " \n ", title: "Missing description", want: "issue-5-missing-description"},
+		{name: "unicode description", id: 6, description: "ÆØÅ 🚀", title: "unused", want: "issue-6-æøå"},
+		{name: "non-latin description", id: 16, description: "修正 ログイン", want: "issue-16-修正-ログイン"},
+		{name: "composed unicode", id: 17, description: "Åland", want: "issue-17-åland"},
+		{name: "decomposed unicode", id: 18, description: "A\u030aland", want: "issue-18-åland"},
+		{name: "attached unicode marks", id: 19, description: "सुधार लॉगिन", want: "issue-19-सुधार-लॉगिन"},
+		{name: "leading forbidden punctuation", id: 7, description: "../@{~^:?*[\\.lock", want: "issue-7-lock"},
+		{name: "punctuation only", id: 9, description: "../@{~^:?*[\\", want: "issue-9"},
+		{name: "shell and filesystem punctuation", id: 10, description: "safe$;|\"'<>name\x00\x1f\x7fend", want: "issue-10-safe-name-end"},
+		{name: "bounded", id: 8, description: longDescription, want: "issue-8-" + strings.TrimSuffix(strings.Repeat("word-", 16), "-")},
+		{name: "exact boundary", id: 11, description: exactBoundary, want: "issue-11-" + exactBoundary},
+		{name: "over boundary", id: 13, description: overBoundary, want: "issue-13-" + exactBoundary},
+		{name: "separator fits boundary", id: 14, description: separatorFits, want: "issue-14-" + strings.Repeat("a", maximumIssueBranchSlugBytes-2) + "-b"},
+		{name: "separator cannot fit boundary", id: 15, description: separatorDoesNotFit, want: "issue-15-" + strings.Repeat("a", maximumIssueBranchSlugBytes-1)},
+		{name: "two byte boundary", id: 20, description: twoByteBoundary + "é", want: "issue-20-" + twoByteBoundary},
+		{name: "three byte boundary", id: 21, description: threeByteBoundary + "界", want: "issue-21-" + threeByteBoundary},
+		{name: "four byte boundary", id: 22, description: fourByteBoundary + "𐍈", want: "issue-22-" + fourByteBoundary},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := suggestedIssueBranch(issue.Issue{
+				ID:          test.id,
+				Description: test.description,
+				Title:       test.title,
+			})
+			if got != test.want {
+				t.Fatalf("suggested branch = %q, want %q", got, test.want)
+			}
+			if _, err := validatedBranchReference(got); err != nil {
+				t.Fatalf("suggested branch is not a valid Git ref: %v", err)
+			}
+			prefix := "issue-" + strconv.FormatUint(test.id, 10)
+			slug := strings.TrimPrefix(got, prefix)
+			if slug != "" && !strings.HasPrefix(slug, "-") {
+				t.Fatalf("suggested branch does not use the issue prefix: %q", got)
+			}
+			if len(strings.TrimPrefix(slug, "-")) > maximumIssueBranchSlugBytes {
+				t.Fatalf("suggested branch slug is too long: %q", got)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("suggested branch is not valid UTF-8: %q", got)
+			}
+			for _, character := range got {
+				if !unicode.IsLetter(character) && !unicode.IsNumber(character) &&
+					!unicode.IsMark(character) && character != '-' {
+					t.Fatalf("suggested branch contains a Git-unsafe character %q: %q", character, got)
+				}
+			}
+		})
+	}
+
+	first := suggestedIssueBranch(issue.Issue{ID: 1, Description: "Same work"})
+	second := suggestedIssueBranch(issue.Issue{ID: 2, Description: "Same work"})
+	if first == second {
+		t.Fatalf("different issues received the same suggested branch: %q", first)
+	}
+}
+
+func TestIssueBranchLifecycle(t *testing.T) {
+	fixture := newIssueAPIFixture(t)
+	ctx := context.Background()
+	record := fixture.create(t, fixture.alice, "Branch this issue")
+	branchName := issueBranchPrefix(record.ID) + "-custom-work"
+
+	created, err := fixture.service.createIssueBranch(ctx, &createIssueBranchInput{
+		IssueInput: IssueInput{
+			AuthInput:  fixture.bob,
+			Repository: fixture.path.Full(),
+			ID:         record.ID,
+		},
+		Body: createIssueBranchBody{Name: branchName, From: "main"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Body.IssueID != record.ID || created.Body.Name != branchName ||
+		created.Body.From != "main" || created.Body.CreatedBy != "bob" ||
+		created.Body.CreatedAt.IsZero() {
+		t.Fatalf("unexpected issue branch response: %#v", created.Body)
+	}
+
+	stored, err := fixture.service.issueStore().Get(fixture.path, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Branch != branchName || stored.BranchCreatedBy != "bob" ||
+		stored.BranchCreatedAt == nil ||
+		!stored.BranchCreatedAt.Equal(created.Body.CreatedAt) {
+		t.Fatalf("issue branch metadata was not persisted: %#v", stored)
+	}
+	fetched, err := fixture.service.getIssue(ctx, &IssueInput{
+		AuthInput: fixture.carol, Repository: fixture.path.Full(), ID: record.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched.Body.Branch != stored.Branch ||
+		fetched.Body.BranchCreatedBy != stored.BranchCreatedBy ||
+		fetched.Body.BranchCreatedAt == nil {
+		t.Fatalf("issue branch metadata was not returned: %#v", fetched.Body)
+	}
+
+	repositoryPath, err := fixture.service.Storage.GitPath(fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := git.PlainOpen(repositoryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch, err := repository.Reference(
+		plumbing.NewBranchReferenceName(branchName),
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branch.Hash().String() != created.Body.Commit {
+		t.Fatalf("created branch commit = %s, want %s", branch.Hash(), created.Body.Commit)
+	}
+
+	if _, err = fixture.service.createIssueBranch(ctx, &createIssueBranchInput{
+		IssueInput: IssueInput{
+			AuthInput: fixture.bob, Repository: fixture.path.Full(), ID: record.ID,
+		},
+		Body: createIssueBranchBody{Name: branchName, From: "main"},
+	}); issueStatus(t, err) != 409 {
+		t.Fatal("an issue received more than one persisted branch")
+	}
+}
+
+func TestIssueBranchValidationAndAuthorization(t *testing.T) {
+	fixture := newIssueAPIFixture(t)
+	ctx := context.Background()
+
+	readerIssue := fixture.create(t, fixture.bob, "Reader cannot branch")
+	if _, err := fixture.service.createIssueBranch(ctx, &createIssueBranchInput{
+		IssueInput: IssueInput{
+			AuthInput: fixture.carol, Repository: fixture.path.Full(), ID: readerIssue.ID,
+		},
+		Body: createIssueBranchBody{Name: readerIssue.SuggestedBranch, From: "main"},
+	}); issueStatus(t, err) != 403 {
+		t.Fatal("a reader created an issue branch")
+	}
+
+	invalidPrefix := fixture.create(t, fixture.bob, "Prefix required")
+	if _, err := fixture.service.createIssueBranch(ctx, &createIssueBranchInput{
+		IssueInput: IssueInput{
+			AuthInput: fixture.bob, Repository: fixture.path.Full(), ID: invalidPrefix.ID,
+		},
+		Body: createIssueBranchBody{Name: "unrelated-branch", From: "main"},
+	}); issueStatus(t, err) != 400 {
+		t.Fatal("an issue branch without the issue prefix was accepted")
+	}
+
+	missingSource := fixture.create(t, fixture.bob, "Missing source")
+	if _, err := fixture.service.createIssueBranch(ctx, &createIssueBranchInput{
+		IssueInput: IssueInput{
+			AuthInput: fixture.bob, Repository: fixture.path.Full(), ID: missingSource.ID,
+		},
+		Body: createIssueBranchBody{Name: missingSource.SuggestedBranch, From: "missing"},
+	}); issueStatus(t, err) != 404 {
+		t.Fatal("an issue branch was created from a missing source")
+	}
+	stored, err := fixture.service.issueStore().Get(fixture.path, missingSource.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Branch != "" || stored.BranchCreatedBy != "" || stored.BranchCreatedAt != nil {
+		t.Fatalf("failed branch creation changed the issue: %#v", stored)
+	}
+}
+
+func TestIssueBranchHTTPRoute(t *testing.T) {
+	fixture := newIssueAPIFixture(t)
+	record := fixture.create(t, fixture.bob, "HTTP branch")
+	mux := http.NewServeMux()
+	Register(mux, fixture.service)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/repositories/engineering%2Fapi/issues/1/branch",
+		strings.NewReader(`{"name":"`+record.SuggestedBranch+`","from":"main"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.SetBasicAuth("alice", "secret")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf(
+			"issue branch HTTP status = %d, want %d: %s",
+			response.Code,
+			http.StatusCreated,
+			response.Body.String(),
+		)
+	}
+	var created createIssueBranchOutput
+	if err := json.Unmarshal(response.Body.Bytes(), &created.Body); err != nil {
+		t.Fatal(err)
+	}
+	if created.Body.IssueID != record.ID || created.Body.Name != record.SuggestedBranch ||
+		created.Body.CreatedBy != "alice" || created.Body.CreatedAt.IsZero() {
+		t.Fatalf("unexpected HTTP issue branch response: %#v", created.Body)
 	}
 }
 

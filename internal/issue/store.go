@@ -700,6 +700,10 @@ func normalize(record *Issue) {
 		closedAt := record.ClosedAt.UTC()
 		record.ClosedAt = &closedAt
 	}
+	if record.BranchCreatedAt != nil {
+		branchCreatedAt := record.BranchCreatedAt.UTC()
+		record.BranchCreatedAt = &branchCreatedAt
+	}
 	if record.Labels == nil {
 		record.Labels = []string{}
 	}
@@ -736,6 +740,27 @@ func validate(repository repopath.Repository, expectedID uint64, record Issue) e
 	}
 	if len(record.Description) > MaximumBodyBytes {
 		return errors.New("issue description is too long")
+	}
+	if record.Branch == "" {
+		if record.BranchCreatedBy != "" || record.BranchCreatedAt != nil {
+			return errors.New("issue branch metadata requires a branch")
+		}
+	} else {
+		if record.Branch != strings.TrimSpace(record.Branch) {
+			return errors.New("issue branch must be trimmed")
+		}
+		if len(record.Branch) > MaximumBranchBytes {
+			return errors.New("issue branch is too long")
+		}
+		if strings.TrimSpace(record.BranchCreatedBy) == "" || record.BranchCreatedAt == nil {
+			return errors.New("issue branch creator and creation time are required")
+		}
+		if record.BranchCreatedBy != strings.TrimSpace(record.BranchCreatedBy) {
+			return errors.New("issue branch creator must be trimmed")
+		}
+		if record.BranchCreatedAt.Before(record.CreatedAt) {
+			return errors.New("issue branch creation time precedes issue creation")
+		}
 	}
 	if strings.TrimSpace(record.Author) == "" {
 		return errors.New("issue author is required")

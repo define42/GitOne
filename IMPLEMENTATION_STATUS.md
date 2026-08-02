@@ -27,7 +27,7 @@ Implemented:
 - Repository ZIP/tar.gz downloads and branch-safe UI/API operations for creating, editing, renaming, and deleting files
 - Repository blame views and complete commit-history navigation with paginated API results
 - Persisted merge requests with exact-commit approvals, threaded discussions, and approval-gated merging
-- Per-repository issue tracking with labels, assignees, comments, state changes, and role-scoped editing, stored beside each repository and carried through repository and group renames, moves, and deletions
+- Per-repository issue tracking with labels, assignees, comments, state changes, role-scoped editing, and Git-safe issue branches with persisted creator metadata, stored beside each repository and carried through repository and group renames, moves, and deletions
 - SSRF-resistant remote imports with private-network blocking, DNS-pinned dialing, redirect validation, and administrator allowlists
 
 Not production-complete yet:

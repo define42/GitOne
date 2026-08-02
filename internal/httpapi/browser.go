@@ -726,32 +726,44 @@ func (a API) createRepositoryBranch(ctx context.Context, input *createRepository
 	if err != nil {
 		return nil, err
 	}
-	if _, err = repository.Reference(branchName, false); err == nil {
-		return nil, huma.Error409Conflict("branch already exists")
-	} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil, huma.Error500InternalServerError("could not check branch", err)
-	}
-	source, err := repository.Reference(sourceName, true)
-	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil, huma.Error404NotFound("source branch not found")
-	}
+	commit, err := createRepositoryBranchReference(repository, branchName, sourceName)
 	if err != nil {
-		return nil, huma.Error500InternalServerError("could not read source branch", err)
+		return nil, err
 	}
-	if _, err = repository.CommitObject(source.Hash()); err != nil {
-		return nil, huma.Error409Conflict("source branch does not point to a commit", err)
-	}
-	if err = repository.Storer.SetReference(plumbing.NewHashReference(branchName, source.Hash())); err != nil {
-		return nil, huma.Error409Conflict("could not create branch", err)
-	}
-	a.scheduleBuild(parsed, input.Branch, source.Hash())
+	a.scheduleBuild(parsed, input.Branch, commit)
 
 	output := &createRepositoryBranchOutput{}
 	output.Body.Repository = parsed.Full()
 	output.Body.Name = input.Branch
 	output.Body.From = input.From
-	output.Body.Commit = source.Hash().String()
+	output.Body.Commit = commit.String()
 	return output, nil
+}
+
+func createRepositoryBranchReference(
+	repository *git.Repository,
+	branchName plumbing.ReferenceName,
+	sourceName plumbing.ReferenceName,
+) (plumbing.Hash, error) {
+	if _, err := repository.Reference(branchName, false); err == nil {
+		return plumbing.ZeroHash, huma.Error409Conflict("branch already exists")
+	} else if !errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return plumbing.ZeroHash, huma.Error500InternalServerError("could not check branch", err)
+	}
+	source, err := repository.Reference(sourceName, true)
+	if errors.Is(err, plumbing.ErrReferenceNotFound) {
+		return plumbing.ZeroHash, huma.Error404NotFound("source branch not found")
+	}
+	if err != nil {
+		return plumbing.ZeroHash, huma.Error500InternalServerError("could not read source branch", err)
+	}
+	if _, err = repository.CommitObject(source.Hash()); err != nil {
+		return plumbing.ZeroHash, huma.Error409Conflict("source branch does not point to a commit", err)
+	}
+	if err = repository.Storer.SetReference(plumbing.NewHashReference(branchName, source.Hash())); err != nil {
+		return plumbing.ZeroHash, huma.Error409Conflict("could not create branch", err)
+	}
+	return source.Hash(), nil
 }
 
 func (a API) deleteRepositoryBranch(

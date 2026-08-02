@@ -370,6 +370,9 @@ function repositoryIssuesAPIURL(repository, issue) {
 function repositoryIssueCommentsAPIURL(repository, issue) {
     return `${repositoryIssuesAPIURL(repository, issue)}/comments`;
 }
+function repositoryIssueBranchAPIURL(repository, issue) {
+    return `${repositoryIssuesAPIURL(repository, issue)}/branch`;
+}
 function repositoryCommitDiffAPIURL(repository, commit) {
     return `/api/repositories/${encodeURIComponent(repository)}/commits/${encodeURIComponent(commit)}/diff`;
 }
@@ -2936,11 +2939,12 @@ function repositoryNavigation(route, action) {
     }
     return nav;
 }
-function repositoryBranchCreator(route, data) {
-    const trigger = actionButton("New branch", "git-branch", "secondary");
+function repositoryBranchCreator(route, data, options = {}) {
+    const triggerLabel = options.triggerLabel ?? "New branch";
+    const trigger = actionButton(triggerLabel, "git-branch", "secondary");
     trigger.classList.add("new-branch-trigger");
-    trigger.setAttribute("aria-label", "New branch");
-    trigger.title = "New branch";
+    trigger.setAttribute("aria-label", triggerLabel);
+    trigger.title = triggerLabel;
     const dialog = element("dialog");
     dialog.className = "action-dialog";
     if (!data.canWrite) {
@@ -2957,7 +2961,7 @@ function repositoryBranchCreator(route, data) {
     form.className = "dialog-form";
     const header = element("div");
     header.className = "dialog-header";
-    const title = element("h2", "Create branch");
+    const title = element("h2", options.dialogTitle ?? "Create branch");
     const close = actionButton("Close", "close", "icon-button");
     close.setAttribute("aria-label", "Close");
     close.title = "Close";
@@ -2967,6 +2971,18 @@ function repositoryBranchCreator(route, data) {
     name.name = "branch";
     name.placeholder = "feature/my-change";
     name.required = true;
+    name.value = options.suggestedName ?? "";
+    const validateRequiredPrefix = () => {
+        if (!options.requiredPrefix ||
+            name.value === options.requiredPrefix ||
+            name.value.startsWith(`${options.requiredPrefix}-`)) {
+            name.setCustomValidity("");
+            return true;
+        }
+        name.setCustomValidity(`The branch name must use ${options.requiredPrefix} as its issue prefix.`);
+        return false;
+    };
+    name.addEventListener("input", validateRequiredPrefix);
     nameLabel.append(name);
     const sourceLabel = element("label", "Create from");
     const source = element("select");
@@ -3005,13 +3021,23 @@ function repositoryBranchCreator(route, data) {
     });
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
+        if (!validateRequiredPrefix()) {
+            name.reportValidity();
+            return;
+        }
         button.disabled = true;
         cancel.disabled = true;
         form.setAttribute("aria-busy", "true");
         try {
-            await request(`${repositoryBranchAPIURL(route.repository, name.value)}?from=${encodeURIComponent(source.value)}`, { method: "POST" });
+            const created = options.issue === undefined
+                ? await request(`${repositoryBranchAPIURL(route.repository, name.value)}?from=${encodeURIComponent(source.value)}`, { method: "POST" })
+                : await request(repositoryIssueBranchAPIURL(route.repository, options.issue), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name: name.value, from: source.value }),
+                });
             window.location.href = repositoryBrowserURL(route.repository, {
-                ref: name.value,
+                ref: created.name,
             });
         }
         catch (reason) {
@@ -4384,7 +4410,7 @@ async function issueConversation(route, issue) {
     conversation.append(comments);
     return conversation;
 }
-function issueDetailPanel(route, issue) {
+function issueDetailPanel(route, issue, branches) {
     const sidebar = element("aside");
     sidebar.className = "merge-request-sidebar";
     const details = element("section");
@@ -4397,11 +4423,54 @@ function issueDetailPanel(route, issue) {
     definition.children[1]?.append(updated);
     definition.children[3]?.append(issueLabels(issue.labels, "None"));
     definition.children[5]?.append(issueLabels(issue.assignees, "None"));
+    if (issue.branch) {
+        const branch = element("code", issue.branch);
+        const creator = issue.branchCreatedBy ?? "unknown";
+        const created = issue.branchCreatedAt
+            ? element("span", `${creator} ${relativeTime(issue.branchCreatedAt)}`)
+            : element("span", creator);
+        if (issue.branchCreatedAt) {
+            created.title = new Date(issue.branchCreatedAt).toLocaleString();
+        }
+        definition.append(element("dt", "Branch"), element("dd"), element("dt", "Created by"), element("dd"));
+        definition.children[7]?.append(branch);
+        definition.children[9]?.append(created);
+    }
     details.append(definition);
     if (issue.state === "closed" && issue.closedAt) {
         const closed = element("p", `Closed by ${issue.closedBy ?? "unknown"} ${relativeTime(issue.closedAt)}.`);
         closed.title = new Date(issue.closedAt).toLocaleString();
         details.append(closed);
+    }
+    const issueBranchPrefix = `issue-${issue.id}`;
+    if (issue.branch) {
+        const existingBranch = branches.branches.find((branch) => branch.name === issue.branch);
+        if (existingBranch) {
+            const openBranch = actionButton("Open branch", "git-branch", "secondary");
+            openBranch.title = `Open ${existingBranch.name}`;
+            openBranch.addEventListener("click", () => {
+                window.location.href = repositoryBrowserURL(route.repository, {
+                    ref: existingBranch.name,
+                });
+            });
+            details.append(openBranch);
+        }
+        else {
+            const unavailable = actionButton("Branch unavailable", "git-branch", "secondary");
+            unavailable.disabled = true;
+            unavailable.title = `${issue.branch} no longer exists in this repository`;
+            details.append(unavailable);
+        }
+    }
+    else if (branches.canWrite) {
+        const branchCreator = repositoryBranchCreator(route, branches, {
+            triggerLabel: "Create branch",
+            dialogTitle: `Create branch from issue #${issue.id}`,
+            suggestedName: issue.suggestedBranch,
+            requiredPrefix: issueBranchPrefix,
+            issue: issue.id,
+        });
+        details.append(branchCreator.trigger, branchCreator.dialog);
     }
     if (issue.canUpdate) {
         const nextState = issue.state === "closed" ? "open" : "closed";
@@ -4430,7 +4499,7 @@ function issueDetailPanel(route, issue) {
     sidebar.append(details);
     return sidebar;
 }
-async function repositoryIssueDetail(route, issue) {
+async function repositoryIssueDetail(route, issue, branches) {
     document.title = `#${issue.id} ${issue.title} · ${route.repository} · GitOne`;
     const section = element("section");
     section.className = "content-section merge-request-detail";
@@ -4446,16 +4515,16 @@ async function repositoryIssueDetail(route, issue) {
     header.append(heading, opened);
     const layout = element("div");
     layout.className = "merge-request-detail-layout";
-    layout.append(await issueConversation(route, issue), issueDetailPanel(route, issue));
+    layout.append(await issueConversation(route, issue), issueDetailPanel(route, issue, branches));
     section.append(header, layout);
     return section;
 }
-async function repositoryIssuesView(route, canWrite) {
+async function repositoryIssuesView(route, branches) {
     if (route.issue === undefined) {
-        return await repositoryIssueList(route, canWrite);
+        return await repositoryIssueList(route, branches.canWrite);
     }
     const issue = await request(repositoryIssuesAPIURL(route.repository, route.issue));
-    return await repositoryIssueDetail(route, issue);
+    return await repositoryIssueDetail(route, issue, branches);
 }
 function cloneControl(value) {
     const command = `git clone ${value}`;
@@ -5303,7 +5372,7 @@ async function renderEmptyRepositoryBrowser(route, branches, group) {
     overview.className = "repository-overview";
     overview.append(toolbar);
     const content = route.view === "issues"
-        ? await repositoryIssuesView(route, branches.canWrite)
+        ? await repositoryIssuesView(route, branches)
         : element("section");
     if (route.view !== "issues") {
         content.className = "content-section";
@@ -5470,7 +5539,7 @@ async function renderRepositoryBrowser(route) {
         return;
     }
     if (route.view === "issues") {
-        app.append(await repositoryIssuesView(route, branches.canWrite));
+        app.append(await repositoryIssuesView(route, branches));
         return;
     }
     if (route.view === "blame") {
