@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/define42/GitOne/internal/auth"
@@ -17,18 +21,66 @@ import (
 	"github.com/define42/GitOne/internal/storage"
 )
 
+const gracefulShutdownTimeout = 30 * time.Second
+
 func main() {
 	fipsmode.Must()
 
-	server, ephemeralSessions, err := newServer(os.Args[1:])
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	err := run(ctx, os.Args[1:])
+	stop()
 	if err != nil {
 		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context, args []string) error {
+	server, ephemeralSessions, err := newServer(args)
+	if err != nil {
+		return err
 	}
 	if ephemeralSessions {
 		log.Print("session cookie keys are ephemeral; configure GITONE_SESSION_HASH_KEY and GITONE_SESSION_BLOCK_KEY to preserve browser sessions across restarts")
 	}
 	log.Printf("GitOne listening with %s on %s", server.transport.protocol(), server.Addr)
-	log.Fatal(server.ListenAndServe())
+	return serve(ctx, server, gracefulShutdownTimeout)
+}
+
+type gracefulServer interface {
+	ListenAndServe() error
+	Shutdown(context.Context) error
+}
+
+func serve(ctx context.Context, server gracefulServer, shutdownTimeout time.Duration) error {
+	serveResult := make(chan error, 1)
+	go func() {
+		serveResult <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveResult:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+	}
+
+	log.Print("GitOne shutting down")
+	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownContext); err != nil {
+		return fmt.Errorf("shut down GitOne server: %w", err)
+	}
+
+	if err := <-serveResult; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 func newServer(args []string) (*configuredServer, bool, error) {

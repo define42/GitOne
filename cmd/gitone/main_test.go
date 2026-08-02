@@ -1,11 +1,56 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type gracefulServerStub struct {
+	listenStarted  chan struct{}
+	listenFinished chan struct{}
+	shutdownCalled chan struct{}
+	listenErr      error
+	shutdownErr    error
+	finishOnce     sync.Once
+	t              *testing.T
+}
+
+func newGracefulServerStub(t *testing.T) *gracefulServerStub {
+	t.Helper()
+	return &gracefulServerStub{
+		listenStarted:  make(chan struct{}),
+		listenFinished: make(chan struct{}),
+		shutdownCalled: make(chan struct{}),
+		t:              t,
+	}
+}
+
+func (server *gracefulServerStub) ListenAndServe() error {
+	close(server.listenStarted)
+	<-server.listenFinished
+	return server.listenErr
+}
+
+func (server *gracefulServerStub) Shutdown(ctx context.Context) error {
+	if _, ok := ctx.Deadline(); !ok {
+		server.t.Error("shutdown context has no deadline")
+	}
+	close(server.shutdownCalled)
+	if server.shutdownErr == nil {
+		server.finishOnce.Do(func() { close(server.listenFinished) })
+	}
+	return server.shutdownErr
+}
+
+func (server *gracefulServerStub) finish() {
+	server.finishOnce.Do(func() { close(server.listenFinished) })
+}
 
 func setValidEnvironment(t *testing.T) {
 	t.Helper()
@@ -37,6 +82,53 @@ func TestNewServer(t *testing.T) {
 		server.IdleTimeout != 2*time.Minute {
 		t.Fatalf("unexpected server: %#v ephemeral=%v", server, ephemeral)
 	}
+}
+
+func TestServeGracefullyShutsDown(t *testing.T) {
+	server := newGracefulServerStub(t)
+	server.listenErr = http.ErrServerClosed
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- serve(ctx, server, time.Second) }()
+
+	<-server.listenStarted
+	cancel()
+	<-server.shutdownCalled
+	if err := <-result; err != nil {
+		t.Fatalf("serve returned %v", err)
+	}
+}
+
+func TestServeReturnsListenError(t *testing.T) {
+	want := errors.New("listen failed")
+	server := newGracefulServerStub(t)
+	server.listenErr = want
+	server.finish()
+
+	if err := serve(context.Background(), server, time.Second); !errors.Is(err, want) {
+		t.Fatalf("serve returned %v, want %v", err, want)
+	}
+	select {
+	case <-server.shutdownCalled:
+		t.Fatal("shutdown called after listen failure")
+	default:
+	}
+}
+
+func TestServeReturnsShutdownError(t *testing.T) {
+	want := errors.New("shutdown failed")
+	server := newGracefulServerStub(t)
+	server.shutdownErr = want
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- serve(ctx, server, time.Second) }()
+
+	<-server.listenStarted
+	cancel()
+	if err := <-result; !errors.Is(err, want) {
+		t.Fatalf("serve returned %v, want %v", err, want)
+	}
+	server.finish()
 }
 
 func TestNewServerConfiguresACMEHTTPS(t *testing.T) {
