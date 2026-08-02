@@ -535,6 +535,11 @@ a:hover {
   width: 1.05rem;
 }
 
+.icon-repository {
+  fill: currentColor;
+  stroke: none;
+}
+
 .site-header {
   background: var(--surface);
   border-bottom: 1px solid var(--border);

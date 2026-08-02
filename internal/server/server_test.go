@@ -3698,9 +3698,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=22">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=23">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=44">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=45">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -3760,6 +3760,11 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), `"GitOne root"`) ||
 		!strings.Contains(assetResponse.Body.String(), "rootLocationContextItem") {
 		t.Fatal("served UI does not provide a root breadcrumb")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "M15.698 7.287 8.712.302") ||
+		!strings.Contains(assetResponse.Body.String(), `repository: "0 0 16 16"`) ||
+		!strings.Contains(assetResponse.Body.String(), "`icon-${name}`") {
+		t.Fatal("served UI does not use the Bootstrap Git icon for repositories")
 	}
 	if strings.Contains(assetResponse.Body.String(), "Danger zone") ||
 		strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") {
@@ -3832,6 +3837,11 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(stylesResponse.Body.String(), ".destructive-warning") ||
 		!strings.Contains(stylesResponse.Body.String(), ".dialog-error") {
 		t.Fatal("theme styles do not distinguish advanced destructive settings and confirmations")
+	}
+	if !strings.Contains(stylesResponse.Body.String(), ".icon-repository") ||
+		!strings.Contains(stylesResponse.Body.String(), "fill: currentColor") ||
+		!strings.Contains(stylesResponse.Body.String(), "stroke: none") {
+		t.Fatal("theme styles do not render the Bootstrap repository icon as a filled glyph")
 	}
 	if !strings.Contains(stylesResponse.Body.String(), ".file-actions") ||
 		!strings.Contains(stylesResponse.Body.String(), ".file-action-menu-panel") ||
