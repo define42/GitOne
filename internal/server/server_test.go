@@ -3548,9 +3548,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=18">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=19">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=40">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=41">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -3646,6 +3646,11 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		) {
 		t.Fatal("theme styles do not protect page-header copy at tablet widths")
 	}
+	if !strings.Contains(stylesResponse.Body.String(), ".file-actions") ||
+		!strings.Contains(stylesResponse.Body.String(), ".file-action-menu-panel") ||
+		!strings.Contains(stylesResponse.Body.String(), "justify-content: flex-start") {
+		t.Fatal("theme styles do not group repository file actions")
+	}
 	diffAssetRequest := httptest.NewRequest(http.MethodGet, "/assets/diff.min.js", nil)
 	diffAssetRequest.SetBasicAuth("alice", "secret")
 	diffAssetResponse := httptest.NewRecorder()
@@ -3672,6 +3677,10 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 	}
 	if !strings.Contains(assetResponse.Body.String(), "repositoryFileAPIURL") ||
 		!strings.Contains(assetResponse.Body.String(), "content.canEdit") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryFileActionMenu") ||
+		!strings.Contains(assetResponse.Body.String(), `fileActions.className = "file-actions"`) ||
+		!strings.Contains(assetResponse.Body.String(), `summary.setAttribute("aria-label", "More file actions")`) ||
+		!strings.Contains(assetResponse.Body.String(), `actionButton("Edit", "pencil", "primary")`) ||
 		!strings.Contains(assetResponse.Body.String(), "expectedCommit: content.commit") ||
 		!strings.Contains(assetResponse.Body.String(), "window.Diff.structuredPatch") ||
 		!strings.Contains(assetResponse.Body.String(), "No changes to commit.") ||

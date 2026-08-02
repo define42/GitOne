@@ -31,6 +31,14 @@ const sessionUsername = sessionUsernameRoot;
 const logoutButton = logoutRoot;
 let browserSession = null;
 let repositoryBuildPollingStop = null;
+let openFileActionMenu = null;
+document.addEventListener("pointerdown", (event) => {
+    const menu = openFileActionMenu;
+    if (menu && (!menu.isConnected || !menu.contains(event.target))) {
+        menu.open = false;
+        openFileActionMenu = null;
+    }
+});
 const colorThemes = [
     "light",
     "dark",
@@ -93,6 +101,11 @@ const iconPaths = {
         "M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3",
     ],
     download: ["M12 3v12", "m7 10 5 5 5-5", "M5 21h14"],
+    ellipsis: [
+        "M6 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+        "M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+        "M18 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+    ],
     file: ["M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5Z", "M14 2v6h6"],
     folder: ["M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"],
     group: [
@@ -3831,7 +3844,7 @@ function repositoryFileCreator(route, tree) {
     return { trigger, dialog };
 }
 function repositoryFileRenameControl(route, content) {
-    const trigger = actionButton("Rename", "pencil", "secondary");
+    const trigger = actionButton("Rename file", "pencil", "secondary");
     const dialog = element("dialog");
     dialog.className = "action-dialog";
     const form = element("form");
@@ -3927,7 +3940,7 @@ function repositoryFileRenameControl(route, content) {
     return { trigger, dialog };
 }
 function repositoryFileDeleteControl(route, content) {
-    const trigger = actionButton("Delete", "trash", "danger-secondary");
+    const trigger = actionButton("Delete file", "trash", "danger-secondary");
     const dialog = element("dialog");
     dialog.className = "action-dialog";
     const form = element("form");
@@ -4116,11 +4129,57 @@ function repositoryBlameSection(route, blame) {
     section.append(table);
     return section;
 }
+function repositoryFileActionMenu(controls) {
+    if (controls.length === 0) {
+        return null;
+    }
+    const menu = element("details");
+    menu.className = "file-action-menu";
+    const summary = element("summary");
+    summary.className = "button secondary icon-button";
+    summary.setAttribute("aria-label", "More file actions");
+    summary.title = "More file actions";
+    summary.append(icon("ellipsis"));
+    const panel = element("div");
+    panel.className = "file-action-menu-panel";
+    for (const control of controls) {
+        panel.append(control.trigger);
+        control.trigger.addEventListener("click", () => {
+            menu.open = false;
+        }, { capture: true });
+        control.dialog.addEventListener("close", () => {
+            menu.open = false;
+            if (summary.isConnected) {
+                summary.focus();
+            }
+        });
+    }
+    menu.addEventListener("toggle", () => {
+        if (menu.open) {
+            if (openFileActionMenu && openFileActionMenu !== menu) {
+                openFileActionMenu.open = false;
+            }
+            openFileActionMenu = menu;
+        }
+        else if (openFileActionMenu === menu) {
+            openFileActionMenu = null;
+        }
+    });
+    menu.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && menu.open) {
+            event.preventDefault();
+            menu.open = false;
+            summary.focus();
+        }
+    });
+    menu.append(summary, panel);
+    return menu;
+}
 async function repositoryBlobSection(route, content) {
     const section = element("section");
     section.className = "content-section file-view";
     const editButton = content.canEdit
-        ? actionButton("Edit", "pencil", "secondary")
+        ? actionButton("Edit", "pencil", "primary")
         : null;
     const renameControl = content.canManage
         ? repositoryFileRenameControl(route, content)
@@ -4142,13 +4201,19 @@ async function repositoryBlobSection(route, content) {
         });
         blameLink.append(icon("clock"), document.createTextNode("Blame"));
     }
-    const fileActions = [
-        editButton,
+    const fileActionMenu = repositoryFileActionMenu([
+        renameControl,
+        deleteControl,
+    ].filter((control) => control !== null));
+    const fileActionControls = [
         blameLink,
-        renameControl?.trigger,
-        deleteControl?.trigger,
-    ].filter((action) => action !== null && action !== undefined);
-    const heading = sectionHeading(content.path, undefined, fileActions);
+        editButton,
+        fileActionMenu,
+    ].filter((action) => action !== null);
+    const fileActions = element("div");
+    fileActions.className = "file-actions";
+    fileActions.append(...fileActionControls);
+    const heading = sectionHeading(content.path, undefined, fileActionControls.length > 0 ? [fileActions] : []);
     const metadata = element("p", [
         formatFileSize(content.size),
         content.lfs ? "Git LFS" : undefined,
@@ -4253,9 +4318,8 @@ async function repositoryBlobSection(route, content) {
         actions.append(messageLabel, buttons);
         form.append(toolbar, contentLabel, diffView, actions);
         body.replaceChildren(form);
-        for (const action of fileActions) {
-            action.hidden = true;
-        }
+        fileActionMenu?.removeAttribute("open");
+        fileActions.hidden = true;
         textarea.focus();
         const updateSaveState = () => {
             save.disabled = textarea.value === content.content;
@@ -4328,9 +4392,7 @@ async function repositoryBlobSection(route, content) {
         });
         cancel.addEventListener("click", async () => {
             diffGeneration++;
-            for (const action of fileActions) {
-                action.hidden = false;
-            }
+            fileActions.hidden = false;
             await renderViewer();
             editButton.focus();
         });

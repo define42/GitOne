@@ -2631,6 +2631,63 @@ table {
   margin: -0.45rem 0 1rem;
 }
 
+.file-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.file-action-menu {
+  position: relative;
+}
+
+.file-action-menu > summary {
+  list-style: none;
+}
+
+.file-action-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.file-action-menu[open] > summary {
+  background: var(--button-hover);
+  border-color: var(--button-hover-border);
+}
+
+.file-action-menu-panel {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 0.2rem;
+  min-width: 11rem;
+  padding: 0.35rem;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.4rem);
+  z-index: 20;
+}
+
+.file-action-menu-panel > .button {
+  background: transparent;
+  border-color: transparent;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.file-action-menu-panel > .button:hover {
+  background: var(--button-hover);
+  border-color: transparent;
+}
+
+.file-action-menu-panel > .danger-secondary:hover {
+  background: var(--danger-soft);
+  border-color: transparent;
+}
+
 .file-editor {
   border: 1px solid var(--border);
   border-radius: 6px;
