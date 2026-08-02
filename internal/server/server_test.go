@@ -3698,9 +3698,9 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 			!strings.Contains(body, `<img src="/assets/gitone.png" alt="GitOne">`) ||
 			!strings.Contains(body, `<nav id="location-context" class="location-context"`) ||
 			!strings.Contains(body, `<ol id="location-context-list"></ol>`) ||
-			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=21">`) ||
+			!strings.Contains(body, `<link rel="stylesheet" href="/assets/styles.css?v=22">`) ||
 			!strings.Contains(body, `<script src="/assets/diff.min.js"></script>`) ||
-			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=43">`) ||
+			!strings.Contains(body, `<script type="module" src="/assets/app.js?v=44">`) ||
 			!strings.Contains(body, `"marked": "/assets/marked.esm.js"`) ||
 			!strings.Contains(body, `localStorage.getItem("gitone-color-theme")`) ||
 			!strings.Contains(body, `<select id="color-theme" aria-label="Color theme">`) ||
@@ -3761,6 +3761,30 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "rootLocationContextItem") {
 		t.Fatal("served UI does not provide a root breadcrumb")
 	}
+	if strings.Contains(assetResponse.Body.String(), "Danger zone") ||
+		strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") {
+		t.Fatal("served UI should keep destructive actions in resource settings")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "destructiveConfirmationControl") ||
+		!strings.Contains(assetResponse.Body.String(), "options.confirmation") ||
+		!strings.Contains(assetResponse.Body.String(), "input.value !== options.confirmation") ||
+		!strings.Contains(assetResponse.Body.String(), "repositoryAdvancedSettings") ||
+		!strings.Contains(assetResponse.Body.String(), "element(\"h3\", \"Advanced\")") {
+		t.Fatal("served UI does not put repository deletion behind Settings > Advanced confirmation")
+	}
+	if strings.Count(
+		assetResponse.Body.String(),
+		"resourceSettingsControl(\"Repository settings\", rename, advancedSettings)",
+	) != 2 {
+		t.Fatal("served UI does not provide repository settings in empty and populated repositories")
+	}
+	if !strings.Contains(assetResponse.Body.String(), "groupAdvancedSettings") ||
+		!strings.Contains(assetResponse.Body.String(), "data.subgroups.length + data.repositories.length") ||
+		!strings.Contains(assetResponse.Body.String(), "if (directChildCount > 0)") ||
+		!strings.Contains(assetResponse.Body.String(), "Deletion is unavailable while this group contains") ||
+		!strings.Contains(assetResponse.Body.String(), "panelDefinitions.push([\"Advanced\", advanced.panel])") {
+		t.Fatal("served UI does not keep group deletion unavailable for non-empty groups under Settings > Advanced")
+	}
 	if strings.Contains(assetResponse.Body.String(), `"Recent commits"`) {
 		t.Fatal("served UI should reserve commit lists for history")
 	}
@@ -3802,6 +3826,12 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(stylesResponse.Body.String(), ".group-child-count") ||
 		!strings.Contains(stylesResponse.Body.String(), `transform: rotate(90deg)`) {
 		t.Fatal("theme styles do not present the expandable group hierarchy")
+	}
+	if !strings.Contains(stylesResponse.Body.String(), ".resource-settings-dialog") ||
+		!strings.Contains(stylesResponse.Body.String(), ".destructive-settings-action") ||
+		!strings.Contains(stylesResponse.Body.String(), ".destructive-warning") ||
+		!strings.Contains(stylesResponse.Body.String(), ".dialog-error") {
+		t.Fatal("theme styles do not distinguish advanced destructive settings and confirmations")
 	}
 	if !strings.Contains(stylesResponse.Body.String(), ".file-actions") ||
 		!strings.Contains(stylesResponse.Body.String(), ".file-action-menu-panel") ||
@@ -3932,13 +3962,15 @@ func TestTypeScriptUIAndHumaDocs(t *testing.T) {
 		!strings.Contains(assetResponse.Body.String(), "branchManager.trigger") {
 		t.Fatal("served UI does not provide branch divergence and deletion management")
 	}
-	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(data.path, repository.name)") ||
-		!strings.Contains(assetResponse.Body.String(), `input.value !== repositoryName`) ||
+	if !strings.Contains(assetResponse.Body.String(), "repositoryDeleteControl(groupPath, repositoryName)") ||
+		!strings.Contains(assetResponse.Body.String(), "confirmation: repositoryName") ||
+		!strings.Contains(assetResponse.Body.String(), "input.value !== options.confirmation") ||
 		!strings.Contains(assetResponse.Body.String(), `method: "DELETE"`) {
 		t.Fatal("served UI does not require repository-name confirmation before deletion")
 	}
-	if !strings.Contains(assetResponse.Body.String(), "data.subgroups.length === 0 && data.repositories.length === 0") ||
-		!strings.Contains(assetResponse.Body.String(), `input.value !== groupPath`) ||
+	if !strings.Contains(assetResponse.Body.String(), "groupAdvancedSettings(data.path, data.subgroups.length + data.repositories.length)") ||
+		!strings.Contains(assetResponse.Body.String(), "if (directChildCount > 0)") ||
+		!strings.Contains(assetResponse.Body.String(), "confirmation: groupPath") ||
 		!strings.Contains(assetResponse.Body.String(), `request(apiGroupURL(groupPath), { method: "DELETE" })`) {
 		t.Fatal("served UI does not restrict group deletion to confirmed empty groups")
 	}

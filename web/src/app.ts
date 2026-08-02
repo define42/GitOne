@@ -1108,133 +1108,302 @@ function showGeneratedTokenSecrets(secrets: GeneratedGroupTokenSecret[]): void {
   firstInput?.focus();
 }
 
-function repositoryDeleteControl(groupPath: string, repositoryName: string): HTMLElement {
-  const container = element("div");
-  container.className = "repository-delete-control";
-  const revealButton = element("button", "Delete");
-  revealButton.type = "button";
-  revealButton.className = "button danger-secondary";
-  revealButton.prepend(icon("trash"));
-  container.append(revealButton);
-
-  revealButton.addEventListener("click", () => {
-    const form = element("form");
-    form.className = "repository-delete-form";
-    const label = element("label", `Type "${repositoryName}" to confirm deletion`);
-    const input = element("input");
-    input.name = "repositoryName";
-    input.autocomplete = "off";
-    input.required = true;
-    label.append(input);
-
-    const actions = element("div");
-    actions.className = "repository-delete-actions";
-    const confirmButton = element("button", "Delete repository");
-    confirmButton.type = "submit";
-    confirmButton.className = "danger";
-    const cancelButton = element("button", "Cancel");
-    cancelButton.type = "button";
-    actions.append(confirmButton, cancelButton);
-    form.append(label, actions);
-    container.replaceChildren(form);
-    input.focus();
-
-    input.addEventListener("input", () => {
-      input.setCustomValidity("");
-    });
-    cancelButton.addEventListener("click", () => {
-      container.replaceChildren(revealButton);
-    });
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (input.value !== repositoryName) {
-        input.setCustomValidity(`Enter ${repositoryName} exactly.`);
-        input.reportValidity();
-        return;
-      }
-      confirmButton.disabled = true;
-      cancelButton.disabled = true;
-      try {
-        const repositoryPath = encodeURIComponent(`${groupPath}/${repositoryName}`);
-        await request(`/api/repositories/${repositoryPath}`, {method: "DELETE"});
-        await renderGroup(groupPath, `Repository ${repositoryName} deleted.`);
-      } catch (reason) {
-        showStatus(reason instanceof Error ? reason.message : "Could not delete the repository.", true);
-        confirmButton.disabled = false;
-        cancelButton.disabled = false;
-      }
-    });
-  });
-  return container;
+interface DialogControl {
+  trigger: HTMLButtonElement;
+  dialog: HTMLDialogElement;
 }
 
-function groupDeleteControl(groupPath: string, empty: boolean): HTMLElement {
-  const section = element("section");
-  section.className = "group-delete-section";
-  section.append(element("h3", "Delete group"));
-  if (!empty) {
-    section.append(element("p", "Remove all repositories and subgroups before deleting this group."));
-    return section;
+interface DestructiveConfirmationOptions {
+  triggerLabel: string;
+  title: string;
+  warning: string;
+  confirmation: string;
+  inputName: string;
+  errorMessage: string;
+  onConfirm: () => Promise<void>;
+  onDeleted: () => Promise<void> | void;
+}
+
+let dialogSequence = 0;
+
+function destructiveConfirmationControl(
+  options: DestructiveConfirmationOptions,
+): DialogControl {
+  const trigger = actionButton(options.triggerLabel, "trash", "danger-secondary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog destructive-dialog";
+  const form = element("form");
+  form.className = "dialog-form";
+
+  const sequence = ++dialogSequence;
+  const titleID = `destructive-dialog-title-${sequence}`;
+  const warningID = `destructive-dialog-warning-${sequence}`;
+  dialog.setAttribute("aria-labelledby", titleID);
+  dialog.setAttribute("aria-describedby", warningID);
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", options.title);
+  title.id = titleID;
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+
+  const warning = element("p", options.warning);
+  warning.id = warningID;
+  warning.className = "destructive-warning";
+  const input = element("input");
+  input.name = options.inputName;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.required = true;
+  const error = element("p");
+  error.className = "dialog-error";
+  error.setAttribute("role", "alert");
+  error.hidden = true;
+  const actions = element("div");
+  actions.className = "dialog-actions";
+  const cancel = actionButton("Cancel", undefined, "secondary");
+  const submit = actionButton(options.triggerLabel, "trash", "danger");
+  submit.type = "submit";
+  actions.append(cancel, submit);
+  form.append(
+    header,
+    warning,
+    fieldLabel(`Type "${options.confirmation}" to confirm`, input),
+    error,
+    actions,
+  );
+  dialog.append(form);
+
+  const dismiss = (): void => {
+    if (!submit.disabled) {
+      dialog.close();
+    }
+  };
+  trigger.addEventListener("click", () => {
+    input.value = "";
+    input.setCustomValidity("");
+    error.hidden = true;
+    dialog.showModal();
+    input.focus();
+  });
+  close.addEventListener("click", dismiss);
+  cancel.addEventListener("click", dismiss);
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dismiss();
+    }
+  });
+  dialog.addEventListener("cancel", (event) => {
+    if (submit.disabled) {
+      event.preventDefault();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+  input.addEventListener("input", () => {
+    input.setCustomValidity("");
+    error.hidden = true;
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (input.value !== options.confirmation) {
+      input.setCustomValidity(`Enter ${options.confirmation} exactly.`);
+      input.reportValidity();
+      return;
+    }
+
+    submit.disabled = true;
+    cancel.disabled = true;
+    close.disabled = true;
+    form.setAttribute("aria-busy", "true");
+    error.hidden = true;
+    try {
+      await options.onConfirm();
+    } catch (reason) {
+      error.textContent = reason instanceof Error ? reason.message : options.errorMessage;
+      error.hidden = false;
+      input.focus();
+      submit.disabled = false;
+      cancel.disabled = false;
+      close.disabled = false;
+      form.removeAttribute("aria-busy");
+      return;
+    }
+
+    dialog.close();
+    try {
+      await options.onDeleted();
+    } catch (reason) {
+      showStatus(
+        reason instanceof Error ? reason.message : "The resource was deleted, but the view could not be refreshed.",
+        true,
+      );
+    } finally {
+      submit.disabled = false;
+      cancel.disabled = false;
+      close.disabled = false;
+      form.removeAttribute("aria-busy");
+    }
+  });
+  return {trigger, dialog};
+}
+
+function repositoryDeleteControl(
+  groupPath: string,
+  repositoryName: string,
+): DialogControl {
+  const repositoryPath = `${groupPath}/${repositoryName}`;
+  return destructiveConfirmationControl({
+    triggerLabel: "Delete repository",
+    title: "Delete repository",
+    warning: `Permanently delete ${repositoryPath} and its Git data, LFS objects, builds, and merge requests. This cannot be undone.`,
+    confirmation: repositoryName,
+    inputName: "repositoryName",
+    errorMessage: "Could not delete the repository.",
+    onConfirm: async () => {
+      await request(`/api/repositories/${encodeURIComponent(repositoryPath)}`, {
+        method: "DELETE",
+      });
+    },
+    onDeleted: async () => {
+      window.history.replaceState({}, "", groupURL(groupPath));
+      await renderGroup(groupPath, `Repository ${repositoryName} deleted.`);
+    },
+  });
+}
+
+function groupDeleteControl(groupPath: string): DialogControl {
+  return destructiveConfirmationControl({
+    triggerLabel: "Delete group",
+    title: "Delete group",
+    warning: `Permanently delete ${groupPath}. This cannot be undone.`,
+    confirmation: groupPath,
+    inputName: "groupPath",
+    errorMessage: "Could not delete the group.",
+    onConfirm: async () => {
+      await request(apiGroupURL(groupPath), {method: "DELETE"});
+    },
+    onDeleted: () => {
+      const parentParts = groupPath.split("/");
+      parentParts.pop();
+      window.location.assign(parentParts.length > 0 ? groupURL(parentParts.join("/")) : "/");
+    },
+  });
+}
+
+interface AdvancedSettings {
+  panel: HTMLElement;
+  control?: DialogControl;
+}
+
+function groupAdvancedSettings(
+  groupPath: string,
+  directChildCount: number,
+): AdvancedSettings {
+  const panel = element("section");
+  panel.className = "settings-panel-view resource-advanced-settings";
+  panel.setAttribute("role", "tabpanel");
+  panel.append(element("h3", "Advanced"));
+  const action = element("section");
+  action.className = "resource-settings-action destructive-settings-action";
+  action.append(
+    element("h4", "Delete group"),
+    element("p", "Delete this group permanently."),
+  );
+  if (directChildCount > 0) {
+    const label = `${directChildCount} direct ${directChildCount === 1 ? "item" : "items"}`;
+    const notice = element(
+      "p",
+      `Deletion is unavailable while this group contains ${label}. Remove its repositories and subgroups first.`,
+    );
+    notice.className = "settings-empty";
+    action.append(notice);
+    panel.append(action);
+    return {panel};
   }
 
-  const container = element("div");
-  const revealButton = element("button", "Delete group");
-  revealButton.type = "button";
-  revealButton.className = "button danger-secondary";
-  revealButton.prepend(icon("trash"));
-  container.append(revealButton);
-  section.append(container);
+  const control = groupDeleteControl(groupPath);
+  action.append(control.trigger);
+  panel.append(action);
+  return {panel, control};
+}
 
-  revealButton.addEventListener("click", () => {
-    const form = element("form");
-    form.className = "group-delete-form";
-    const label = element("label", `Type "${groupPath}" to confirm deletion`);
-    const input = element("input");
-    input.name = "groupPath";
-    input.autocomplete = "off";
-    input.required = true;
-    label.append(input);
+function repositoryAdvancedSettings(
+  groupPath: string,
+  repositoryName: string,
+): AdvancedSettings {
+  const panel = element("section");
+  panel.className = "settings-panel-view resource-advanced-settings";
+  panel.setAttribute("role", "tabpanel");
+  panel.append(element("h3", "Advanced"));
+  const action = element("section");
+  action.className = "resource-settings-action destructive-settings-action";
+  action.append(
+    element("h4", "Delete repository"),
+    element("p", "Delete this repository and all related data permanently."),
+  );
+  const control = repositoryDeleteControl(groupPath, repositoryName);
+  action.append(control.trigger);
+  panel.append(action);
+  return {panel, control};
+}
 
-    const actions = element("div");
-    actions.className = "group-delete-actions";
-    const confirmButton = element("button", "Delete group");
-    confirmButton.type = "submit";
-    confirmButton.className = "danger";
-    const cancelButton = element("button", "Cancel");
-    cancelButton.type = "button";
-    actions.append(confirmButton, cancelButton);
-    form.append(label, actions);
-    container.replaceChildren(form);
-    input.focus();
+function resourceSettingsControl(
+  titleText: string,
+  renameControl: DialogControl | null,
+  advanced: AdvancedSettings,
+): DialogControl {
+  const trigger = actionButton("Settings", "settings", "secondary");
+  const dialog = element("dialog");
+  dialog.className = "action-dialog resource-settings-dialog";
+  const content = element("div");
+  content.className = "dialog-form resource-settings-content";
+  const header = element("div");
+  header.className = "dialog-header";
+  const title = element("h2", titleText);
+  title.id = `resource-settings-title-${++dialogSequence}`;
+  dialog.setAttribute("aria-labelledby", title.id);
+  const close = actionButton("Close", "close", "icon-button");
+  close.setAttribute("aria-label", "Close");
+  close.title = "Close";
+  header.append(title, close);
+  advanced.panel.removeAttribute("role");
+  content.append(header);
+  if (renameControl) {
+    const general = element("section");
+    general.className = "resource-settings-action";
+    general.append(
+      element("h3", "General"),
+      element("p", "Change this resource's name and URL."),
+      renameControl.trigger,
+    );
+    content.append(general);
+  }
+  content.append(advanced.panel);
+  dialog.append(content);
 
-    input.addEventListener("input", () => {
-      input.setCustomValidity("");
-    });
-    cancelButton.addEventListener("click", () => {
-      container.replaceChildren(revealButton);
-    });
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (input.value !== groupPath) {
-        input.setCustomValidity(`Enter ${groupPath} exactly.`);
-        input.reportValidity();
-        return;
-      }
-      confirmButton.disabled = true;
-      cancelButton.disabled = true;
-      try {
-        await request(apiGroupURL(groupPath), {method: "DELETE"});
-        const parentParts = groupPath.split("/");
-        parentParts.pop();
-        window.location.assign(parentParts.length > 0 ? groupURL(parentParts.join("/")) : "/");
-      } catch (reason) {
-        showStatus(reason instanceof Error ? reason.message : "Could not delete the group.", true);
-        confirmButton.disabled = false;
-        cancelButton.disabled = false;
-      }
-    });
+  const dismiss = (): void => dialog.close();
+  trigger.addEventListener("click", () => {
+    dialog.showModal();
+    close.focus();
   });
-  return section;
+  close.addEventListener("click", dismiss);
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) {
+      dismiss();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    if (trigger.isConnected) {
+      trigger.focus();
+    }
+  });
+  return {trigger, dialog};
 }
 
 function subgroupRenameControl(
@@ -2195,6 +2364,7 @@ function groupSettingsControl(
   path: string,
   settings: GroupControlSettings,
   role: GroupRole,
+  advanced?: AdvancedSettings,
 ): {trigger: HTMLButtonElement; dialog: HTMLDialogElement} {
   const canManageOwnerSettings = role === "owner";
   const trigger = actionButton("Settings", "settings", "secondary");
@@ -2469,6 +2639,9 @@ function groupSettingsControl(
     ["Tokens", tokensPanel],
     ["Policy", policyPanel],
   ];
+  if (advanced) {
+    panelDefinitions.push(["Advanced", advanced.panel]);
+  }
   const tabButtons: HTMLButtonElement[] = [];
   const selectPanel = (selected: number): void => {
     panelDefinitions.forEach(([, panel], index) => {
@@ -6151,8 +6324,15 @@ function renderEmptyRepositoryBrowser(
   const branchComparison = repositoryBranchComparison(route, branches);
   const branchManager = repositoryBranchManager(route, branches);
   const clone = cloneControl(repositoryURL(groupPath, repositoryName, group.username));
-  const rename = group.role === "maintainer" || group.role === "owner"
+  const canManageRepository = group.role === "maintainer" || group.role === "owner";
+  const rename = canManageRepository
     ? repositoryRenameControl(route, groupPath, repositoryName)
+    : null;
+  const advancedSettings = canManageRepository
+    ? repositoryAdvancedSettings(groupPath, repositoryName)
+    : null;
+  const settingsControl = rename && advancedSettings
+    ? resourceSettingsControl("Repository settings", rename, advancedSettings)
     : null;
   const branchLabel = element("label");
   const branchLabelText = element("span");
@@ -6175,7 +6355,7 @@ function renderEmptyRepositoryBrowser(
   const repositoryActions = element("div");
   repositoryActions.className = "repository-actions";
   repositoryActions.append(
-    ...(rename ? [rename.trigger] : []),
+    ...(settingsControl ? [settingsControl.trigger] : []),
     clone.trigger,
   );
   const toolbar = element("div");
@@ -6197,7 +6377,9 @@ function renderEmptyRepositoryBrowser(
     branchComparison.dialog,
     branchManager.dialog,
     clone.dialog,
+    ...(settingsControl ? [settingsControl.dialog] : []),
     ...(rename ? [rename.dialog] : []),
+    ...(advancedSettings?.control ? [advancedSettings.control.dialog] : []),
     content,
   );
 }
@@ -6347,12 +6529,19 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   const repositoryActions = element("div");
   repositoryActions.className = "repository-actions";
   const setDefault = repositoryDefaultBranchControl(route, branches);
-  const rename = group.role === "maintainer" || group.role === "owner"
+  const canManageRepository = group.role === "maintainer" || group.role === "owner";
+  const rename = canManageRepository
     ? repositoryRenameControl(route, groupPath, repositoryName)
+    : null;
+  const advancedSettings = canManageRepository
+    ? repositoryAdvancedSettings(groupPath, repositoryName)
+    : null;
+  const settingsControl = rename && advancedSettings
+    ? resourceSettingsControl("Repository settings", rename, advancedSettings)
     : null;
   repositoryActions.append(
     ...(setDefault ? [setDefault] : []),
-    ...(rename ? [rename.trigger] : []),
+    ...(settingsControl ? [settingsControl.trigger] : []),
     archive.trigger,
     clone.trigger,
   );
@@ -6369,7 +6558,9 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     branchManager.dialog,
     archive.dialog,
     clone.dialog,
+    ...(settingsControl ? [settingsControl.dialog] : []),
     ...(rename ? [rename.dialog] : []),
+    ...(advancedSettings?.control ? [advancedSettings.control.dialog] : []),
     ...(fileCreator ? [fileCreator.dialog] : []),
   );
 
@@ -6653,12 +6844,30 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     [repositoryDescription.label, initializeReadmeLabel],
   );
   const importRepository = repositoryImportControl(data.path);
-  const settingsControl = controlSettings
-    ? groupSettingsControl(data.path, controlSettings, data.role)
-    : null;
   const renameControl = canManageGroup && !isRootGroup
     ? subgroupRenameControl(data.path)
     : null;
+  const advancedSettings = canManageGroup
+    ? groupAdvancedSettings(
+      data.path,
+      data.subgroups.length + data.repositories.length,
+    )
+    : null;
+  let settingsControl: DialogControl | null = null;
+  if (advancedSettings) {
+    settingsControl = controlSettings
+      ? groupSettingsControl(
+        data.path,
+        controlSettings,
+        data.role,
+        advancedSettings,
+      )
+      : resourceSettingsControl(
+        isRootGroup ? "Group settings" : "Subgroup settings",
+        renameControl,
+        advancedSettings,
+      );
+  }
 
   const contents = element("section");
   contents.className = "content-section group-contents";
@@ -6670,37 +6879,8 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     groupTree(data),
   );
 
-  const danger = element("details");
-  danger.className = "settings-panel";
-  const settingsSummary = element("summary");
-  settingsSummary.append(icon("trash"), document.createTextNode("Danger zone"));
-  const settingsContent = element("div");
-  settingsContent.className = "settings-content";
-  if (data.repositories.length > 0) {
-    const repositorySettings = element("section");
-    repositorySettings.append(element("h3", "Repository deletion"));
-    const list = element("ul");
-    list.className = "settings-list";
-    for (const repository of data.repositories) {
-      const item = element("li");
-      item.append(
-        element("strong", repository.name),
-        repositoryDeleteControl(data.path, repository.name),
-      );
-      list.append(item);
-    }
-    repositorySettings.append(list);
-    settingsContent.append(repositorySettings);
-  }
-  settingsContent.append(groupDeleteControl(
-    data.path,
-    data.subgroups.length === 0 && data.repositories.length === 0,
-  ));
-  danger.append(settingsSummary, settingsContent);
-
   const pageActions = [
     ...(settingsControl ? [settingsControl.trigger] : []),
-    ...(renameControl ? [renameControl.trigger] : []),
     ...(canManageGroup
       ? [
         createSubgroup.trigger,
@@ -6721,7 +6901,6 @@ async function renderGroup(path: string, message?: string): Promise<void> {
     contents,
     ...(canManageGroup
       ? [
-        danger,
         createSubgroup.dialog,
         createRepository.dialog,
         importRepository.dialog,
@@ -6729,6 +6908,7 @@ async function renderGroup(path: string, message?: string): Promise<void> {
       : []),
     ...(settingsControl ? [settingsControl.dialog] : []),
     ...(renameControl ? [renameControl.dialog] : []),
+    ...(advancedSettings?.control ? [advancedSettings.control.dialog] : []),
   );
   if (message) {
     showStatus(message);

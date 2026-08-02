@@ -2318,6 +2318,62 @@ textarea:focus {
   margin: 0 0 1.25rem;
 }
 
+.resource-settings-dialog {
+  width: 38rem;
+}
+
+.resource-settings-content {
+  gap: 0;
+}
+
+.resource-settings-content > .resource-settings-action,
+.resource-settings-content > .resource-advanced-settings {
+  padding-top: 1.25rem;
+}
+
+.resource-settings-content > .resource-settings-action + .resource-advanced-settings {
+  border-top: 1px solid var(--border);
+  margin-top: 1.25rem;
+}
+
+.resource-settings-action {
+  display: grid;
+  justify-items: start;
+}
+
+.resource-settings-action h3,
+.resource-settings-action h4 {
+  margin: 0;
+}
+
+.resource-settings-action > p {
+  color: var(--muted);
+  margin: 0.4rem 0 1rem;
+}
+
+.destructive-settings-action {
+  background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+  border-radius: 6px;
+  padding: 1rem;
+}
+
+.destructive-settings-action > .settings-empty {
+  margin-bottom: 0;
+}
+
+.destructive-warning {
+  background: var(--danger-soft);
+  border-left: 3px solid var(--danger);
+  margin: 0;
+  padding: 0.8rem;
+}
+
+.dialog-error {
+  color: var(--danger);
+  margin: 0;
+}
+
 .settings-section-header {
   align-items: center;
   display: flex;
@@ -3622,97 +3678,6 @@ table {
   white-space: pre-wrap;
 }
 
-.settings-panel {
-  border-top: 1px solid var(--border);
-  margin-top: 3rem;
-  padding-top: 1rem;
-}
-
-.settings-panel > summary {
-  align-items: center;
-  color: var(--muted);
-  cursor: pointer;
-  display: flex;
-  font-weight: 700;
-  gap: 0.5rem;
-  list-style: none;
-  min-height: 2.5rem;
-  width: fit-content;
-}
-
-.settings-panel > summary::-webkit-details-marker {
-  display: none;
-}
-
-.settings-panel[open] > summary {
-  color: var(--text);
-}
-
-.settings-content {
-  display: grid;
-  gap: 1.5rem;
-  margin-top: 1rem;
-  max-width: 42rem;
-}
-
-.settings-content section {
-  margin: 0;
-}
-
-.settings-content h3 {
-  margin: 0 0 0.75rem;
-}
-
-.settings-list {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.settings-list > li {
-  align-items: center;
-  display: flex;
-  gap: 1rem;
-  justify-content: space-between;
-  min-height: 3.5rem;
-  padding: 0.6rem 0.75rem;
-}
-
-.settings-list > li + li {
-  border-top: 1px solid var(--border);
-}
-
-.repository-delete-control {
-  flex: 0 0 auto;
-}
-
-.repository-delete-form,
-.group-delete-form {
-  background: var(--danger-soft);
-  border-left: 3px solid var(--danger);
-  display: grid;
-  gap: 0.8rem;
-  padding: 0.8rem;
-}
-
-.repository-delete-actions,
-.group-delete-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.group-delete-section {
-  border-top: 1px solid var(--border);
-  padding-top: 1.25rem;
-}
-
-.group-delete-section p {
-  color: var(--muted);
-}
-
 .load-error {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -3947,15 +3912,6 @@ table {
   }
 
   .file-editor-actions > button {
-    width: 100%;
-  }
-
-  .settings-list > li {
-    align-items: stretch;
-    display: grid;
-  }
-
-  .repository-delete-control button {
     width: 100%;
   }
 
