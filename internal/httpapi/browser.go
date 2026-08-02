@@ -369,6 +369,14 @@ type mergeRepositoryBranchesOutput struct {
 
 func registerRepositoryBrowser(api huma.API, service API) {
 	huma.Register(api, protected(huma.Operation{
+		OperationID: "get-repository-open-counts",
+		Method:      http.MethodGet,
+		Path:        "/api/repositories/{repository}/open-counts",
+		Summary:     "Count open merge requests and issues",
+		Tags:        []string{"Repository browser"},
+	}), service.getRepositoryOpenCounts)
+
+	huma.Register(api, protected(huma.Operation{
 		OperationID: "list-repository-branches",
 		Method:      http.MethodGet,
 		Path:        "/api/repositories/{repository}/branches",

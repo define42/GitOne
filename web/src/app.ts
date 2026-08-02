@@ -309,6 +309,12 @@ interface RepositoryIssues {
   issues: RepositoryIssue[];
 }
 
+interface RepositoryOpenCounts {
+  repository: string;
+  mergeRequests: number;
+  issues: number;
+}
+
 type RepositoryBuildStatus = "manual" | "waiting" | "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 interface RepositoryBuildDependency {
@@ -845,6 +851,10 @@ function repositoryComparisonAPIURL(
 
 function repositoryMergesAPIURL(repository: string): string {
   return `/api/repositories/${encodeURIComponent(repository)}/merges`;
+}
+
+function repositoryOpenCountsAPIURL(repository: string): string {
+  return `/api/repositories/${encodeURIComponent(repository)}/open-counts`;
 }
 
 function repositoryMergeRequestsAPIURL(
@@ -3907,6 +3917,7 @@ function repositoryCommitDiff(data: RepositoryCommitDiff): HTMLElement {
 
 function repositoryNavigation(
   route: RepositoryBrowserRoute,
+  openCounts: RepositoryOpenCounts | null,
   action?: HTMLButtonElement,
 ): HTMLElement {
   const nav = element("nav");
@@ -3930,13 +3941,19 @@ function repositoryNavigation(
     view: "builds",
   });
   const mergeRequests = element("a");
-  mergeRequests.append(icon("git-merge"), document.createTextNode("Merge requests"));
+  const mergeRequestLabel = openCounts === null
+    ? "Merge requests"
+    : `Merge requests (${openCounts.mergeRequests})`;
+  mergeRequests.append(icon("git-merge"), document.createTextNode(mergeRequestLabel));
   mergeRequests.href = repositoryBrowserURL(route.repository, {
     view: "merge-requests",
     mergeRequestState: "open",
   });
   const issues = element("a");
-  issues.append(icon("pencil"), document.createTextNode("Issues"));
+  const issueLabel = openCounts === null
+    ? "Issues"
+    : `Issues (${openCounts.issues})`;
+  issues.append(icon("pencil"), document.createTextNode(issueLabel));
   issues.href = repositoryBrowserURL(route.repository, {
     view: "issues",
     issueState: "open",
@@ -7003,6 +7020,7 @@ async function renderEmptyRepositoryBrowser(
   route: RepositoryBrowserRoute,
   branches: RepositoryBranches,
   group: GroupDetail,
+  openCounts: RepositoryOpenCounts | null,
 ): Promise<void> {
   const repositoryParts = route.repository.split("/");
   const repositoryName = repositoryParts.at(-1) ?? route.repository;
@@ -7075,7 +7093,7 @@ async function renderEmptyRepositoryBrowser(
   app.append(
     repositoryDescription,
     overview,
-    repositoryNavigation(route),
+    repositoryNavigation(route, openCounts),
     branchCreator.dialog,
     branchComparison.dialog,
     branchManager.dialog,
@@ -7092,7 +7110,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
   const repositoryParts = route.repository.split("/");
   const repositoryName = repositoryParts.at(-1) ?? route.repository;
   const groupPath = repositoryParts.slice(0, -1).join("/");
-  const [branches, group] = await Promise.all([
+  const [branches, group, openCounts] = await Promise.all([
     request<RepositoryBranches>(repositoryBranchesAPIURL(route.repository)),
     request<GroupDetail>(apiGroupURL(groupPath)).catch(() => ({
       path: groupPath,
@@ -7102,13 +7120,15 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
       subgroups: [],
       repositories: [{name: repositoryName, description: "", commitCount: 0}],
     })),
+    request<RepositoryOpenCounts>(repositoryOpenCountsAPIURL(route.repository))
+      .catch(() => null),
   ]);
   if (!route.ref) {
     route = {...route, ref: branches.defaultRef};
   }
   setRepositoryLocation(route);
   if (!route.ref) {
-    await renderEmptyRepositoryBrowser(route, branches, group);
+    await renderEmptyRepositoryBrowser(route, branches, group, openCounts);
     return;
   }
 
@@ -7257,7 +7277,7 @@ async function renderRepositoryBrowser(route: RepositoryBrowserRoute): Promise<v
     : null;
   app.append(
     overview,
-    repositoryNavigation(route, fileCreator?.trigger),
+    repositoryNavigation(route, openCounts, fileCreator?.trigger),
     branchCreator.dialog,
     branchComparison.dialog,
     branchManager.dialog,

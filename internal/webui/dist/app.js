@@ -340,6 +340,9 @@ function repositoryComparisonAPIURL(repository, base, head) {
 function repositoryMergesAPIURL(repository) {
     return `/api/repositories/${encodeURIComponent(repository)}/merges`;
 }
+function repositoryOpenCountsAPIURL(repository) {
+    return `/api/repositories/${encodeURIComponent(repository)}/open-counts`;
+}
 function repositoryMergeRequestsAPIURL(repository, mergeRequest) {
     const collection = `/api/repositories/${encodeURIComponent(repository)}/merge-requests`;
     return mergeRequest === undefined
@@ -2883,7 +2886,7 @@ function repositoryCommitDiff(data) {
     content.append(files);
     return content;
 }
-function repositoryNavigation(route, action) {
+function repositoryNavigation(route, openCounts, action) {
     const nav = element("nav");
     nav.className = "repository-navigation";
     nav.setAttribute("aria-label", "Repository");
@@ -2905,13 +2908,19 @@ function repositoryNavigation(route, action) {
         view: "builds",
     });
     const mergeRequests = element("a");
-    mergeRequests.append(icon("git-merge"), document.createTextNode("Merge requests"));
+    const mergeRequestLabel = openCounts === null
+        ? "Merge requests"
+        : `Merge requests (${openCounts.mergeRequests})`;
+    mergeRequests.append(icon("git-merge"), document.createTextNode(mergeRequestLabel));
     mergeRequests.href = repositoryBrowserURL(route.repository, {
         view: "merge-requests",
         mergeRequestState: "open",
     });
     const issues = element("a");
-    issues.append(icon("pencil"), document.createTextNode("Issues"));
+    const issueLabel = openCounts === null
+        ? "Issues"
+        : `Issues (${openCounts.issues})`;
+    issues.append(icon("pencil"), document.createTextNode(issueLabel));
     issues.href = repositoryBrowserURL(route.repository, {
         view: "issues",
         issueState: "open",
@@ -5321,7 +5330,7 @@ async function repositoryReadme(route, content) {
         return null;
     }
 }
-async function renderEmptyRepositoryBrowser(route, branches, group) {
+async function renderEmptyRepositoryBrowser(route, branches, group, openCounts) {
     const repositoryParts = route.repository.split("/");
     const repositoryName = repositoryParts.at(-1) ?? route.repository;
     const groupPath = repositoryParts.slice(0, -1).join("/");
@@ -5378,14 +5387,14 @@ async function renderEmptyRepositoryBrowser(route, branches, group) {
         content.className = "content-section";
         content.append(emptyState("This repository has no browsable default. Push a commit to create its first branch."));
     }
-    app.append(repositoryDescription, overview, repositoryNavigation(route), branchCreator.dialog, branchComparison.dialog, branchManager.dialog, clone.dialog, ...(settingsControl ? [settingsControl.dialog] : []), ...(rename ? [rename.dialog] : []), ...(advancedSettings?.control ? [advancedSettings.control.dialog] : []), content);
+    app.append(repositoryDescription, overview, repositoryNavigation(route, openCounts), branchCreator.dialog, branchComparison.dialog, branchManager.dialog, clone.dialog, ...(settingsControl ? [settingsControl.dialog] : []), ...(rename ? [rename.dialog] : []), ...(advancedSettings?.control ? [advancedSettings.control.dialog] : []), content);
 }
 async function renderRepositoryBrowser(route) {
     stopRepositoryBuildPolling();
     const repositoryParts = route.repository.split("/");
     const repositoryName = repositoryParts.at(-1) ?? route.repository;
     const groupPath = repositoryParts.slice(0, -1).join("/");
-    const [branches, group] = await Promise.all([
+    const [branches, group, openCounts] = await Promise.all([
         request(repositoryBranchesAPIURL(route.repository)),
         request(apiGroupURL(groupPath)).catch(() => ({
             path: groupPath,
@@ -5395,13 +5404,15 @@ async function renderRepositoryBrowser(route) {
             subgroups: [],
             repositories: [{ name: repositoryName, description: "", commitCount: 0 }],
         })),
+        request(repositoryOpenCountsAPIURL(route.repository))
+            .catch(() => null),
     ]);
     if (!route.ref) {
         route = { ...route, ref: branches.defaultRef };
     }
     setRepositoryLocation(route);
     if (!route.ref) {
-        await renderEmptyRepositoryBrowser(route, branches, group);
+        await renderEmptyRepositoryBrowser(route, branches, group, openCounts);
         return;
     }
     const commitParameters = new URLSearchParams({
@@ -5521,7 +5532,7 @@ async function renderRepositoryBrowser(route) {
     const fileCreator = content !== null && "entries" in content && content.canEdit
         ? repositoryFileCreator(route, content)
         : null;
-    app.append(overview, repositoryNavigation(route, fileCreator?.trigger), branchCreator.dialog, branchComparison.dialog, branchManager.dialog, archive.dialog, clone.dialog, ...(settingsControl ? [settingsControl.dialog] : []), ...(rename ? [rename.dialog] : []), ...(advancedSettings?.control ? [advancedSettings.control.dialog] : []), ...(fileCreator ? [fileCreator.dialog] : []));
+    app.append(overview, repositoryNavigation(route, openCounts, fileCreator?.trigger), branchCreator.dialog, branchComparison.dialog, branchManager.dialog, archive.dialog, clone.dialog, ...(settingsControl ? [settingsControl.dialog] : []), ...(rename ? [rename.dialog] : []), ...(advancedSettings?.control ? [advancedSettings.control.dialog] : []), ...(fileCreator ? [fileCreator.dialog] : []));
     if (route.view === "history") {
         app.append(repositoryHistory(route, commits));
         return;
