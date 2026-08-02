@@ -5252,7 +5252,7 @@ async function repositoryReadme(route, content) {
         return null;
     }
 }
-function renderEmptyRepositoryBrowser(route, branches, group) {
+async function renderEmptyRepositoryBrowser(route, branches, group) {
     const repositoryParts = route.repository.split("/");
     const repositoryName = repositoryParts.at(-1) ?? route.repository;
     const groupPath = repositoryParts.slice(0, -1).join("/");
@@ -5302,9 +5302,13 @@ function renderEmptyRepositoryBrowser(route, branches, group) {
     const overview = element("section");
     overview.className = "repository-overview";
     overview.append(toolbar);
-    const content = element("section");
-    content.className = "content-section";
-    content.append(emptyState("This repository has no browsable default. Push a commit to create its first branch."));
+    const content = route.view === "issues"
+        ? await repositoryIssuesView(route, branches.canWrite)
+        : element("section");
+    if (route.view !== "issues") {
+        content.className = "content-section";
+        content.append(emptyState("This repository has no browsable default. Push a commit to create its first branch."));
+    }
     app.append(repositoryDescription, overview, repositoryNavigation(route), branchCreator.dialog, branchComparison.dialog, branchManager.dialog, clone.dialog, ...(settingsControl ? [settingsControl.dialog] : []), ...(rename ? [rename.dialog] : []), ...(advancedSettings?.control ? [advancedSettings.control.dialog] : []), content);
 }
 async function renderRepositoryBrowser(route) {
@@ -5328,7 +5332,7 @@ async function renderRepositoryBrowser(route) {
     }
     setRepositoryLocation(route);
     if (!route.ref) {
-        renderEmptyRepositoryBrowser(route, branches, group);
+        await renderEmptyRepositoryBrowser(route, branches, group);
         return;
     }
     const commitParameters = new URLSearchParams({
