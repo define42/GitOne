@@ -231,8 +231,14 @@ function repositoryBrowserURL(repository, options = {}) {
     if (options.mergeRequest !== undefined) {
         url.searchParams.set("request", String(options.mergeRequest));
     }
+    if (options.issue !== undefined) {
+        url.searchParams.set("issue", String(options.issue));
+    }
     if (options.reviewTab) {
         url.searchParams.set("tab", options.reviewTab);
+    }
+    if (options.issueState) {
+        url.searchParams.set("issueState", options.issueState);
     }
     if (options.mergeRequestState) {
         url.searchParams.set("state", options.mergeRequestState);
@@ -355,6 +361,15 @@ function repositoryMergeRequestApprovalsAPIURL(repository, mergeRequest) {
 function repositoryMergeRequestMergeAPIURL(repository, mergeRequest) {
     return `${repositoryMergeRequestsAPIURL(repository, mergeRequest)}/merge`;
 }
+function repositoryIssuesAPIURL(repository, issue) {
+    const collection = `/api/repositories/${encodeURIComponent(repository)}/issues`;
+    return issue === undefined
+        ? collection
+        : `${collection}/${encodeURIComponent(String(issue))}`;
+}
+function repositoryIssueCommentsAPIURL(repository, issue) {
+    return `${repositoryIssuesAPIURL(repository, issue)}/comments`;
+}
 function repositoryCommitDiffAPIURL(repository, commit) {
     return `/api/repositories/${encodeURIComponent(repository)}/commits/${encodeURIComponent(commit)}/diff`;
 }
@@ -396,8 +411,10 @@ function currentRepository() {
     const file = parameters.get("file");
     const requestedPage = Number.parseInt(parameters.get("page") ?? "1", 10);
     const requestedMergeRequest = Number.parseInt(parameters.get("request") ?? "", 10);
+    const requestedIssue = Number.parseInt(parameters.get("issue") ?? "", 10);
     const requestedReviewTab = parameters.get("tab");
     const requestedMergeRequestState = parameters.get("state");
+    const requestedIssueState = parameters.get("issueState");
     const page = Number.isSafeInteger(requestedPage) && requestedPage > 0
         ? requestedPage
         : 1;
@@ -409,6 +426,7 @@ function currentRepository() {
         view: requestedView === "history" ||
             requestedView === "builds" ||
             requestedView === "merge-requests" ||
+            requestedView === "issues" ||
             (requestedView === "blame" && file !== null)
             ? requestedView
             : "files",
@@ -416,10 +434,16 @@ function currentRepository() {
         mergeRequest: Number.isSafeInteger(requestedMergeRequest) && requestedMergeRequest > 0
             ? requestedMergeRequest
             : undefined,
+        issue: Number.isSafeInteger(requestedIssue) && requestedIssue > 0
+            ? requestedIssue
+            : undefined,
         reviewTab: requestedReviewTab === "changes" ? "changes" : "conversation",
         mergeRequestState: requestedMergeRequestState === "merged" ||
             requestedMergeRequestState === "closed"
             ? requestedMergeRequestState
+            : "open",
+        issueState: requestedIssueState === "closed" || requestedIssueState === "all"
+            ? requestedIssueState
             : "open",
     };
 }
@@ -1331,8 +1355,10 @@ function repositoryRenameControl(route, groupPath, repositoryName) {
                 view: route.view,
                 page: route.page,
                 mergeRequest: route.mergeRequest,
+                issue: route.issue,
                 reviewTab: route.reviewTab,
                 mergeRequestState: route.mergeRequestState,
+                issueState: route.issueState,
             }));
         }
         catch (reason) {
@@ -2881,6 +2907,12 @@ function repositoryNavigation(route, action) {
         view: "merge-requests",
         mergeRequestState: "open",
     });
+    const issues = element("a");
+    issues.append(icon("pencil"), document.createTextNode("Issues"));
+    issues.href = repositoryBrowserURL(route.repository, {
+        view: "issues",
+        issueState: "open",
+    });
     if (route.view === "history") {
         history.setAttribute("aria-current", "page");
     }
@@ -2890,10 +2922,13 @@ function repositoryNavigation(route, action) {
     else if (route.view === "merge-requests") {
         mergeRequests.setAttribute("aria-current", "page");
     }
+    else if (route.view === "issues") {
+        issues.setAttribute("aria-current", "page");
+    }
     else {
         files.setAttribute("aria-current", "page");
     }
-    tabs.append(files, history, builds, mergeRequests);
+    tabs.append(files, history, builds, mergeRequests, issues);
     nav.append(tabs);
     if (action) {
         action.classList.add("repository-navigation-action");
@@ -3361,6 +3396,7 @@ function branchComparisonResult(route, comparison, dialog) {
                     mergeRequest: created.id,
                     reviewTab: "conversation",
                     mergeRequestState: created.state,
+                    issueState: "open",
                 };
                 window.history.pushState(null, "", repositoryBrowserURL(route.repository, {
                     view: "merge-requests",
@@ -4078,6 +4114,349 @@ async function repositoryMergeRequestsView(route, compareTrigger, canWrite) {
     const mergeRequest = await request(repositoryMergeRequestsAPIURL(route.repository, route.mergeRequest));
     return await repositoryMergeRequestDetail(route, mergeRequest);
 }
+function issueStateBadge(state) {
+    const badge = element("span");
+    badge.className = `merge-request-state merge-request-state-${state}`;
+    const label = state[0].toUpperCase() + state.slice(1);
+    badge.append(icon(state === "closed" ? "close" : "clock"), document.createTextNode(label));
+    badge.setAttribute("aria-label", `Issue state: ${label}`);
+    return badge;
+}
+function issueBrowserURL(route, options = {}) {
+    return repositoryBrowserURL(route.repository, {
+        view: "issues",
+        issue: options.issue,
+        issueState: options.state ?? route.issueState,
+    });
+}
+async function showUpdatedIssue(route, updated, message) {
+    const nextRoute = {
+        ...route,
+        issue: updated.id,
+        issueState: updated.state,
+    };
+    window.history.replaceState(null, "", issueBrowserURL(nextRoute, {
+        issue: updated.id,
+        state: updated.state,
+    }));
+    await renderRepositoryBrowser(nextRoute);
+    showStatus(message);
+}
+function issueLabels(labels, empty) {
+    const list = element("span");
+    list.className = "merge-request-list-review";
+    if (labels.length === 0) {
+        list.append(element("span", empty));
+        return list;
+    }
+    for (const label of labels) {
+        list.append(element("span", label));
+    }
+    return list;
+}
+function issueListItem(route, issue) {
+    const item = element("li");
+    const link = element("a");
+    link.className = "merge-request-list-item";
+    link.href = issueBrowserURL(route, {
+        issue: issue.id,
+        state: route.issueState,
+    });
+    const header = element("div");
+    header.className = "merge-request-list-header";
+    const title = element("strong", issue.title);
+    const identity = element("span", `#${issue.id}`);
+    identity.className = "merge-request-number";
+    header.append(title, issueStateBadge(issue.state), identity);
+    const metadata = element("div");
+    metadata.className = "merge-request-list-metadata";
+    const updated = element("span", `${issue.author} updated ${relativeTime(issue.updatedAt)}`);
+    updated.title = new Date(issue.updatedAt).toLocaleString();
+    const created = element("span", `opened ${relativeTime(issue.createdAt)}`);
+    created.title = new Date(issue.createdAt).toLocaleString();
+    metadata.append(updated, created);
+    const summary = issueLabels(issue.labels, "No labels");
+    summary.append(element("span", `${issue.comments.length} ${issue.comments.length === 1 ? "comment" : "comments"}`));
+    link.append(header, metadata, summary);
+    item.append(link);
+    return item;
+}
+function repositoryIssueCreateForm(route, createAction) {
+    const form = element("form");
+    form.className = "merge-request-create";
+    form.hidden = true;
+    const title = element("input");
+    title.name = "title";
+    title.required = true;
+    title.placeholder = "Issue title";
+    const description = element("textarea");
+    description.name = "description";
+    description.rows = 5;
+    description.placeholder = "Describe the issue with Markdown…";
+    const actions = element("div");
+    actions.className = "merge-request-create-actions";
+    const submit = actionButton("Create issue", "pencil", "primary");
+    submit.type = "submit";
+    const cancel = actionButton("Cancel", undefined, "secondary");
+    actions.append(cancel, submit);
+    form.append(fieldLabel("Title", title), fieldLabel("Description", description), actions);
+    createAction.addEventListener("click", () => {
+        createAction.hidden = true;
+        form.hidden = false;
+        title.focus();
+    });
+    cancel.addEventListener("click", () => {
+        form.hidden = true;
+        createAction.hidden = false;
+        createAction.focus();
+    });
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        cancel.disabled = true;
+        form.setAttribute("aria-busy", "true");
+        try {
+            const created = await request(repositoryIssuesAPIURL(route.repository), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    title: title.value.trim(),
+                    description: description.value,
+                }),
+            });
+            const nextRoute = {
+                ...route,
+                issue: created.id,
+                issueState: created.state,
+            };
+            window.history.pushState(null, "", issueBrowserURL(nextRoute, {
+                issue: created.id,
+                state: created.state,
+            }));
+            await renderRepositoryBrowser(nextRoute);
+            showStatus(`Issue #${created.id} created.`);
+        }
+        catch (reason) {
+            showStatus(reason instanceof Error ? reason.message : "Could not create the issue.", true);
+            submit.disabled = false;
+            cancel.disabled = false;
+            form.removeAttribute("aria-busy");
+        }
+    });
+    return form;
+}
+async function repositoryIssueList(route, canWrite) {
+    const data = await request(`${repositoryIssuesAPIURL(route.repository)}?state=all`);
+    const issues = data.issues
+        .filter((issue) => route.issueState === "all" || issue.state === route.issueState)
+        .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
+    document.title = `Issues · ${route.repository} · GitOne`;
+    const section = element("section");
+    section.className = "content-section merge-request-list-view";
+    const actions = [];
+    let creation = null;
+    if (canWrite) {
+        const create = actionButton("New issue", "pencil", "primary");
+        creation = repositoryIssueCreateForm(route, create);
+        actions.push(create);
+    }
+    section.append(sectionHeading("Issues", issues.length, actions));
+    const filters = element("nav");
+    filters.className = "merge-request-filters";
+    filters.setAttribute("aria-label", "Issue state");
+    for (const state of ["open", "closed", "all"]) {
+        const count = state === "all"
+            ? data.issues.length
+            : data.issues.filter((issue) => issue.state === state).length;
+        const label = state[0].toUpperCase() + state.slice(1);
+        const link = element("a", `${label} ${count}`);
+        link.href = issueBrowserURL(route, { state });
+        if (state === route.issueState) {
+            link.setAttribute("aria-current", "page");
+        }
+        filters.append(link);
+    }
+    section.append(filters);
+    if (creation) {
+        section.append(creation);
+    }
+    if (issues.length === 0) {
+        const empty = route.issueState === "all"
+            ? "No issues."
+            : `No ${route.issueState} issues.`;
+        section.append(emptyState(empty));
+        return section;
+    }
+    const list = element("ul");
+    list.className = "merge-request-list";
+    for (const issue of issues) {
+        list.append(issueListItem(route, issue));
+    }
+    section.append(list);
+    return section;
+}
+async function issueDescription(issue) {
+    const card = element("section");
+    card.className = "merge-request-description";
+    const header = element("header");
+    const identity = element("span", issue.author.slice(0, 1).toUpperCase() || "?");
+    identity.className = "commit-avatar";
+    const metadata = element("div");
+    const opened = element("span", `opened ${relativeTime(issue.createdAt)}`);
+    opened.title = new Date(issue.createdAt).toLocaleString();
+    metadata.append(element("strong", issue.author), opened);
+    header.append(identity, metadata);
+    card.append(header);
+    if (issue.description.trim()) {
+        card.append(await markdownPreview(issue.description));
+    }
+    else {
+        const empty = element("p", "No description provided.");
+        empty.className = "merge-request-empty-copy";
+        card.append(empty);
+    }
+    return card;
+}
+async function issueComment(comment) {
+    const card = element("article");
+    card.className = "merge-request-comment";
+    const header = element("header");
+    const identity = element("span", comment.author.slice(0, 1).toUpperCase() || "?");
+    identity.className = "commit-avatar";
+    const metadata = element("div");
+    const created = element("span", relativeTime(comment.createdAt));
+    created.title = new Date(comment.createdAt).toLocaleString();
+    metadata.append(element("strong", comment.author), created);
+    header.append(identity, metadata);
+    card.append(header, await markdownPreview(comment.body));
+    return card;
+}
+function issueCommentForm(route, issue) {
+    const form = element("form");
+    form.className = "merge-request-new-thread";
+    const body = element("textarea");
+    body.name = "body";
+    body.required = true;
+    body.rows = 5;
+    body.placeholder = "Comment with Markdown…";
+    const submit = actionButton("Comment", undefined, "primary");
+    submit.type = "submit";
+    form.append(fieldLabel("New comment", body), submit);
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        form.setAttribute("aria-busy", "true");
+        try {
+            await request(repositoryIssueCommentsAPIURL(route.repository, issue.id), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ body: body.value }),
+            });
+            await renderRepositoryBrowser(route);
+            showStatus("Comment added.");
+        }
+        catch (reason) {
+            showStatus(reason instanceof Error ? reason.message : "Could not add the comment.", true);
+            submit.disabled = false;
+            form.removeAttribute("aria-busy");
+        }
+    });
+    return form;
+}
+async function issueConversation(route, issue) {
+    const conversation = element("div");
+    conversation.className = "merge-request-conversation";
+    conversation.append(await issueDescription(issue));
+    const comments = element("section");
+    comments.className = "merge-request-discussions";
+    comments.append(sectionHeading("Comments", issue.comments.length));
+    if (issue.comments.length === 0) {
+        comments.append(emptyState("No comments yet."));
+    }
+    else {
+        for (const comment of issue.comments) {
+            comments.append(await issueComment(comment));
+        }
+    }
+    if (issue.canComment) {
+        comments.append(issueCommentForm(route, issue));
+    }
+    conversation.append(comments);
+    return conversation;
+}
+function issueDetailPanel(route, issue) {
+    const sidebar = element("aside");
+    sidebar.className = "merge-request-sidebar";
+    const details = element("section");
+    details.className = "merge-request-panel";
+    details.append(element("h3", "Details"));
+    const definition = element("dl");
+    const updated = element("span", relativeTime(issue.updatedAt));
+    updated.title = new Date(issue.updatedAt).toLocaleString();
+    definition.append(element("dt", "Updated"), element("dd"), element("dt", "Labels"), element("dd"), element("dt", "Assignees"), element("dd"));
+    definition.children[1]?.append(updated);
+    definition.children[3]?.append(issueLabels(issue.labels, "None"));
+    definition.children[5]?.append(issueLabels(issue.assignees, "None"));
+    details.append(definition);
+    if (issue.state === "closed" && issue.closedAt) {
+        const closed = element("p", `Closed by ${issue.closedBy ?? "unknown"} ${relativeTime(issue.closedAt)}.`);
+        closed.title = new Date(issue.closedAt).toLocaleString();
+        details.append(closed);
+    }
+    if (issue.canUpdate) {
+        const nextState = issue.state === "closed" ? "open" : "closed";
+        const update = actionButton(nextState === "open" ? "Reopen issue" : "Close issue", nextState === "open" ? "refresh" : "close", nextState === "open" ? "primary" : "danger-secondary");
+        update.addEventListener("click", async () => {
+            update.disabled = true;
+            details.setAttribute("aria-busy", "true");
+            try {
+                const updatedIssue = await request(repositoryIssuesAPIURL(route.repository, issue.id), {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ state: nextState }),
+                });
+                await showUpdatedIssue(route, updatedIssue, nextState === "open"
+                    ? `Issue #${updatedIssue.id} reopened.`
+                    : `Issue #${updatedIssue.id} closed.`);
+            }
+            catch (reason) {
+                showStatus(reason instanceof Error ? reason.message : "Could not update the issue.", true);
+                update.disabled = false;
+                details.removeAttribute("aria-busy");
+            }
+        });
+        details.append(update);
+    }
+    sidebar.append(details);
+    return sidebar;
+}
+async function repositoryIssueDetail(route, issue) {
+    document.title = `#${issue.id} ${issue.title} · ${route.repository} · GitOne`;
+    const section = element("section");
+    section.className = "content-section merge-request-detail";
+    const header = element("header");
+    header.className = "merge-request-detail-header";
+    const heading = element("div");
+    const title = element("h2", issue.title);
+    const identity = element("span", `#${issue.id}`);
+    identity.className = "merge-request-number";
+    heading.append(title, identity, issueStateBadge(issue.state));
+    const opened = element("p", `${issue.author} opened this issue ${relativeTime(issue.createdAt)}`);
+    opened.title = new Date(issue.createdAt).toLocaleString();
+    header.append(heading, opened);
+    const layout = element("div");
+    layout.className = "merge-request-detail-layout";
+    layout.append(await issueConversation(route, issue), issueDetailPanel(route, issue));
+    section.append(header, layout);
+    return section;
+}
+async function repositoryIssuesView(route, canWrite) {
+    if (route.issue === undefined) {
+        return await repositoryIssueList(route, canWrite);
+    }
+    const issue = await request(repositoryIssuesAPIURL(route.repository, route.issue));
+    return await repositoryIssueDetail(route, issue);
+}
 function cloneControl(value) {
     const command = `git clone ${value}`;
     const trigger = actionButton("Clone", "copy", "primary");
@@ -4249,6 +4628,7 @@ function repositoryFileCreator(route, tree) {
                 page: 1,
                 reviewTab: "conversation",
                 mergeRequestState: "open",
+                issueState: "open",
             };
             window.history.pushState(null, "", repositoryBrowserURL(route.repository, {
                 ref: created.branch,
@@ -4345,6 +4725,7 @@ function repositoryFileRenameControl(route, content) {
                 page: 1,
                 reviewTab: "conversation",
                 mergeRequestState: "open",
+                issueState: "open",
             };
             window.history.pushState(null, "", repositoryBrowserURL(route.repository, {
                 ref: renamed.branch,
@@ -4429,6 +4810,7 @@ function repositoryFileDeleteControl(route, content) {
                 page: 1,
                 reviewTab: "conversation",
                 mergeRequestState: "open",
+                issueState: "open",
             };
             window.history.pushState(null, "", repositoryBrowserURL(route.repository, {
                 ref: deleted.branch,
@@ -5023,8 +5405,10 @@ async function renderRepositoryBrowser(route) {
             file: route.file ?? undefined,
             view: route.view,
             mergeRequest: route.mergeRequest,
+            issue: route.issue,
             reviewTab: route.reviewTab,
             mergeRequestState: route.mergeRequestState,
+            issueState: route.issueState,
         });
     });
     branchLabel.append(branchSelect);
@@ -5079,6 +5463,10 @@ async function renderRepositoryBrowser(route) {
     }
     if (route.view === "merge-requests") {
         app.append(await repositoryMergeRequestsView(route, branchComparison.trigger, branches.canWrite));
+        return;
+    }
+    if (route.view === "issues") {
+        app.append(await repositoryIssuesView(route, branches.canWrite));
         return;
     }
     if (route.view === "blame") {

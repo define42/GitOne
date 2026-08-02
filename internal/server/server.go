@@ -11,6 +11,7 @@ import (
 	"github.com/define42/GitOne/internal/githttp"
 	"github.com/define42/GitOne/internal/httpapi"
 	"github.com/define42/GitOne/internal/httpio"
+	"github.com/define42/GitOne/internal/issue"
 	"github.com/define42/GitOne/internal/lfs"
 	"github.com/define42/GitOne/internal/repopath"
 	"github.com/define42/GitOne/internal/review"
@@ -98,6 +99,7 @@ func New(c Config) http.Handler {
 	mux := http.NewServeMux()
 	buildStore := runner.NewStore(c.Root)
 	reviewStore := review.NewStore(c.Root)
+	issueStore := issue.NewStore(c.Root)
 	var scheduler runner.Scheduler
 	if c.Coordinator != nil {
 		buildStore = c.Coordinator.Store()
@@ -109,6 +111,7 @@ func New(c Config) http.Handler {
 		Sessions:            sessions,
 		Builds:              &buildStore,
 		Reviews:             reviewStore,
+		Issues:              issueStore,
 		Scheduler:           scheduler,
 		Coordinator:         c.Coordinator,
 		RunnerToken:         c.RunnerToken,
