@@ -12,6 +12,7 @@ Pure-Go Git and Git LFS server with a Huma administration API and a small TypeSc
 <root>/<root-group>/<subgroup>/<repo>.git
 <root>/<root-group>/<subgroup>/<repo>.lfs/objects/aa/bb/<sha256>
 <root>/<root-group>/<subgroup>/<repo>.reviews/<merge-request-id>.json
+<root>/<root-group>/<subgroup>/<repo>.issues/<issue-id>.json
 ```
 
 Every repository belongs to one top-level root group. Each root group contains
@@ -151,6 +152,8 @@ Open [http://localhost:8080](http://localhost:8080) and sign in with a full-doma
 The main page lists only root groups and their descriptions. Select a group to see its structural subgroups and repositories in one hierarchy. Each subgroup shows its direct item count and can be expanded in place to browse those contents. Group maintainers can create repositories, mirror every Git ref and tag plus every reachable Git LFS object from an HTTP(S) remote, or upload a ZIP/TAR archive containing a bare Git repository. Archive uploads contain Git data only. Root-group control settings are available only on a root group: maintainers can change its name, description, and non-owner group tokens, while only owners can change members and roles, repository visibility, the LFS policy, or owner tokens. Every save creates a commit in the root group's `control.git`; all descendants immediately use the updated settings. Repository pages let maintainers rename the repository, provide a copyable `git clone` command containing the authenticated identity, such as `git clone http://alice%40example.com@localhost:8080/engineering/api.git`, and download the selected branch, tag, or commit as ZIP or tar.gz.
 
 The repository viewer follows each repository's symbolic `HEAD`, can browse files with server-side Chroma syntax highlighting, show line-by-line blame attribution, page through the complete selected branch history, expand any commit to inspect its file statistics and unified diff, create a branch from any existing branch, and compare two branches. Its branch manager lists every branch with ahead/behind counts relative to the default reference and lets developers delete non-default branches after confirmation. Maintainers can select an existing branch as the repository default. Its Builds tab shows manual, queued, running, successful, failed, and canceled jobs, polls active jobs automatically, and exposes expandable live logs. Developers can start manual jobs, cancel queued or running jobs, and rerun terminal jobs at the original commit. Users with developer access can create, edit, rename, and delete UTF-8 files up to 1 MiB directly on a named branch and review edited contents as a unified diff; each operation creates one commit and rejects the update if the branch changed after the editor was opened. GitOne fast-forwards linear histories and creates a two-parent merge commit for clean divergent histories; conflicting branches are never moved. Maintainers can delete a repository from that repository's Settings > Advanced after entering the exact repository name. A group can be deleted from its own Settings > Advanced only after all repositories and subgroups have been removed and the exact full group path is entered.
+
+The Issues tab tracks repository work items that are independent of Git history. Issues are numbered per repository as `#<id>`, separately from merge request `!<id>` numbers, and carry a Markdown description, labels, assignees, and a comment discussion. Readers can browse and comment, developers can open issues and maintain their own, and maintainers can edit or close any issue.
 
 Comparisons can be saved as merge requests with durable Markdown descriptions and threaded, resolvable discussions. Approvals are bound to the exact source commit, so a new push requires a new approval. Authors cannot approve their own changes unless they are a group maintainer or owner. An approval merges automatically when the request is conflict-free and all discussions are resolved; an explicit retry action is available after clearing a previous blocker.
 
@@ -505,6 +508,11 @@ The `{repository}`, `{ref}`, and in-repository `{path}` parameters are URL-encod
 | `PATCH` | `/api/repositories/{repository}/merge-requests/{id}/threads/{threadId}` | Resolve or reopen a discussion thread. |
 | `POST` | `/api/repositories/{repository}/merge-requests/{id}/approvals` | Approve an exact source commit and merge automatically when ready. |
 | `POST` | `/api/repositories/{repository}/merge-requests/{id}/merge` | Retry an approved merge after clearing a conflict or unresolved discussion. |
+| `GET` | `/api/repositories/{repository}/issues` | List persisted issues, filtered with `state=open`, `closed`, or `all`. |
+| `POST` | `/api/repositories/{repository}/issues` | Create an issue. JSON fields: `title`, optional `description`, `labels`, and `assignees`. |
+| `GET` | `/api/repositories/{repository}/issues/{id}` | Get an issue with its labels, assignees, and comments. |
+| `PATCH` | `/api/repositories/{repository}/issues/{id}` | Edit an issue or close and reopen it. Every JSON field is optional: `title`, `description`, `state`, `labels`, and `assignees`. |
+| `POST` | `/api/repositories/{repository}/issues/{id}/comments` | Comment on an issue. |
 | `GET` | `/api/repositories/{repository}/tree/{ref}` | List the repository root at a branch, tag, hash, or `HEAD`. |
 | `GET` | `/api/repositories/{repository}/tree/{ref}/{path}` | List a directory at a Git reference. |
 | `GET` | `/api/repositories/{repository}/blob/{ref}/{path}` | Read a file as UTF-8 or base64. |
@@ -604,6 +612,18 @@ curl -u 'alice@example.com:directory-password' \
   http://localhost:8080/api/groups/engineering%2Fbackend
 ```
 
+Open an issue and list the open issues of a repository:
+
+```bash
+curl -u 'alice@example.com:directory-password' -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Login fails","description":"Steps to reproduce…","labels":["bug"]}' \
+  http://localhost:8080/api/repositories/engineering%2Fapi/issues
+
+curl -u 'alice@example.com:directory-password' \
+  'http://localhost:8080/api/repositories/engineering%2Fapi/issues?state=open'
+```
+
 ## control.json
 
 ```json
@@ -643,13 +663,15 @@ Roles are cumulative: `owner` includes `maintainer`, `maintainer` includes `deve
 | Capability | `read` | `developer` | `maintainer` | `owner` |
 |---|:---:|:---:|:---:|:---:|
 | Browse repositories; clone and fetch | ✓ | ✓ | ✓ | ✓ |
-| Read commits, diffs, builds, and merge requests | ✓ | ✓ | ✓ | ✓ |
-| Create review threads and comments | ✓ | ✓ | ✓ | ✓ |
+| Read commits, diffs, builds, merge requests, and issues | ✓ | ✓ | ✓ | ✓ |
+| Create review threads and comments; comment on issues | ✓ | ✓ | ✓ | ✓ |
 | Resolve a thread as its author or the merge-request author | ✓ | ✓ | ✓ | ✓ |
 | Push Git changes and upload LFS objects | — | ✓ | ✓ | ✓ |
 | Edit files and create or delete non-default branches through the web API | — | ✓ | ✓ | ✓ |
 | Start, rerun, and cancel repository builds | — | ✓ | ✓ | ✓ |
 | Create or update merge requests; approve others; merge approved requests | — | ✓ | ✓ | ✓ |
+| Create issues; edit, label, assign, close, and reopen one's own issues | — | ✓ | ✓ | ✓ |
+| Edit, label, assign, close, and reopen any issue | — | — | ✓ | ✓ |
 | Resolve any review thread | — | ✓ | ✓ | ✓ |
 | Create subgroups and repositories; import repository archives or mirrors | — | — | ✓ | ✓ |
 | Rename repositories or groups; delete repositories or empty groups | — | — | ✓ | ✓ |
