@@ -12,9 +12,9 @@ require (
 	github.com/gorilla/securecookie v1.1.2
 	github.com/sergi/go-diff v1.4.0
 	github.com/testcontainers/testcontainers-go v0.43.0
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.40.0
+	golang.org/x/text v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
