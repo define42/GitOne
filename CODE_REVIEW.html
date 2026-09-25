@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>GitOne Code Review — Security &amp; Reliability Audit</title>
+</head>
+<body>
+<title>GitOne Code Review — Security &amp; Reliability Audit</title>
+<style>
+  :root {
+    --bg: #F4F6F8;
+    --surface: #FFFFFF;
+    --surface-2: #EDF0F3;
+    --ink: #161A20;
+    --ink-soft: #495060;
+    --ink-faint: #78808E;
+    --line: #E0E4EA;
+    --line-strong: #CFD5DE;
+    --accent: #0E7C74;
+    --accent-ink: #0B5F59;
+    --accent-soft: #DCEEEB;
+
+    --sev-high: #CE3742;
+    --sev-high-bg: #FBE7E8;
+    --sev-med: #B4770F;
+    --sev-med-bg: #F8EEDC;
+    --sev-low: #3C63B8;
+    --sev-low-bg: #E5EBF7;
+    --sev-info: #616A7C;
+    --sev-info-bg: #EBEDF1;
+
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", "JetBrains Mono", "Menlo", "Cascadia Mono", "Consolas", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+    --maxw: 1180px;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgba(20,26,36,.05), 0 8px 24px -14px rgba(20,26,36,.22);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0D1015;
+      --surface: #151A21;
+      --surface-2: #1C222B;
+      --ink: #E7EBF1;
+      --ink-soft: #A7AFBE;
+      --ink-faint: #6D7686;
+      --line: #262D38;
+      --line-strong: #333B47;
+      --accent: #37B6A8;
+      --accent-ink: #6FD8CC;
+      --accent-soft: #123330;
+
+      --sev-high: #FF6B72;
+      --sev-high-bg: #2E1518;
+      --sev-med: #F0B24A;
+      --sev-med-bg: #2C2211;
+      --sev-low: #7AA1FF;
+      --sev-low-bg: #16203A;
+      --sev-info: #8A93A6;
+      --sev-info-bg: #1B2029;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 30px -16px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #F4F6F8; --surface: #FFFFFF; --surface-2: #EDF0F3;
+    --ink: #161A20; --ink-soft: #495060; --ink-faint: #78808E;
+    --line: #E0E4EA; --line-strong: #CFD5DE;
+    --accent: #0E7C74; --accent-ink: #0B5F59; --accent-soft: #DCEEEB;
+    --sev-high: #CE3742; --sev-high-bg: #FBE7E8;
+    --sev-med: #B4770F; --sev-med-bg: #F8EEDC;
+    --sev-low: #3C63B8; --sev-low-bg: #E5EBF7;
+    --sev-info: #616A7C; --sev-info-bg: #EBEDF1;
+    --shadow: 0 1px 2px rgba(20,26,36,.05), 0 8px 24px -14px rgba(20,26,36,.22);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0D1015; --surface: #151A21; --surface-2: #1C222B;
+    --ink: #E7EBF1; --ink-soft: #A7AFBE; --ink-faint: #6D7686;
+    --line: #262D38; --line-strong: #333B47;
+    --accent: #37B6A8; --accent-ink: #6FD8CC; --accent-soft: #123330;
+    --sev-high: #FF6B72; --sev-high-bg: #2E1518;
+    --sev-med: #F0B24A; --sev-med-bg: #2C2211;
+    --sev-low: #7AA1FF; --sev-low-bg: #16203A;
+    --sev-info: #8A93A6; --sev-info-bg: #1B2029;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 30px -16px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+  a { color: var(--accent-ink); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: var(--mono); font-variant-ligatures: none; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+
+  /* ---- Masthead ---- */
+  header.masthead {
+    border-bottom: 1px solid var(--line);
+    background:
+      radial-gradient(120% 140% at 88% -20%, var(--accent-soft) 0%, transparent 55%),
+      var(--surface);
+  }
+  .masthead-inner { padding: 46px 0 34px; }
+  h1.title {
+    font-size: clamp(30px, 5vw, 46px);
+    line-height: 1.05;
+    letter-spacing: -.02em;
+    margin: 12px 0 10px;
+    font-weight: 700;
+    text-wrap: balance;
+  }
+  h1.title .gt { color: var(--accent-ink); }
+  .lede {
+    max-width: 68ch;
+    color: var(--ink-soft);
+    font-size: 17px;
+    margin: 0 0 22px;
+  }
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 8px 20px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-faint);
+    border-top: 1px dashed var(--line-strong);
+    padding-top: 16px;
+  }
+  .meta-row b { color: var(--ink-soft); font-weight: 600; }
+
+  /* ---- Stat tiles ---- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    margin: 26px 0 4px;
+  }
+  @media (max-width: 720px){ .stats { grid-template-columns: repeat(2,1fr); } }
+  .tile {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px 16px 14px;
+    position: relative;
+    overflow: hidden;
+  }
+  .tile::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    background: var(--tc, var(--accent));
+  }
+  .tile .n {
+    font-family: var(--mono); font-size: 30px; font-weight: 600;
+    line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums;
+  }
+  .tile .k {
+    display:block; margin-top: 8px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+  .tile.high { --tc: var(--sev-high); }
+  .tile.med  { --tc: var(--sev-med); }
+  .tile.low  { --tc: var(--sev-low); }
+  .tile.info { --tc: var(--sev-info); }
+  .tile.ver  { --tc: var(--accent); }
+
+  /* ---- Distribution bar ---- */
+  .dist {
+    display: flex; height: 12px; border-radius: 999px; overflow: hidden;
+    margin: 20px 0 6px; border: 1px solid var(--line);
+  }
+  .dist span { display:block; height: 100%; }
+  .dist .s-high { background: var(--sev-high); }
+  .dist .s-med  { background: var(--sev-med); }
+  .dist .s-low  { background: var(--sev-low); }
+  .dist .s-info { background: var(--sev-info); }
+  .dist-legend {
+    display:flex; flex-wrap: wrap; gap: 6px 18px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink-faint);
+    margin-bottom: 4px;
+  }
+  .dist-legend i { width: 9px; height: 9px; border-radius: 2px; display:inline-block; margin-right: 6px; vertical-align: middle; }
+
+  /* ---- Sticky nav ---- */
+  nav.jump {
+    position: sticky; top: 0; z-index: 20;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .jump-inner { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 0; }
+  .jump a {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .04em;
+    color: var(--ink-soft); padding: 5px 11px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--surface);
+    text-decoration: none; white-space: nowrap;
+  }
+  .jump a:hover { border-color: var(--accent); color: var(--accent-ink); text-decoration: none; }
+
+  /* ---- Sections ---- */
+  section { padding: 40px 0; border-bottom: 1px solid var(--line); }
+  section:last-of-type { border-bottom: 0; }
+  h2.sec {
+    font-size: 13px; font-family: var(--mono); letter-spacing: .14em;
+    text-transform: uppercase; color: var(--ink-faint); font-weight: 600;
+    margin: 0 0 6px;
+  }
+  h2.sec .idx { color: var(--accent-ink); }
+  .sec-title {
+    font-size: clamp(22px, 3vw, 28px); letter-spacing: -.015em;
+    margin: 0 0 20px; font-weight: 700; text-wrap: balance;
+  }
+  .prose p { max-width: 72ch; color: var(--ink-soft); }
+  .prose p strong { color: var(--ink); }
+
+  /* strengths */
+  .bullets { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+  .bullets li {
+    position: relative; padding-left: 26px; color: var(--ink-soft); max-width: 82ch;
+  }
+  .bullets li::before {
+    content: "✓"; position: absolute; left: 0; top: 0;
+    color: var(--accent-ink); font-weight: 700; font-family: var(--mono);
+  }
+  .bullets li b { color: var(--ink); font-weight: 600; }
+
+  /* ---- Finding cards ---- */
+  .sev-head {
+    display:flex; align-items: baseline; gap: 12px;
+    margin: 30px 0 14px; padding-top: 6px;
+  }
+  .sev-head:first-of-type { margin-top: 6px; }
+  .sev-head h3 {
+    margin: 0; font-size: 15px; font-family: var(--mono);
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  .sev-head .count {
+    font-family: var(--mono); font-size: 12px; color: var(--ink-faint);
+    border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px;
+  }
+  .sev-head.high h3 { color: var(--sev-high); }
+  .sev-head.med h3  { color: var(--sev-med); }
+  .sev-head.low h3  { color: var(--sev-low); }
+  .sev-head.info h3 { color: var(--sev-info); }
+
+  .cards { display: grid; gap: 14px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--cc, var(--sev-info));
+    border-radius: var(--radius);
+    padding: 18px 20px 18px;
+    box-shadow: var(--shadow);
+    transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+  }
+  .card:hover { transform: translateY(-2px); }
+  .card.high { --cc: var(--sev-high); }
+  .card.med  { --cc: var(--sev-med); }
+  .card.low  { --cc: var(--sev-low); }
+  .card.info { --cc: var(--sev-info); }
+
+  .card-top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .fid {
+    font-family: var(--mono); font-weight: 700; font-size: 13px;
+    color: #fff; background: var(--cc); border-radius: 6px; padding: 2px 8px;
+    letter-spacing: .02em;
+  }
+  .card.med .fid, .card.info .fid { color: #12151b; }
+  @media (prefers-color-scheme: dark){ .card.low .fid { color:#0d1015; } }
+  :root[data-theme="dark"] .card.low .fid { color:#0d1015; }
+  :root[data-theme="light"] .card.low .fid { color:#fff; }
+
+  .card-title { font-weight: 650; font-size: 16.5px; letter-spacing: -.01em; margin-right: auto; }
+  .chip {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .05em;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line-strong);
+    color: var(--ink-soft); white-space: nowrap;
+  }
+  .chip.verd-confirmed { color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: var(--accent-soft); }
+  .chip.verd-plausible { color: var(--sev-med); border-color: color-mix(in srgb, var(--sev-med) 40%, var(--line)); background: var(--sev-med-bg); }
+  .loc {
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-faint);
+    margin: 2px 0 10px; word-break: break-word;
+  }
+  .loc b { color: var(--ink-soft); font-weight: 600; }
+  .card p { margin: 0 0 10px; color: var(--ink-soft); font-size: 14.5px; max-width: 92ch; }
+  .card p:last-child { margin-bottom: 0; }
+  .fix {
+    background: var(--surface-2); border-radius: 8px; padding: 10px 12px;
+    font-size: 14px; color: var(--ink-soft);
+  }
+  .fix b { color: var(--ink); font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; display: inline-block; margin-right: 6px; }
+
+  /* themes list */
+  .themes { display: grid; gap: 14px; }
+  .theme-item {
+    display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: start;
+    max-width: 92ch;
+  }
+  .theme-item .mk {
+    font-family: var(--mono); font-size: 12px; font-weight: 700;
+    color: var(--accent-ink); border: 1px solid var(--line-strong);
+    border-radius: 6px; padding: 3px 8px; white-space: nowrap; margin-top: 2px;
+  }
+  .theme-item p { margin: 0; color: var(--ink-soft); }
+  .theme-item b { color: var(--ink); }
+
+  /* value groups */
+  .val-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 900px){ .val-grid { grid-template-columns: 1fr; } }
+  .val-col {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 4px 18px 18px;
+  }
+  .val-col > h4 {
+    font-size: 13px; font-family: var(--mono); letter-spacing: .08em;
+    text-transform: uppercase; color: var(--ink); margin: 18px 0 4px;
+    display:flex; align-items:center; gap: 8px;
+  }
+  .val-col > h4 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  .val-col.win > h4 .dot { background: var(--sev-low); }
+  .val-col.impact > h4 .dot { background: var(--sev-med); }
+  .val-col.strat > h4 .dot { background: var(--accent); }
+  .val-col > .sub { font-size: 12px; color: var(--ink-faint); margin: 0 0 6px; }
+  .val { padding: 13px 0; border-top: 1px solid var(--line); }
+  .val:first-of-type { border-top: 0; }
+  .val .vh { display:flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .val .vname { font-weight: 600; font-size: 14.5px; }
+  .val .tags { display:flex; gap: 5px; margin-left: auto; }
+  .tag {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .04em;
+    padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line-strong);
+    color: var(--ink-faint);
+  }
+  .tag.v-high { color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .tag.v-transformational { color: #fff; background: var(--accent); border-color: var(--accent); }
+  :root[data-theme="dark"] .tag.v-transformational,
+  @media (prefers-color-scheme: dark){ .tag.v-transformational { color:#0d1015; } }
+  .val p { margin: 6px 0 0; font-size: 13.5px; color: var(--ink-soft); }
+  .val p .closes { color: var(--accent-ink); font-family: var(--mono); font-size: 12px; }
+
+  /* roadmap */
+  .road { display: grid; gap: 16px; counter-reset: phase; }
+  .phase {
+    display: grid; grid-template-columns: auto 1fr; gap: 18px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 20px 22px;
+  }
+  .phase .num {
+    counter-increment: phase;
+    font-family: var(--mono); font-weight: 700; font-size: 22px;
+    color: var(--accent-ink); line-height: 1;
+    width: 46px; height: 46px; border-radius: 50%;
+    display: grid; place-items: center;
+    border: 1.5px solid var(--accent); background: var(--accent-soft);
+  }
+  .phase .num::before { content: counter(phase); }
+  .phase h4 { margin: 4px 0 4px; font-size: 17px; letter-spacing: -.01em; }
+  .phase .when { font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-faint); }
+  .phase ol { margin: 10px 0 0; padding-left: 20px; color: var(--ink-soft); }
+  .phase ol li { margin: 5px 0; font-size: 14px; }
+  .phase ol li b { color: var(--ink); }
+
+  footer {
+    padding: 30px 0 60px; color: var(--ink-faint); font-size: 13px;
+    font-family: var(--mono);
+  }
+  footer .wrap { display:flex; flex-wrap: wrap; gap: 6px 18px; justify-content: space-between; }
+
+  @media (prefers-reduced-motion: reduce){ * { transition: none !important; } }
+</style>
+
+<header class="masthead">
+  <div class="wrap masthead-inner">
+    <div class="eyebrow">Security &amp; Reliability Audit · Pure-Go Git Forge</div>
+    <h1 class="title"><span class="gt">GitOne</span> Code Review</h1>
+    <p class="lede">A coherent, well-factored self-hosted Git server with genuinely careful work in its
+    core authorization path — held back from production by a pervasive absence of resource limits and
+    request timeouts. No critical defects, but every high-severity issue traces to one structural fact:
+    a single process with almost no backpressure.</p>
+
+    <div class="stats">
+      <div class="tile high"><span class="n">5</span><span class="k">High</span></div>
+      <div class="tile med"><span class="n">10</span><span class="k">Medium</span></div>
+      <div class="tile low"><span class="n">14</span><span class="k">Low</span></div>
+      <div class="tile info"><span class="n">1</span><span class="k">Info</span></div>
+      <div class="tile ver"><span class="n">30</span><span class="k">Verified · 0 refuted</span></div>
+    </div>
+
+    <div class="dist-legend" style="margin-top:20px">
+      <span><i style="background:var(--sev-high)"></i>High</span>
+      <span><i style="background:var(--sev-med)"></i>Medium</span>
+      <span><i style="background:var(--sev-low)"></i>Low</span>
+      <span><i style="background:var(--sev-info)"></i>Info</span>
+    </div>
+    <div class="dist" role="img" aria-label="Severity distribution: 5 high, 10 medium, 14 low, 1 info">
+      <span class="s-high" style="width:16.7%"></span>
+      <span class="s-med" style="width:33.3%"></span>
+      <span class="s-low" style="width:46.7%"></span>
+      <span class="s-info" style="width:3.3%"></span>
+    </div>
+
+    <div class="meta-row">
+      <span><b>Scope</b> ~16k LOC Go · 5.7k LOC TS UI · 16 packages</span>
+      <span><b>Method</b> 6 subsystem finders → adversarial re-verification → synthesis</span>
+      <span><b>Build/vet/fmt</b> clean</span>
+    </div>
+  </div>
+</header>
+
+<nav class="jump">
+  <div class="wrap jump-inner">
+    <a href="#summary">Summary</a>
+    <a href="#strengths">Strengths</a>
+    <a href="#high">5 High</a>
+    <a href="#medium">10 Medium</a>
+    <a href="#low">14 Low</a>
+    <a href="#themes">Themes</a>
+    <a href="#value">Extra value</a>
+    <a href="#roadmap">Roadmap</a>
+  </div>
+</nav>
+
+<main class="wrap">
+
+  <section id="summary" class="prose">
+    <h2 class="sec"><span class="idx">01</span> — Executive summary</h2>
+    <div class="sec-title">One structural weakness, seen from many angles</div>
+    <p>The five High-severity issues cluster around a single fact: GitOne is a single-process server with
+    almost no backpressure, so any one unbounded operation — an unthrottled Argon2id/LDAP flood, a giant diff
+    buffered in memory, a slowloris trickle, an exclusive lock held during a full-tree scan, or an
+    unsandboxed build container — can degrade or take down <strong>every repository on the storage root</strong>.</p>
+    <p>The standout strengths are the disciplined per-request re-authorization model, deliberate Argon2id with
+    fail-closed identity handling, and an SSRF allowlist on imports. That competence is exactly why the gaps read
+    as <strong>unfinished hardening rather than design blindness</strong> — and why most of the fixes are
+    additive and low-risk.</p>
+  </section>
+
+  <section id="strengths">
+    <h2 class="sec"><span class="idx">02</span> — What's already right</h2>
+    <div class="sec-title">Strengths to preserve</div>
+    <ul class="bullets">
+      <li><b>Per-request authorization.</b> Roles are re-evaluated against <code>control.json</code> on every request (<code>auth.go:118</code>), so revocation takes effect immediately even though sessions are stateless.</li>
+      <li><b>Strong password handling by design.</b> Argon2id at m=19 MiB, t=2 (<code>auth.go:19</code>), fail-closed identity canonicalization, and proper <code>ldap.EscapeFilter</code> in the live path (<code>ldap.go:242</code>).</li>
+      <li><b>Rigorous merge gate.</b> Distinct-author approval, resolved-thread checks, and exact-commit mergeability are all enforced at the merge choke point (<code>reviews.go:901</code>).</li>
+      <li><b>SSRF-aware imports.</b> Loopback/private/link-local/metadata ranges are blocked with DNS-pinned dialing and per-redirect revalidation.</li>
+      <li><b>Data-format discipline.</b> <code>control.json</code> is versioned v1→v4 with strict rejection of unknown versions; review records use <code>DisallowUnknownFields</code>.</li>
+      <li><b>The runner already shuts down gracefully</b> via <code>signal.NotifyContext</code> — the exact pattern the web server is missing.</li>
+      <li><b>Streaming Git/LFS paths are protected</b> by sliding read/write deadlines (<code>httpio.Protect</code>); the gap is only that this wasn't extended to the JSON API and UI.</li>
+    </ul>
+  </section>
+
+  <section id="findings">
+    <h2 class="sec"><span class="idx">03</span> — Findings</h2>
+    <div class="sec-title">30 verified findings, most severe first</div>
+
+    <div id="high" class="sev-head high"><h3>High severity</h3><span class="count">5 findings</span></div>
+    <div class="cards">
+
+      <article class="card high">
+        <div class="card-top"><span class="fid">H1</span><span class="card-title">Unthrottled auth → Argon2id/LDAP exhaustion &amp; brute force</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/httpapi/session.go:76</b> · also api.go:1095, server.go:44 · resource-exhaustion</div>
+        <p>No login, Basic-auth, or git/LFS path is rate-limited or locked out. Every unauthenticated request drives an LDAP bind, and guessing a group plus a human-readable token key (<code>ci</code>, <code>deploy</code>) forces a full ~19 MiB Argon2id per request. ~100–200 concurrent requests consume 2–4 GB and saturate cores; failed-login spraying exhausts LDAP and can lock out real users.</p>
+        <div class="fix"><b>Fix</b> Per-IP/per-user rate limiting with backoff before any bind/Argon2id call; a global semaphore bounding concurrent Argon2id; 429 on excess.</div>
+      </article>
+
+      <article class="card high">
+        <div class="card-top"><span class="fid">H2</span><span class="card-title">Commit-diff &amp; branch-compare are unbounded and fully buffered</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/httpapi/merge.go:547</b> · resource-exhaustion · reachable at RoleRead / anonymous on public repos</div>
+        <p>Each patch is clamped to 1 MiB but there is no file-count cap, and the whole structure plus its JSON is assembled before the first byte. A repo whose root commit adds ~30,000 large text files makes any reader's diff request allocate several GiB and OOM the shared process — killing every repo. A legitimate monorepo triggers the same crash by accident.</p>
+        <div class="fix"><b>Fix</b> Cap file count and aggregate patch bytes with a <code>truncated</code> flag, and/or stream the diff.</div>
+      </article>
+
+      <article class="card high">
+        <div class="card-top"><span class="fid">H3</span><span class="card-title">Runner claim holds a process-global exclusive lock during an O(all repos × all jobs) scan</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/runner/coordinator.go:131</b> · resource-exhaustion · jobs are never pruned</div>
+        <p><code>Claim</code> takes the process-wide catalog lock <em>Exclusive</em> and, while holding it, walks the whole storage tree and unmarshals every historical job file. All git/LFS traffic takes that lock <em>Shared</em>, so it blocks for the full scan — re-run by every idle remote runner every 2 s. With no pruning, the window grows without bound: a self-inflicted DoS that worsens over time.</p>
+        <div class="fix"><b>Fix</b> Maintain a claimable-job index guarded only by the queue lock (O(pending)); add retention/pruning; return fast on idle polls; at minimum scan under a Shared lock.</div>
+      </article>
+
+      <article class="card high">
+        <div class="card-top"><span class="fid">H4</span><span class="card-title">Build containers run with no network isolation or resource limits</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/runner/executor.go:63</b> · security · script/image come from repo <code>.gitone.yaml</code></div>
+        <p>The docker argv sets no <code>--network</code>, <code>--memory</code>, <code>--pids-limit</code>, <code>--cpus</code>, <code>--cap-drop</code>, or <code>--user</code>. Any Developer who can push a matching branch controls the executed code — e.g. curl <code>169.254.169.254</code> to exfiltrate cloud IAM credentials, bypassing the very SSRF allowlist the import path enforces, or run a fork bomb.</p>
+        <div class="fix"><b>Fix</b> Default <code>--network none</code> (opt-in, admin-gated egress); always apply memory/pids/cpu limits, <code>--cap-drop=ALL</code>, <code>no-new-privileges</code>, non-root <code>--user</code> — non-overridable by repo config.</div>
+      </article>
+
+      <article class="card high">
+        <div class="card-top"><span class="fid">H5</span><span class="card-title">JSON API &amp; UI have no active-request I/O deadline (unauthenticated slowloris)</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>cmd/gitone/main.go:99</b> · resource-exhaustion · same defect class already fixed for Git</div>
+        <p>Only <code>ReadHeaderTimeout</code>/<code>IdleTimeout</code> are set; the Huma API, SPA, and raw runner-source tarball get no per-request deadline and no <code>TimeoutHandler</code>. Trickle a JSON body to unauthenticated <code>POST /api/session</code> one byte every few minutes and each goroutine/FD is pinned indefinitely; slow readers pin response writes the same way.</p>
+        <div class="fix"><b>Fix</b> Wrap non-Git handlers with <code>httpio.Protect</code> or a global <code>http.TimeoutHandler</code> plus modest <code>ReadTimeout</code>/<code>WriteTimeout</code>; add <code>MaxBytesReader</code> to JSON bodies.</div>
+      </article>
+    </div>
+
+    <div id="medium" class="sev-head med"><h3>Medium severity</h3><span class="count">10 findings</span></div>
+    <div class="cards">
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M1</span><span class="card-title">Maintainer can flip the group <code>Inherit</code> flag</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/httpapi/api.go:630</b> · security · privilege escalation</div>
+        <p>The owner-only guard compares Members, Visibility, and LFS — but not <code>Inherit</code>, which is copied verbatim from input. A maintainer submits unchanged members with <code>Inherit=true</code>; the guard passes and parent members gain access to a previously isolated subgroup — a scope change the code reserves for owners.</p>
+        <div class="fix"><b>Fix</b> Include <code>Inherit</code> in the owner-only guard (require RoleOwner to change it).</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M2</span><span class="card-title">Default LFS policy is unlimited, removing the concurrent-upload staging bound</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/lfs/lfs.go:369</b> · resource-exhaustion</div>
+        <p>The staging reservation only engages when <code>MaximumStorageBytes &gt; 0</code>, but new groups default to 0. A Developer opens N concurrent PUTs each streaming up to 100 GiB into <code>.gitone/uploads</code>; the sha256 check runs only after the full body is written, so no valid OID is needed to fill the volume.</p>
+        <div class="fix"><b>Fix</b> Always take a staging reservation (treat unset quota as a finite default); cap concurrent PUTs; reject on low disk.</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M3</span><span class="card-title">Receive-pack writes objects before validation; no GC ever reclaims orphans</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/githttp/handler.go:273</b> · resource-exhaustion</div>
+        <p>Objects are persisted before LFS-pointer/control validation and before refs are applied; on failure they remain, unreferenced. There is no GC/prune/repack anywhere. Repeatedly pushing packs that intentionally fail validation lands up to 100 GiB on disk that is never reclaimed and invisible in the ref namespace. Force-pushes leak similarly.</p>
+        <div class="fix"><b>Fix</b> Use git's quarantine model (stage to an alternate object dir, migrate only after validation passes); add bounded GC/prune and a per-repo git quota; lower the 100 GiB ceiling.</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M4</span><span class="card-title"><code>listRepositoryCommits</code> walks the entire history on every page request</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/httpapi/browser.go:932</b> · resource-exhaustion</div>
+        <p>The <code>ForEach</code> callback counts an exact total for every reachable commit, never terminates early, and ignores <code>ctx</code>. On a 10⁵–10⁶-commit repo, even <code>perPage=1</code> forces an O(total-history) read that continues after the client disconnects; any reader can repeat it to saturate CPU/disk.</p>
+        <div class="fix"><b>Fix</b> Read <code>perPage+1</code> for <code>HasNext</code> instead of an exact total (or bound the walk); honor <code>ctx</code> in the loop.</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M5</span><span class="card-title">Branch compare loads both branches' full reachable-commit set into memory</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/httpapi/merge.go:470</b> · resource-exhaustion</div>
+        <p><code>reachableCommits</code> builds an in-memory hash set of every commit reachable from each tip, for base and head, with no cancellation, before the also-unbounded <code>compareTrees</code>. A reader hammering <code>/compare</code> on a large-history repo forces two full-graph traversals per request.</p>
+        <div class="fix"><b>Fix</b> Cap the ahead/behind computation (report <code>&gt;=N</code>), use a limited revlist walk, respect <code>ctx</code>.</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M6</span><span class="card-title">MR approval gate is advisory — any developer can write the target branch directly</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/httpapi/merge.go:100</b> · security · no branch-protection concept exists</div>
+        <p>Approval/thread gating lives only inside the MR merge path. The same branch can be moved via the direct-merge endpoint (RoleDeveloper) or plain <code>git push</code> (RoleDeveloper), neither of which checks approvals. A developer can land their own change on <code>main</code> and bypass review entirely — separation of duties is unenforceable.</p>
+        <div class="fix"><b>Fix</b> Add protected-branch config enforced in both the direct-merge endpoint and the receive-pack authorizer; if MRs are meant to be advisory, document it.</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M7</span><span class="card-title">Remote import has no overall size or time bound</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/storage/storage.go:322</b> · resource-exhaustion · RoleMaintainer</div>
+        <p>Mirror clone has no size cap; LFS import allows 100 GiB per object with unbounded count; only per-request dial (30 s) and header (60 s) timeouts exist, neither bounding the body, and the import runs on the request context with no overall deadline. A huge or slow-loris remote fills the disk or pins goroutines far beyond 60 s.</p>
+        <div class="fix"><b>Fix</b> <code>context.WithTimeout</code> around imports; a total-bytes budget across clone + LFS; lower the per-object cap; a global concurrent-import limit and disk preflight.</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M8</span><span class="card-title">No graceful shutdown; SIGTERM aborts in-flight receive-pack</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>cmd/gitone/main.go:28</b> · correctness</div>
+        <p><code>main()</code> calls <code>log.Fatal(ListenAndServe())</code> with no signal handling and never calls <code>Shutdown()</code>. On <code>docker stop</code>/k8s termination a push is cut mid-write between object storage and ref application, leaving dangling objects and no report-status; API mutations are severed with no draining.</p>
+        <div class="fix"><b>Fix</b> <code>signal.NotifyContext(SIGINT,SIGTERM)</code>, serve in a goroutine, call <code>Shutdown(ctx)</code> with a bounded grace period — mirror the runner.</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M9</span><span class="card-title">Containers run as root; base images pinned only by tag</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>Dockerfile:17</b> · Dockerfile.runner · docker-compose.yml · security</div>
+        <p>Neither Dockerfile declares <code>USER</code>, so both run as UID 0; base images use mutable tags; the runner mounts <code>/var/run/docker.sock</code> as root (root-equivalent on the host). Any RCE/traversal bug yields root with a root-owned <code>/data</code> bind mount; a repointed upstream tag is pulled silently.</p>
+        <div class="fix"><b>Fix</b> Non-root <code>USER</code> with <code>/data</code> owned accordingly; pin bases by sha256 digest; drop docker.sock from the server; read-only rootfs / no-new-privileges.</div>
+      </article>
+
+      <article class="card med">
+        <div class="card-top"><span class="fid">M10</span><span class="card-title">No Content-Security-Policy or security headers on UI/API</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/webui/webui.go:35</b> · security · UI renders user markdown/blobs</div>
+        <p>Responses ship only Content-Type and Cache-Control; DOMPurify at the sink (<code>app.ts:4652</code>) is the sole XSS barrier. A single DOMPurify bypass, missed <code>innerHTML</code> sink, or dependency regression becomes script execution in the authenticated origin with no CSP backstop; missing <code>frame-ancestors</code> allows clickjacking of merge/settings actions.</p>
+        <div class="fix"><b>Fix</b> Header middleware: strict CSP, <code>nosniff</code>, <code>Referrer-Policy: no-referrer</code>, <code>X-Frame-Options: DENY</code>, HSTS over HTTPS.</div>
+      </article>
+    </div>
+
+    <div id="low" class="sev-head low"><h3>Low severity &amp; info</h3><span class="count">14 low · 1 info</span></div>
+    <div class="cards">
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L1</span><span class="card-title">Repository file-path parameter has no depth or length limit</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/httpapi/browser.go:1044</b> · resource-exhaustion</div>
+        <p><code>cleanRepositoryPath</code> rejects traversal/NUL but not length or component count; tree-edit helpers recurse and write a tree object per component. A ~10⁵-component path creates ~10⁵ nested tree objects in one call, with attacker-controlled recursion depth. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> bound length &amp; component count; consider iterative rewrite.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L2</span><span class="card-title">Body slowloris: sliding idle deadline has no absolute cap or connection limit</span><span class="chip verd-plausible">plausible</span></div>
+        <div class="loc"><b>internal/httpio/httpio.go:21</b> · resource-exhaustion</div>
+        <p>The deadline resets on every Read, bounding one blocked read but not total duration; no connection cap. A byte every &lt;30 s holds a goroutine/socket/temp file indefinitely — tempered by auth on heavy paths and Go's tolerance for idle conns. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> absolute per-request deadline / min-throughput; bound in-flight transfers.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L3</span><span class="card-title">Server sets no WriteTimeout or overall request timeout</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>cmd/gitone/main.go:99</b> · resource-exhaustion · backstop for H2/M4/M5</div>
+        <p>No <code>WriteTimeout</code> or per-handler timeout means CPU-bound handlers can't be aborted and slow readers pin connections. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> add <code>WriteTimeout</code> + <code>http.TimeoutHandler</code> (keep streaming on the sliding-deadline path).</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L4</span><span class="card-title">Stateless sessions can't be revoked; logout leaves signed cookies valid</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/auth/session.go:161</b> · security</div>
+        <p>Self-contained securecookies with no server store; a captured cookie stays valid until MaxAge (12 h) despite logout, password change, or account disable. (Authorization changes <em>do</em> apply immediately — the cookie carries identity only.) <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> per-user token version checked against a server counter, or shorter MaxAge; document non-revocability.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L5</span><span class="card-title">Internal go-git error strings echoed to clients</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/httpapi/browser.go:1010</b> · security · information disclosure</div>
+        <p>Handlers pass raw errors to <code>huma.Error*</code>, serializing object IDs, pack/loose state, and filesystem messages into the response body for low-trust callers. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> log server-side, return generic messages for 5xx/not-found on low-trust endpoints.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L6</span><span class="card-title">One bad review record disables all MR listing &amp; mutations repo-wide</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/review/store.go:437</b> · correctness / availability</div>
+        <p><code>listDirectory</code> aborts on the first parse/validate failure, and Create/Update re-list for a duplicate-branch scan — so one corrupt file breaks List, Create, and every open-MR mutation. <code>DisallowUnknownFields</code> also makes newer records unreadable to older binaries. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> skip-and-log bad records; gate strict decoding behind a schema version.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L7</span><span class="card-title">Review writes &amp; directory renames aren't durably fsynced</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/review/store.go:555</b> · correctness</div>
+        <p>The temp file is fsynced but the containing directory is never fsynced after rename. On power loss a lost rename silently reverts an approval/comment/close the API already confirmed; only the merge-in-progress case is reconciled. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> fsync the parent directory after rename; document the durability contract.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L8</span><span class="card-title">Group LFS usage recomputed with a full filesystem walk per request</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/lfs/lfs.go:626</b> · performance · only when a quota is configured</div>
+        <p><code>groupStorageUsage</code> walks the whole objects tree (twice per PUT, under the exclusive group lock) with no cached accounting — O(objects) per request, serializing concurrent PUTs. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> incremental per-group byte counter updated under the existing lock.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L9</span><span class="card-title">Token-key enumeration via Argon2id timing oracle</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/auth/auth.go:62</b> · security · leaks non-secret labels</div>
+        <p>The short-circuiting <code>token.Key != user</code> check gates the expensive Argon2id, so a matching key is measurably slower — a clean latency oracle (no LDAP round-trip for non-email keys) revealing configured automation token identifiers. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> dummy Argon2id on no-match; <code>subtle.ConstantTimeCompare</code> for keys.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L10</span><span class="card-title">LDAP canonical identity case-normalized only for <code>mail</code></span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/auth/ldap.go:232</b> · correctness · config trap</div>
+        <p>For non-<code>mail</code> attributes (uid, sAMAccountName) the directory value is used verbatim as <code>Principal.Name</code>, while member lookups are exact case-sensitive maps — so <code>Alice</code> vs recorded <code>alice</code> misses (fail-closed but confusing). <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> one documented normalization for all attributes; normalize member keys identically.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L11</span><span class="card-title">Session cookie <code>Secure</code> off by default (http public-url default)</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/auth/session.go:38</b> · security</div>
+        <p><code>Secure</code> keys off the <code>-public-url</code> scheme, which defaults to <code>http://localhost:8080</code>, and <code>GITONE_SESSION_SECURE=false</code> can force it off. A TLS-terminating proxy left on the http default plus a downgrade request leaks the cookie. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> default Secure true; refuse false with an https public-url; warn on scheme mismatch.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L12</span><span class="card-title">Dead root <code>ldap.go</code> carries injection &amp; TLS-skip patterns</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>ldap.go:1</b> · maintainability · <code>//go:build ignore</code>, foreign imports</div>
+        <p>A build-excluded copy from another project with an unescaped <code>fmt.Sprintf</code> LDAP filter, sitting misleadingly beside the real, correct authenticator. Not exploitable, but a refactor trap. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> delete it (or move reference material out of the module root, clearly marked).</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L13</span><span class="card-title">Stale foreign source file &amp; unused config package</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>ldap.go:1</b> · internal/config · maintainability</div>
+        <p>The same file is a divergent second LDAP implementation, and <code>internal/config</code> is referenced only by tests while the server configures via flags — dead code obscuring how the server is configured. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> consolidate to one LDAP implementation; remove or wire in <code>internal/config</code>.</span></p>
+      </article>
+
+      <article class="card low">
+        <div class="card-top"><span class="fid">L14</span><span class="card-title">docker-compose ships insecure defaults</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>docker-compose.yml:13</b> · security</div>
+        <p><code>LDAP_SKIP_TLS_VERIFY=true</code> over the password-bearing bind, a published default <code>GITONE_RUNNER_TOKEN</code>, and a host <code>/data</code> mount — with no in-file warning these are dev-only. Dangerous if copied toward production. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> split a labeled dev compose; require LDAP TLS; require a non-default token; fail fast on the known dev value.</span></p>
+      </article>
+
+      <article class="card info">
+        <div class="card-top"><span class="fid">I1</span><span class="card-title"><code>LDAP_SKIP_TLS_VERIFY</code> disables cert verification for credential binds</span><span class="chip verd-confirmed">confirmed</span></div>
+        <div class="loc"><b>internal/auth/ldap.go:117</b> · security · info · operator footgun</div>
+        <p>When set, disables cert validation (defeating ServerName pinning) for ldaps:// and StartTLS while the plaintext simple bind sends the user password — MITM credential capture. <span class="fix" style="display:inline;padding:2px 8px"><b>Fix</b> treat as strictly dev: warn at startup, forbid with an https public-url, steer to <code>LDAP_CA_FILE</code>.</span></p>
+      </article>
+    </div>
+  </section>
+
+  <section id="themes">
+    <h2 class="sec"><span class="idx">04</span> — Cross-cutting themes</h2>
+    <div class="sec-title">The patterns beneath the list</div>
+    <div class="themes">
+      <div class="theme-item"><span class="mk">limits</span><p><b>Missing resource limits is the defining pattern.</b> Over half the findings (H1–H5, M2–M5, M7, L1–L3, L8) are the same story — no cap on time, size, count, concurrency, or growth. Every unbounded quantity ends at the same shared single process.</p></div>
+      <div class="theme-item"><span class="mk">timeouts</span><p><b>No wall-clock request budget anywhere.</b> <code>main.go:99</code> recurs: no ReadTimeout/WriteTimeout/TimeoutHandler, and the expensive handlers ignore <code>ctx</code>. Timeouts plus a connection cap are the single backstop that would blunt H2, H5, M4, M5, L2, and L3 at once.</p></div>
+      <div class="theme-item"><span class="mk">blast&nbsp;radius</span><p><b>Single-process, single-writer.</b> One OOM, one filled disk, one held catalog lock, or one abrupt SIGTERM affects every repo on the storage root. The in-memory <code>lockmgr.Process</code> is also the ceiling on HA and zero-downtime deploys.</p></div>
+      <div class="theme-item"><span class="mk">authz&nbsp;gaps</span><p><b>Gates that aren't authoritative.</b> The MR approval machinery (M6) and the owner-only guard (M1) are carefully written but bypassable — no protected-branch concept, and the guard omits <code>Inherit</code>. The controls exist; their coverage is incomplete.</p></div>
+      <div class="theme-item"><span class="mk">write-first</span><p><b>Optimistic write paths.</b> Receive-pack persists before validating (M3), review writes skip directory fsync (L7), and one bad record bricks the MR store (L6) — a recurring "assume success, crash on failure" theme distinct from the DoS cluster.</p></div>
+      <div class="theme-item"><span class="mk">ops</span><p><b>Deployment hardening is unfinished.</b> Root containers, tag-pinned bases (M9), no security headers (M10), no graceful shutdown (M8), insecure compose/LDAP defaults (L14, I1): application security matured faster than operational packaging.</p></div>
+    </div>
+  </section>
+
+  <section id="value">
+    <h2 class="sec"><span class="idx">05</span> — Extra value to add</h2>
+    <div class="sec-title">Where the product grows — 41 ideas, the strongest below</div>
+    <div class="val-grid">
+
+      <div class="val-col win">
+        <h4><span class="dot"></span>Quick wins</h4>
+        <p class="sub">Small effort, outsized return — several close a finding.</p>
+        <div class="val"><div class="vh"><span class="vname">Rate limiting &amp; brute-force protection</span><span class="tags"><span class="tag">S</span><span class="tag v-high">high</span></span></div><p>In-memory token-bucket by IP/principal + Argon2id concurrency cap. <span class="closes">closes H1</span></p></div>
+        <div class="val"><div class="vh"><span class="vname">Graceful shutdown &amp; draining</span><span class="tags"><span class="tag">S</span><span class="tag v-high">high</span></span></div><p><code>signal.NotifyContext</code> + <code>Shutdown(ctx)</code>. <span class="closes">closes M8</span></p></div>
+        <div class="val"><div class="vh"><span class="vname">Security-header middleware</span><span class="tags"><span class="tag">S</span><span class="tag v-high">high</span></span></div><p>CSP, HSTS, X-Frame-Options, nosniff. <span class="closes">closes M10</span></p></div>
+        <div class="val"><div class="vh"><span class="vname">Request deadlines + connection cap</span><span class="tags"><span class="tag">S</span><span class="tag v-high">high</span></span></div><p><code>TimeoutHandler</code> + <code>MaxBytesReader</code>. <span class="closes">closes H5, L2, L3</span></p></div>
+        <div class="val"><div class="vh"><span class="vname">Readiness endpoint <code>/readyz</code></span><span class="tags"><span class="tag">S</span><span class="tag v-high">high</span></span></div><p>Real LDAP/storage/control checks so LBs don't black-hole traffic.</p></div>
+        <div class="val"><div class="vh"><span class="vname">MR merge gating on CI status</span><span class="tags"><span class="tag">S</span><span class="tag v-high">high</span></span></div><p>Fold head-commit build status into the existing readiness gate.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Multi-arch (arm64) images</span><span class="tags"><span class="tag">S</span><span class="tag">med</span></span></div><p>Add <code>platforms</code> in CI — static builds, no code change.</p></div>
+      </div>
+
+      <div class="val-col impact">
+        <h4><span class="dot"></span>High-impact</h4>
+        <p class="sub">Medium effort, high value.</p>
+        <div class="val"><div class="vh"><span class="vname">Protected branches &amp; push rules</span><span class="tags"><span class="tag">M</span><span class="tag v-high">high</span></span></div><p>Generalize the <code>control.git</code> ref validation. <span class="closes">closes M6</span></p></div>
+        <div class="val"><div class="vh"><span class="vname">Personal access tokens + UI</span><span class="tags"><span class="tag">M</span><span class="tag v-high">high</span></span></div><p>Per-user git-backed store; ends password-in-URL; unblocks SSH/2FA.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Structured logging + panic recovery</span><span class="tags"><span class="tag">M</span><span class="tag v-high">high</span></span></div><p>slog, request IDs; today a nil-deref crashes the whole process.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Prometheus <code>/metrics</code></span><span class="tags"><span class="tag">S–M</span><span class="tag v-high">high</span></span></div><p>RED metrics + queue depth, LFS storage, auth failures.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Audit logging</span><span class="tags"><span class="tag">M</span><span class="tag v-high">high</span></span></div><p>Append-only events from the authz choke points; compliance gate.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Outbound webhooks (HMAC, retried)</span><span class="tags"><span class="tag">M</span><span class="tag v-high">high</span></span></div><p>Highest-leverage integration; event points already exist.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Email notifications (SMTP)</span><span class="tags"><span class="tag">M</span><span class="tag v-high">high</span></span></div><p>Canonical LDAP identity is already an email address.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Backup/restore + DR runbook</span><span class="tags"><span class="tag">M</span><span class="tag v-high">high</span></span></div><p>Consistent snapshot via the catalog lock; verify with git fsck.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Supply-chain hardening</span><span class="tags"><span class="tag">M</span><span class="tag v-high">high</span></span></div><p>SBOM, cosign signing, digest-pinned bases/actions. Complements M9.</p></div>
+        <div class="val"><div class="vh"><span class="vname">SSH transport + Helm chart</span><span class="tags"><span class="tag">L</span><span class="tag v-high">high</span></span></div><p>Expected default transport; k8s chart encodes the single-writer constraint.</p></div>
+      </div>
+
+      <div class="val-col strat">
+        <h4><span class="dot"></span>Strategic</h4>
+        <p class="sub">Large effort, foundational or transformational.</p>
+        <div class="val"><div class="vh"><span class="vname">Cross-process locking (HA)</span><span class="tags"><span class="tag">XL</span><span class="tag v-transformational">transform</span></span></div><p>The hard production ceiling. Phase 1: OS advisory file locks so a 2nd process blocks not corrupts. Phase 2: externalize coordination (Postgres/Redis) behind the existing <code>lockmgr.Request</code> seam.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Issue tracker (labels, milestones)</span><span class="tags"><span class="tag">L</span><span class="tag v-transformational">transform</span></span></div><p>Biggest completeness gap vs. Gitea/Forgejo/GitLab; model on the review package as a <code>&lt;repo&gt;.issues</code> sidecar with <code>Closes #N</code>.</p></div>
+        <div class="val"><div class="vh"><span class="vname">OCI container/package registry</span><span class="tags"><span class="tag">XL</span><span class="tag v-transformational">transform</span></span></div><p>Pairs with built-in CI as a standout differentiator; reuse the sha256-sharded LFS layout &amp; quotas.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Code &amp; repository search</span><span class="tags"><span class="tag">L</span><span class="tag">med</span></span></div><p>Phase 1: authz-filtered name/description. Phase 2: incremental code index (bleve).</p></div>
+        <div class="val"><div class="vh"><span class="vname">Distributed tracing (OTel)</span><span class="tags"><span class="tag">M</span><span class="tag">med</span></span></div><p><code>otelhttp</code> already indirect; makes request-ID logs actionable across LDAP→authz→go-git→LFS.</p></div>
+        <div class="val"><div class="vh"><span class="vname">Rounding-out features</span><span class="tags"><span class="tag">M+</span><span class="tag">med</span></span></div><p>CODEOWNERS, signed-commit verification, TOTP 2FA, releases &amp; artifacts, mirroring, dashboard, teams, LFS locking, config-file secrets, secret rotation, schema migration, TLS termination, CSRF defense-in-depth, log retention.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="roadmap">
+    <h2 class="sec"><span class="idx">06</span> — Suggested roadmap</h2>
+    <div class="sec-title">A sequence, not a backlog</div>
+    <div class="road">
+      <div class="phase">
+        <div class="num"></div>
+        <div>
+          <div class="when">First</div>
+          <h4>Stop the bleeding — harden the single process</h4>
+          <ol>
+            <li><b>Request deadlines</b>, WriteTimeout, TimeoutHandler, MaxBytesReader, connection cap <span class="mono">(H5, L2, L3; blunts H2/M4/M5)</span></li>
+            <li><b>Auth rate limiting</b> + Argon2id concurrency semaphore <span class="mono">(H1)</span></li>
+            <li><b>Cap diff/compare output</b>; make history/reachable walks honor <code>ctx</code> <span class="mono">(H2, M4, M5)</span></li>
+            <li><b>Fix the runner claim</b> to not hold the exclusive lock during scans; add job pruning <span class="mono">(H3)</span></li>
+            <li><b>Sandbox build containers</b>: <code>--network none</code> + cgroup limits + non-root <span class="mono">(H4)</span></li>
+            <li>Graceful shutdown, security headers, <code>/readyz</code> <span class="mono">(M8, M10)</span></li>
+          </ol>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="num"></div>
+        <div>
+          <div class="when">Next</div>
+          <h4>Close authorization &amp; correctness gaps, get observable</h4>
+          <ol>
+            <li><b>Protected branches</b> in both direct-merge and receive-pack (M6); include <code>Inherit</code> in the owner guard (M1)</li>
+            <li>Always reserve LFS staging (M2); quarantine receive-pack objects + GC + git quotas (M3); bound imports (M7)</li>
+            <li>Robustness: fsync review dirs (L7), skip-and-log bad records (L6), bound file-path depth (L1)</li>
+            <li><b>Observability</b>: structured logging + request IDs + panic recovery, Prometheus, audit logging</li>
+            <li>Container/image hardening (M9), personal access tokens, credential-hygiene fixes (L4, L5, L9, L11, L14, I1)</li>
+            <li>Delete dead <code>ldap.go</code> / <code>internal/config</code> leftovers (L12, L13)</li>
+          </ol>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="num"></div>
+        <div>
+          <div class="when">Later</div>
+          <h4>Grow the product &amp; remove the scaling ceiling</h4>
+          <ol>
+            <li><b>Cross-process locking</b> (unlocks HA &amp; zero-downtime), plus Helm chart and backup/restore</li>
+            <li><b>Feature depth</b>: issues, SSH transport, protected-branch-driven CI gating, webhooks, email notifications</li>
+            <li><b>Strategic bets</b>: OCI registry, code search, distributed tracing, and the rounding-out security/DX features</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>GitOne Code Review · 30 findings verified, 0 refuted</span>
+    <span>Full detail committed to <span style="color:var(--accent-ink)">CODE_REVIEW.md</span></span>
+  </div>
+</footer>
+</body>
+</html>
