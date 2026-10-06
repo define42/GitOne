@@ -6,7 +6,7 @@ require (
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/digitalocean/go-libvirt v0.0.0-20260609165003-6254771e63a8
-	github.com/go-git/go-billy/v5 v5.9.1
+	github.com/go-git/go-billy/v5 v5.9.2
 	github.com/go-git/go-git/v5 v5.19.2
 	github.com/go-ldap/ldap/v3 v3.4.14
 	github.com/gorilla/securecookie v1.1.2
